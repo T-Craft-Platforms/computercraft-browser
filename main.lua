@@ -519,7 +519,14 @@ a { color: lightblue; }
 <ul>
 <li>URL bar</li>
 <li>Back / forward history</li>
-<li>Reload</li>
+<li>Reload/abort button while loading</li>
+<li>Tabs with page titles</li>
+<li>Tab close buttons</li>
+<li>Top-left browser close button</li>
+<li>Drag-and-drop tab ordering</li>
+<li>Double-click a tab to show its full title</li>
+<li>Caret mode (F7) for page text selection</li>
+<li>F7 indicator in the URL status area when active</li>
 <li>Mouse wheel and keyboard scrolling</li>
 <li>Clickable links</li>
 </ul>
@@ -534,7 +541,14 @@ a { color: lightblue; }
 <li>Ctrl+L: focus URL bar</li>
 <li>Ctrl+Left and Ctrl+Right: back and forward</li>
 <li>F5 or Ctrl+R: reload</li>
-<li>Esc or Ctrl+Q: quit</li>
+<li>F7: toggle caret mode</li>
+<li>In caret mode, arrows/home/end/page keys move text selection</li>
+<li>Ctrl+A/C/X/V: select all / copy / cut / paste</li>
+<li>Ctrl+T: new tab</li>
+<li>Ctrl+W: close tab</li>
+<li>Ctrl+Tab: next tab</li>
+<li>Esc: abort load (while loading) or quit</li>
+<li>Ctrl+Q: quit</li>
 </ul>
 <p>Try <a href="https://example.com">https://example.com</a>.</p>
 </body>
@@ -1599,64 +1613,420 @@ style, script, head, meta, link, title { display: none; }
     }
 end
 
+local TOP_BAR_ROWS = 2
+
+local function createTab(initialUrl)
+    local startingUrl = initialUrl or "about:blank"
+    return {
+        currentUrl = startingUrl,
+        urlInput = startingUrl,
+        urlCursor = #startingUrl + 1,
+        urlOffset = 0,
+        urlSelStart = nil,
+        urlSelEnd = nil,
+        urlFocus = false,
+        scroll = 0,
+        history = {},
+        historyIndex = 0,
+        document = nil,
+        pageLines = { createEmptyLine() },
+        pageSelection = nil,
+        loading = false,
+        status = "",
+    }
+end
+
 local state = {
-    currentUrl = "about:help",
-    urlInput = "about:help",
-    urlCursor = #"about:help" + 1,
-    urlOffset = 0,
-    urlFocus = false,
-    scroll = 0,
-    history = {},
-    historyIndex = 0,
-    document = nil,
-    pageLines = { createEmptyLine() },
-    loading = false,
-    status = "",
+    tabs = { createTab("about:help") },
+    activeTab = 1,
+    tabDrag = nil,
+    caretMode = false,
+    clipboard = "",
+    skipNextPaste = false,
+    lastTabClick = {
+        index = nil,
+        button = nil,
+        at = 0,
+    },
+    tabNameReveal = nil,
+    tabRevealTimer = nil,
     running = true,
     ctrlDown = false,
+    shiftDown = false,
     ui = {
-        back = { x1 = 1, x2 = 3 },
-        forward = { x1 = 5, x2 = 7 },
-        reload = { x1 = 9, x2 = 11 },
-        url = { x1 = 13, x2 = 13 },
+        tabs = {},
+        tabClose = {},
+        closeBrowser = { x1 = 1, x2 = 1, y = 1 },
+        newTab = { x1 = 1, x2 = 1, y = 1 },
+        back = { x1 = 1, x2 = 3, y = 2 },
+        forward = { x1 = 5, x2 = 7, y = 2 },
+        reload = { x1 = 9, x2 = 11, y = 2 },
+        url = { x1 = 13, x2 = 13, y = 2 },
     },
 }
 
+local function activeTab()
+    if #state.tabs < 1 then
+        state.tabs[1] = createTab("about:blank")
+        state.activeTab = 1
+    end
+    state.activeTab = clamp(state.activeTab, 1, #state.tabs)
+    return state.tabs[state.activeTab]
+end
+
+local function clearUrlSelection(tab)
+    local target = tab or activeTab()
+    target.urlSelStart = nil
+    target.urlSelEnd = nil
+end
+
+local function getUrlSelection(tab)
+    local target = tab or activeTab()
+    if target.urlSelStart == nil or target.urlSelEnd == nil then
+        return nil, nil
+    end
+
+    local maxPos = #target.urlInput + 1
+    local startPos = clamp(target.urlSelStart, 1, maxPos)
+    local endPos = clamp(target.urlSelEnd, 1, maxPos)
+    if startPos > endPos then
+        startPos, endPos = endPos, startPos
+    end
+    if startPos == endPos then
+        return nil, nil
+    end
+    return startPos, endPos
+end
+
+local function getSelectedUrlText(tab)
+    local target = tab or activeTab()
+    local startPos, endPos = getUrlSelection(target)
+    if not startPos then
+        return ""
+    end
+    return target.urlInput:sub(startPos, endPos - 1)
+end
+
+local function deleteUrlSelection(tab)
+    local target = tab or activeTab()
+    local startPos, endPos = getUrlSelection(target)
+    if not startPos then
+        return false
+    end
+
+    local before = target.urlInput:sub(1, startPos - 1)
+    local after = target.urlInput:sub(endPos)
+    target.urlInput = before .. after
+    target.urlCursor = startPos
+    clearUrlSelection(target)
+    return true
+end
+
+local function clearPageSelection(tab)
+    local target = tab or activeTab()
+    target.pageSelection = nil
+end
+
+local function normalizedPageSelection(tab)
+    local target = tab or activeTab()
+    local selection = target.pageSelection
+    if not selection then
+        return nil
+    end
+
+    local startLine = selection.startLine or 1
+    local startCol = selection.startCol or 1
+    local endLine = selection.endLine or startLine
+    local endCol = selection.endCol or startCol
+
+    if (startLine > endLine) or (startLine == endLine and startCol > endCol) then
+        startLine, endLine = endLine, startLine
+        startCol, endCol = endCol, startCol
+    end
+
+    return {
+        startLine = startLine,
+        startCol = startCol,
+        endLine = endLine,
+        endCol = endCol,
+    }
+end
+
+local function pageSelectionContains(selection, lineIndex, column)
+    if not selection then
+        return false
+    end
+    if lineIndex < selection.startLine or lineIndex > selection.endLine then
+        return false
+    end
+    if lineIndex == selection.startLine and column < selection.startCol then
+        return false
+    end
+    if lineIndex == selection.endLine and column > selection.endCol then
+        return false
+    end
+    return true
+end
+
+local function setPageSelection(tab, startLine, startCol, endLine, endCol)
+    local target = tab or activeTab()
+    local w, _ = term.getSize()
+    local maxLine = math.max(1, #target.pageLines)
+
+    target.pageSelection = {
+        startLine = clamp(startLine, 1, maxLine),
+        startCol = clamp(startCol, 1, w),
+        endLine = clamp(endLine, 1, maxLine),
+        endCol = clamp(endCol, 1, w),
+    }
+end
+
+local function selectAllPageText(tab)
+    local target = tab or activeTab()
+    if #target.pageLines < 1 then
+        clearPageSelection(target)
+        return
+    end
+
+    local w, _ = term.getSize()
+    setPageSelection(target, 1, 1, math.max(1, #target.pageLines), w)
+end
+
+local function getSelectedPageText(tab)
+    local target = tab or activeTab()
+    local selection = normalizedPageSelection(target)
+    if not selection then
+        return ""
+    end
+
+    local w, _ = term.getSize()
+    local parts = {}
+    for lineIndex = selection.startLine, selection.endLine do
+        local startCol = (lineIndex == selection.startLine) and selection.startCol or 1
+        local endCol = (lineIndex == selection.endLine) and selection.endCol or w
+        startCol = clamp(startCol, 1, w)
+        endCol = clamp(endCol, 1, w)
+        if endCol < startCol then
+            startCol, endCol = endCol, startCol
+        end
+
+        local line = target.pageLines[lineIndex]
+        local chars = {}
+        for x = startCol, endCol do
+            chars[#chars + 1] = (line and line.chars and line.chars[x]) or " "
+        end
+        parts[#parts + 1] = table.concat(chars):gsub("%s+$", "")
+    end
+
+    return table.concat(parts, "\n")
+end
+
 local function pageHeight()
     local _, h = term.getSize()
-    return math.max(1, h - 1)
+    return math.max(1, h - TOP_BAR_ROWS)
 end
 
-local function maxScroll()
-    return math.max(0, #state.pageLines - pageHeight())
+local function maxScroll(tab)
+    local target = tab or activeTab()
+    return math.max(0, #target.pageLines - pageHeight())
 end
 
-local function setScroll(value)
-    state.scroll = clamp(value, 0, maxScroll())
+local function setScroll(value, tab)
+    local target = tab or activeTab()
+    target.scroll = clamp(value, 0, maxScroll(target))
 end
 
-local function canGoBack()
-    return state.historyIndex > 1
+local function canGoBack(tab)
+    local target = tab or activeTab()
+    return target.historyIndex > 1
 end
 
-local function canGoForward()
-    return state.historyIndex > 0 and state.historyIndex < #state.history
+local function canGoForward(tab)
+    local target = tab or activeTab()
+    return target.historyIndex > 0 and target.historyIndex < #target.history
 end
 
-local function pushHistory(url)
-    for i = #state.history, state.historyIndex + 1, -1 do
-        state.history[i] = nil
+local function pushHistory(tab, url)
+    local target = tab or activeTab()
+    for i = #target.history, target.historyIndex + 1, -1 do
+        target.history[i] = nil
     end
-    table.insert(state.history, url)
-    state.historyIndex = #state.history
+    table.insert(target.history, url)
+    target.historyIndex = #target.history
+end
+
+local function activateTab(index)
+    if #state.tabs < 1 then
+        return
+    end
+    state.activeTab = clamp(index, 1, #state.tabs)
+    state.tabDrag = nil
+end
+
+local function moveTab(fromIndex, toIndex)
+    if fromIndex == toIndex then
+        return
+    end
+    if fromIndex < 1 or fromIndex > #state.tabs then
+        return
+    end
+    if toIndex < 1 or toIndex > #state.tabs then
+        return
+    end
+
+    local moved = table.remove(state.tabs, fromIndex)
+    table.insert(state.tabs, toIndex, moved)
+
+    if state.activeTab == fromIndex then
+        state.activeTab = toIndex
+    elseif fromIndex < state.activeTab and toIndex >= state.activeTab then
+        state.activeTab = state.activeTab - 1
+    elseif fromIndex > state.activeTab and toIndex <= state.activeTab then
+        state.activeTab = state.activeTab + 1
+    end
+    state.tabNameReveal = nil
+end
+
+local function newTab(initialUrl)
+    local tab = createTab(initialUrl or "about:blank")
+    table.insert(state.tabs, tab)
+    activateTab(#state.tabs)
+    return tab
+end
+
+local function closeTab(index)
+    local targetIndex = clamp(index or state.activeTab, 1, #state.tabs)
+    if #state.tabs <= 1 then
+        local tab = activeTab()
+        tab.currentUrl = "about:blank"
+        tab.urlInput = "about:blank"
+        tab.urlCursor = #tab.urlInput + 1
+        tab.urlOffset = 0
+        clearUrlSelection(tab)
+        tab.urlFocus = false
+        tab.scroll = 0
+        tab.history = { "about:blank" }
+        tab.historyIndex = 1
+        tab.document = buildDocument("<html><body></body></html>", "about:blank")
+        tab.pageLines = { createEmptyLine() }
+        clearPageSelection(tab)
+        tab.loading = false
+        tab.status = ""
+        state.tabDrag = nil
+        state.tabNameReveal = nil
+        return
+    end
+
+    table.remove(state.tabs, targetIndex)
+    if targetIndex < state.activeTab then
+        state.activeTab = state.activeTab - 1
+    elseif targetIndex == state.activeTab and state.activeTab > #state.tabs then
+        state.activeTab = #state.tabs
+    end
+    state.activeTab = clamp(state.activeTab, 1, #state.tabs)
+    state.tabDrag = nil
+    state.tabNameReveal = nil
+end
+
+local function closeActiveTab()
+    closeTab(state.activeTab)
+end
+
+local function cycleTabs(direction)
+    if #state.tabs <= 1 then
+        return
+    end
+    local index = state.activeTab + direction
+    if index < 1 then
+        index = #state.tabs
+    elseif index > #state.tabs then
+        index = 1
+    end
+    activateTab(index)
+end
+
+local function tabTitle(tab)
+    if tab.loading then
+        return "Loading..."
+    end
+
+    local title = trim(tab.document and tab.document.title or "")
+    if title ~= "" then
+        return title
+    end
+
+    local url = trim(tab.currentUrl or tab.urlInput or "")
+    if url ~= "" then
+        return url
+    end
+
+    return "New Tab"
 end
 
 local function layoutUi()
     local w, _ = term.getSize()
-    state.ui.back = { x1 = 1, x2 = 3 }
-    state.ui.forward = { x1 = 5, x2 = 7 }
-    state.ui.reload = { x1 = 9, x2 = 11 }
-    state.ui.url = { x1 = 13, x2 = w }
+    state.ui.closeBrowser = { x1 = 1, x2 = 1, y = 1 }
+    state.ui.back = { x1 = 1, x2 = 3, y = 2 }
+    state.ui.forward = { x1 = 5, x2 = 7, y = 2 }
+    state.ui.reload = { x1 = 9, x2 = 11, y = 2 }
+    state.ui.url = { x1 = 13, x2 = w, y = 2 }
+    state.ui.newTab = { x1 = math.max(1, w - 2), x2 = w, y = 1 }
+    state.ui.tabs = {}
+    state.ui.tabClose = {}
+
+    local tabsStart = state.ui.closeBrowser.x2 + 2
+    local tabsEnd = state.ui.newTab.x1 - 1
+    if tabsEnd < tabsStart or #state.tabs < 1 then
+        return
+    end
+
+    local x = tabsStart
+    local minWidth = 1
+    local tabGap = 0
+    local tabCount = #state.tabs
+    local available = tabsEnd - tabsStart + 1
+    local widths = {}
+    local preferredWidths = {}
+    local preferredTotal = 0
+
+    for index = 1, tabCount do
+        local preferred = #tabTitle(state.tabs[index]) + 3
+        preferred = math.max(minWidth, preferred)
+        preferredWidths[index] = preferred
+        preferredTotal = preferredTotal + preferred
+    end
+    preferredTotal = preferredTotal + (tabCount - 1) * tabGap
+
+    if preferredTotal > available then
+        local contentSpace = math.max(tabCount * minWidth, available - ((tabCount - 1) * tabGap))
+        local evenWidth = math.max(minWidth, math.floor(contentSpace / tabCount))
+        local remainder = contentSpace - (evenWidth * tabCount)
+        for index = 1, tabCount do
+            widths[index] = evenWidth + ((index <= remainder) and 1 or 0)
+        end
+    else
+        for index = 1, tabCount do
+            widths[index] = preferredWidths[index]
+        end
+    end
+
+    for index = 1, tabCount do
+        if x > tabsEnd then
+            break
+        end
+        local remaining = tabCount - index + 1
+        local remainingSpace = tabsEnd - x + 1
+        local minForRest = (remaining - 1) * (minWidth + tabGap)
+        local maxForThis = math.max(minWidth, remainingSpace - minForRest)
+        local width = clamp(widths[index] or minWidth, minWidth, maxForThis)
+        local x2 = math.min(tabsEnd, x + width - 1)
+        width = x2 - x + 1
+        state.ui.tabs[index] = { x1 = x, x2 = x2, y = 1, index = index }
+        if width >= 4 then
+            state.ui.tabClose[index] = { x1 = x2, x2 = x2, y = 1, index = index }
+        end
+        x = x2 + 1 + tabGap
+    end
 end
 
 local function writeClipped(x, y, text, textColor, backgroundColor)
@@ -1682,73 +2052,210 @@ local function writeClipped(x, y, text, textColor, backgroundColor)
     term.write(clipped)
 end
 
+local function tabIndexAt(x)
+    for _, region in ipairs(state.ui.tabs) do
+        if x >= region.x1 and x <= region.x2 then
+            return region.index
+        end
+    end
+    return nil
+end
+
+local function tabCloseIndexAt(x)
+    for _, region in pairs(state.ui.tabClose) do
+        if x >= region.x1 and x <= region.x2 then
+            return region.index
+        end
+    end
+    return nil
+end
+
+local function tabLabelLimit(index)
+    local region = state.ui.tabs[index]
+    if not region then
+        return 0
+    end
+
+    local width = region.x2 - region.x1 + 1
+    local closeRegion = state.ui.tabClose[index]
+    if closeRegion then
+        return math.max(0, width - 3)
+    end
+    return math.max(0, width - 1)
+end
+
+local function revealTabName(index)
+    local tabItem = state.tabs[index]
+    if not tabItem then
+        return
+    end
+
+    state.tabNameReveal = {
+        index = index,
+        text = tabTitle(tabItem),
+    }
+    if state.tabRevealTimer and os.cancelTimer then
+        pcall(os.cancelTimer, state.tabRevealTimer)
+    end
+    state.tabRevealTimer = os.startTimer(2)
+end
+
 local function drawTopBar()
     layoutUi()
     local w, _ = term.getSize()
+    local tab = activeTab()
 
     term.setBackgroundColor(colors.gray)
     term.setTextColor(colors.black)
     term.setCursorPos(1, 1)
     term.write(string.rep(" ", w))
+    term.setCursorPos(1, 2)
+    term.write(string.rep(" ", w))
 
-    local function drawButton(region, label, enabled)
-        local bg = enabled and colors.lightGray or colors.gray
-        local fg = enabled and colors.black or colors.lightGray
-        writeClipped(region.x1, 1, "   ", fg, bg)
-        writeClipped(region.x1 + 1, 1, label, fg, bg)
+    writeClipped(state.ui.closeBrowser.x1, state.ui.closeBrowser.y, "x", colors.lightGray, colors.gray)
+
+    for _, region in ipairs(state.ui.tabs) do
+        local tabItem = state.tabs[region.index]
+        local isActive = region.index == state.activeTab
+        local bg = isActive and colors.white or colors.lightGray
+        local fg = isActive and colors.black or colors.gray
+        local width = region.x2 - region.x1 + 1
+        local label = tabTitle(tabItem)
+        local closeRegion = state.ui.tabClose[region.index]
+        local maxLabel = tabLabelLimit(region.index)
+
+        if #label > maxLabel then
+            if maxLabel <= 1 then
+                label = label:sub(1, maxLabel)
+            else
+                label = label:sub(1, maxLabel - 1) .. "~"
+            end
+        end
+
+        if closeRegion then
+            local bodyWidth = math.max(0, width - 2)
+            local body = " " .. label
+            if #body < bodyWidth then
+                body = body .. string.rep(" ", bodyWidth - #body)
+            elseif #body > bodyWidth then
+                body = body:sub(1, bodyWidth)
+            end
+            writeClipped(region.x1, 1, body, fg, bg)
+            writeClipped(region.x1 + bodyWidth, 1, " ", fg, bg)
+            writeClipped(closeRegion.x1, 1, "x", fg, bg)
+        else
+            local body = " " .. label
+            if #body < width then
+                body = body .. string.rep(" ", width - #body)
+            elseif #body > width then
+                body = body:sub(1, width)
+            end
+            writeClipped(region.x1, 1, body, fg, bg)
+        end
     end
 
-    drawButton(state.ui.back, "<", canGoBack())
-    drawButton(state.ui.forward, ">", canGoForward())
-    drawButton(state.ui.reload, "R", state.document ~= nil)
+    local newWidth = state.ui.newTab.x2 - state.ui.newTab.x1 + 1
+    writeClipped(state.ui.newTab.x1, 1, string.rep(" ", newWidth), colors.black, colors.lightGray)
+    local plusX = state.ui.newTab.x1 + math.floor((newWidth - 1) / 2)
+    writeClipped(plusX, 1, "+", colors.black, colors.lightGray)
+
+    local function drawButton(region, label, enabled, active)
+        local bg = colors.gray
+        local fg = colors.lightGray
+        if enabled then
+            bg = active and colors.orange or colors.lightGray
+            fg = colors.black
+        end
+        local width = region.x2 - region.x1 + 1
+        writeClipped(region.x1, region.y, string.rep(" ", width), fg, bg)
+        local labelX = region.x1 + math.floor((width - #label) / 2)
+        writeClipped(labelX, region.y, label, fg, bg)
+    end
+
+    drawButton(state.ui.back, "<", canGoBack(tab), false)
+    drawButton(state.ui.forward, ">", canGoForward(tab), false)
+    drawButton(state.ui.reload, tab.loading and "X" or "R", tab.loading or tab.document ~= nil, tab.loading)
 
     if state.ui.url.x1 <= state.ui.url.x2 then
+        local urlFieldBg = colors.lightGray
+        local urlFieldFg = colors.black
         local fieldWidth = state.ui.url.x2 - state.ui.url.x1 + 1
-        local cursor = clamp(state.urlCursor, 1, #state.urlInput + 1)
-        state.urlCursor = cursor
+        local cursor = clamp(tab.urlCursor, 1, #tab.urlInput + 1)
+        tab.urlCursor = cursor
 
-        if cursor - state.urlOffset > fieldWidth then
-            state.urlOffset = cursor - fieldWidth
+        if cursor - tab.urlOffset > fieldWidth then
+            tab.urlOffset = cursor - fieldWidth
         end
-        if cursor <= state.urlOffset then
-            state.urlOffset = cursor - 1
+        if cursor <= tab.urlOffset then
+            tab.urlOffset = cursor - 1
         end
-        if state.urlOffset < 0 then
-            state.urlOffset = 0
+        if tab.urlOffset < 0 then
+            tab.urlOffset = 0
         end
 
-        local visible = state.urlInput:sub(state.urlOffset + 1, state.urlOffset + fieldWidth)
+        local visible = tab.urlInput:sub(tab.urlOffset + 1, tab.urlOffset + fieldWidth)
         if #visible < fieldWidth then
             visible = visible .. string.rep(" ", fieldWidth - #visible)
         end
 
-        writeClipped(state.ui.url.x1, 1, visible, colors.black, colors.white)
+        writeClipped(state.ui.url.x1, 2, visible, urlFieldFg, urlFieldBg)
 
-        local title = state.document and state.document.title or ""
-        if title ~= "" and fieldWidth >= 12 and not state.urlFocus then
-            local suffix = " " .. title
-            if #suffix < fieldWidth then
-                local titleStart = state.ui.url.x2 - #suffix + 1
-                writeClipped(titleStart, 1, suffix, colors.gray, colors.white)
+        local selStart, selEnd = getUrlSelection(tab)
+        if selStart then
+            local visibleStart = tab.urlOffset + 1
+            local visibleEnd = tab.urlOffset + fieldWidth
+            local drawStart = math.max(selStart, visibleStart)
+            local drawEnd = math.min(selEnd - 1, visibleEnd)
+            for charIndex = drawStart, drawEnd do
+                local relative = charIndex - visibleStart + 1
+                local cursorX = state.ui.url.x1 + relative - 1
+                local ch = visible:sub(relative, relative)
+                if ch == "" then
+                    ch = " "
+                end
+                writeClipped(cursorX, 2, ch, colors.white, colors.blue)
             end
         end
 
-        if state.loading then
+        local reveal = state.tabNameReveal
+        if reveal and reveal.index == state.activeTab and not tab.urlFocus then
+            local revealText = reveal.text or tabTitle(tab)
+            local revealPadded = " " .. revealText
+            if #revealPadded < fieldWidth then
+                revealPadded = revealPadded .. string.rep(" ", fieldWidth - #revealPadded)
+            end
+            writeClipped(state.ui.url.x1, 2, revealPadded, colors.white, colors.blue)
+        end
+
+        local rightEdge = state.ui.url.x2
+        if tab.loading then
             local loadingLabel = " loading "
-            writeClipped(math.max(state.ui.url.x1, state.ui.url.x2 - #loadingLabel + 1), 1, loadingLabel, colors.yellow, colors.gray)
+            local startX = math.max(state.ui.url.x1, rightEdge - #loadingLabel + 1)
+            writeClipped(startX, 2, loadingLabel, colors.yellow, colors.gray)
+            rightEdge = startX - 1
         end
 
-        if state.urlFocus and not state.loading then
-            local cursorX = state.ui.url.x1 + cursor - state.urlOffset - 1
-            if cursorX >= state.ui.url.x1 and cursorX <= state.ui.url.x2 then
-                term.setCursorPos(cursorX, 1)
-                term.setCursorBlink(true)
-            else
-                term.setCursorBlink(false)
-            end
-        else
-            term.setCursorBlink(false)
+        if state.caretMode and rightEdge >= state.ui.url.x1 then
+            local caretLabel = " F7 "
+            local caretX = math.max(state.ui.url.x1, rightEdge - #caretLabel + 1)
+            writeClipped(caretX, 2, caretLabel, colors.black, colors.lime)
         end
+
+        local cursorVisible = false
+        if tab.urlFocus then
+            local offset = cursor - tab.urlOffset
+            local cursorX = state.ui.url.x1 + offset - 1
+            if cursorX >= state.ui.url.x1 and cursorX <= state.ui.url.x2 then
+                local cursorChar = visible:sub(offset, offset)
+                if cursorChar == "" then
+                    cursorChar = " "
+                end
+                writeClipped(cursorX, 2, cursorChar, colors.black, colors.white)
+                term.setCursorPos(cursorX, 2)
+                cursorVisible = true
+            end
+        end
+        term.setCursorBlink(cursorVisible)
     else
         term.setCursorBlink(false)
     end
@@ -1756,11 +2263,14 @@ end
 
 local function drawPage()
     local w, h = term.getSize()
-    local firstLine = state.scroll + 1
-    local visibleHeight = math.max(1, h - 1)
+    local tab = activeTab()
+    local firstLine = tab.scroll + 1
+    local visibleHeight = math.max(1, h - TOP_BAR_ROWS)
+    local selection = state.caretMode and normalizedPageSelection(tab) or nil
 
     for row = 1, visibleHeight do
-        local line = state.pageLines[firstLine + row - 1]
+        local lineIndex = firstLine + row - 1
+        local line = tab.pageLines[lineIndex]
         local chars = {}
         local fgs = {}
         local bgs = {}
@@ -1773,11 +2283,15 @@ local function drawPage()
                 fg = line.fg[x] or colors.white
                 bg = line.bg[x] or colors.black
             end
+            if selection and pageSelectionContains(selection, lineIndex, x) then
+                fg = colors.white
+                bg = colors.blue
+            end
             chars[x] = ch
             fgs[x] = colors.toBlit(fg)
             bgs[x] = colors.toBlit(bg)
         end
-        term.setCursorPos(1, row + 1)
+        term.setCursorPos(1, row + TOP_BAR_ROWS)
         term.blit(table.concat(chars), table.concat(fgs), table.concat(bgs))
     end
 end
@@ -1787,10 +2301,11 @@ local function draw()
     drawPage()
 end
 
-local function renderDocument()
-    if not state.document then
-        state.pageLines = { createEmptyLine() }
-        setScroll(0)
+local function renderDocument(tab)
+    local target = tab or activeTab()
+    if not target.document then
+        target.pageLines = { createEmptyLine() }
+        setScroll(0, target)
         return
     end
 
@@ -1809,9 +2324,9 @@ local function renderDocument()
         paddingRight = 0,
     }
 
-    local bodyNode = findFirstTag(state.document.root, "body")
+    local bodyNode = findFirstTag(target.document.root, "body")
     if bodyNode then
-        local bodyStyle = computeStyle(bodyNode, baseStyle, state.document.rules)
+        local bodyStyle = computeStyle(bodyNode, baseStyle, target.document.rules)
         baseStyle.fg = bodyStyle.fg or baseStyle.fg
         baseStyle.bg = bodyStyle.bg or baseStyle.bg
     end
@@ -1821,207 +2336,632 @@ local function renderDocument()
         currentHref = nil,
         listStack = {},
     }
-    local renderRoot = bodyNode or findFirstTag(state.document.root, "html") or state.document.root
-    renderNode(renderRoot, baseStyle, state.document.rules, writer, context, state.document.baseUrl)
+    local renderRoot = bodyNode or findFirstTag(target.document.root, "html") or target.document.root
+    renderNode(renderRoot, baseStyle, target.document.rules, writer, context, target.document.baseUrl)
     trimTrailingBlankLines(writer.lines)
-    state.pageLines = writer.lines
-    setScroll(state.scroll)
+    target.pageLines = writer.lines
+    setScroll(target.scroll, target)
 end
 
 -- SECTION: navigation
 
-local function navigate(rawInput, addToHistory, allowFallback)
+local function hitRegion(x, y, region)
+    if not region then
+        return false
+    end
+    local regionY = region.y or 1
+    return y == regionY and x >= region.x1 and x <= region.x2
+end
+
+local function loadDocumentWithAbort(tab, normalized, allowFallback)
+    if not parallel or not parallel.waitForAny then
+        local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback)
+        if not body then
+            finalUrl = normalized
+            body = makeErrorPage(finalUrl, err or "Unknown error")
+            headers = { ["Content-Type"] = "text/html" }
+        end
+
+        local contentType = getHeader(headers, "Content-Type") or ""
+        if not looksLikeHtml(body, contentType) then
+            body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
+        end
+
+        return {
+            finalUrl = finalUrl,
+            document = buildDocument(body, finalUrl),
+        }, false
+    end
+
+    local result = nil
+    local done = false
+    local aborted = false
+
+    local function loadTask()
+        local ok, errMsg = pcall(function()
+            local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback)
+            if not body then
+                finalUrl = normalized
+                body = makeErrorPage(finalUrl, err or "Unknown error")
+                headers = { ["Content-Type"] = "text/html" }
+            end
+
+            local contentType = getHeader(headers, "Content-Type") or ""
+            if not looksLikeHtml(body, contentType) then
+                body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
+            end
+
+            result = {
+                finalUrl = finalUrl,
+                document = buildDocument(body, finalUrl),
+            }
+        end)
+
+        if not ok then
+            local safeError = tostring(errMsg)
+            local finalUrl = normalized
+            local body = makeErrorPage(finalUrl, safeError)
+            result = {
+                finalUrl = finalUrl,
+                document = buildDocument(body, finalUrl),
+            }
+        end
+
+        done = true
+    end
+
+    local function watchTask()
+        while not done do
+            local event = { os.pullEvent() }
+            local name = event[1]
+            if name == "mouse_click" then
+                local x = event[3]
+                local y = event[4]
+                if tab == activeTab() and hitRegion(x, y, state.ui.reload) then
+                    aborted = true
+                    return
+                end
+            elseif name == "key" then
+                if event[2] == keys.escape then
+                    aborted = true
+                    return
+                end
+            elseif name == "term_resize" then
+                renderDocument(activeTab())
+                draw()
+            end
+        end
+    end
+
+    parallel.waitForAny(loadTask, watchTask)
+    return result, aborted
+end
+
+local function navigate(rawInput, addToHistory, allowFallback, tab)
+    local target = tab or activeTab()
     local normalized, inferred = normalizeInputUrl(rawInput)
 
-    state.loading = true
-    state.status = "Loading " .. normalized
-    state.urlInput = normalized
-    state.urlCursor = #state.urlInput + 1
+    target.loading = true
+    target.status = "Loading " .. normalized
+    target.urlInput = normalized
+    target.urlCursor = #target.urlInput + 1
+    target.urlOffset = 0
+    clearUrlSelection(target)
     draw()
 
-    local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback or inferred)
-    if not body then
-        finalUrl = normalized
-        body = makeErrorPage(finalUrl, err or "Unknown error")
-        headers = { ["Content-Type"] = "text/html" }
+    local result, aborted = loadDocumentWithAbort(target, normalized, allowFallback or inferred)
+    target.loading = false
+    if aborted then
+        target.status = "Load aborted"
+        draw()
+        return false
     end
 
-    local contentType = getHeader(headers, "Content-Type") or ""
-    if not looksLikeHtml(body, contentType) then
-        body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
+    local finalUrl = normalized
+    local document = nil
+    if result then
+        finalUrl = result.finalUrl or finalUrl
+        if result.document then
+            document = result.document
+        end
+    end
+    if not document then
+        document = buildDocument(makeErrorPage(normalized, "Unknown error"), normalized)
     end
 
-    state.document = buildDocument(body, finalUrl)
-    state.currentUrl = finalUrl
-    state.urlInput = finalUrl
-    state.urlCursor = #state.urlInput + 1
-    state.urlOffset = 0
-    state.loading = false
-    state.status = state.document.title or ""
-    state.urlFocus = false
+    target.document = document
+    target.currentUrl = finalUrl
+    target.urlInput = finalUrl
+    target.urlCursor = #target.urlInput + 1
+    target.urlOffset = 0
+    target.status = target.document.title or ""
+    target.urlFocus = false
+    clearUrlSelection(target)
+    clearPageSelection(target)
 
     if addToHistory then
-        pushHistory(finalUrl)
-    elseif state.historyIndex > 0 then
-        state.history[state.historyIndex] = finalUrl
+        pushHistory(target, finalUrl)
+    elseif target.historyIndex > 0 then
+        target.history[target.historyIndex] = finalUrl
     else
-        pushHistory(finalUrl)
+        pushHistory(target, finalUrl)
     end
 
-    state.scroll = 0
-    renderDocument()
+    target.scroll = 0
+    renderDocument(target)
     draw()
+    return true
 end
 
 local function goBack()
-    if not canGoBack() then
+    local tab = activeTab()
+    if not canGoBack(tab) then
         return
     end
-    state.historyIndex = state.historyIndex - 1
-    navigate(state.history[state.historyIndex], false, false)
+    tab.historyIndex = tab.historyIndex - 1
+    navigate(tab.history[tab.historyIndex], false, false, tab)
 end
 
 local function goForward()
-    if not canGoForward() then
+    local tab = activeTab()
+    if not canGoForward(tab) then
         return
     end
-    state.historyIndex = state.historyIndex + 1
-    navigate(state.history[state.historyIndex], false, false)
+    tab.historyIndex = tab.historyIndex + 1
+    navigate(tab.history[tab.historyIndex], false, false, tab)
 end
 
 local function reloadPage()
-    if not state.currentUrl then
+    local tab = activeTab()
+    if tab.loading then
         return
     end
-    navigate(state.currentUrl, false, false)
+    if not tab.currentUrl then
+        return
+    end
+    navigate(tab.currentUrl, false, false, tab)
 end
 
 -- SECTION: events
 
 local function insertUrlText(text)
-    if not state.urlFocus then
+    local tab = activeTab()
+    if not tab.urlFocus then
         return
     end
-    local before = state.urlInput:sub(1, state.urlCursor - 1)
-    local after = state.urlInput:sub(state.urlCursor)
-    state.urlInput = before .. text .. after
-    state.urlCursor = state.urlCursor + #text
+    deleteUrlSelection(tab)
+    local before = tab.urlInput:sub(1, tab.urlCursor - 1)
+    local after = tab.urlInput:sub(tab.urlCursor)
+    tab.urlInput = before .. text .. after
+    tab.urlCursor = tab.urlCursor + #text
+    clearUrlSelection(tab)
 end
 
 local function deleteUrlBack()
-    if state.urlCursor <= 1 then
+    local tab = activeTab()
+    if deleteUrlSelection(tab) then
         return
     end
-    local before = state.urlInput:sub(1, state.urlCursor - 2)
-    local after = state.urlInput:sub(state.urlCursor)
-    state.urlInput = before .. after
-    state.urlCursor = state.urlCursor - 1
+    if tab.urlCursor <= 1 then
+        return
+    end
+    local before = tab.urlInput:sub(1, tab.urlCursor - 2)
+    local after = tab.urlInput:sub(tab.urlCursor)
+    tab.urlInput = before .. after
+    tab.urlCursor = tab.urlCursor - 1
 end
 
 local function deleteUrlForward()
-    if state.urlCursor > #state.urlInput then
+    local tab = activeTab()
+    if deleteUrlSelection(tab) then
         return
     end
-    local before = state.urlInput:sub(1, state.urlCursor - 1)
-    local after = state.urlInput:sub(state.urlCursor + 1)
-    state.urlInput = before .. after
+    if tab.urlCursor > #tab.urlInput then
+        return
+    end
+    local before = tab.urlInput:sub(1, tab.urlCursor - 1)
+    local after = tab.urlInput:sub(tab.urlCursor + 1)
+    tab.urlInput = before .. after
 end
 
-local function hitRegion(x, region)
-    return x >= region.x1 and x <= region.x2
+local function handleTabClick(button, x)
+    if hitRegion(x, 1, state.ui.closeBrowser) then
+        state.running = false
+        return
+    end
+
+    if hitRegion(x, 1, state.ui.newTab) then
+        local tab = newTab("about:blank")
+        navigate("about:blank", true, false, tab)
+        tab.urlFocus = true
+        tab.urlCursor = #tab.urlInput + 1
+        clearUrlSelection(tab)
+        return
+    end
+
+    if button == 1 then
+        local closeIndex = tabCloseIndexAt(x)
+        if closeIndex then
+            closeTab(closeIndex)
+            return
+        end
+    end
+
+    local index = tabIndexAt(x)
+    if not index then
+        local tab = activeTab()
+        tab.urlFocus = false
+        clearUrlSelection(tab)
+        return
+    end
+
+    activateTab(index)
+    clearUrlSelection(activeTab())
+    local now = os.clock()
+    local wasDoubleClick = button == 1
+        and state.lastTabClick.button == button
+        and state.lastTabClick.index == index
+        and (now - (state.lastTabClick.at or 0)) <= 0.35
+    state.lastTabClick = {
+        index = index,
+        button = button,
+        at = now,
+    }
+
+    if wasDoubleClick then
+        revealTabName(index)
+    end
+
+    if button == 1 then
+        state.tabDrag = { button = button, index = index }
+    end
 end
 
-local function handleMouseClick(_, x, y)
+local function handleToolbarClick(x)
+    local tab = activeTab()
+    if hitRegion(x, 2, state.ui.back) then
+        goBack()
+        return
+    end
+    if hitRegion(x, 2, state.ui.forward) then
+        goForward()
+        return
+    end
+    if hitRegion(x, 2, state.ui.reload) then
+        reloadPage()
+        return
+    end
+    if hitRegion(x, 2, state.ui.url) then
+        tab.urlFocus = true
+        local pos = tab.urlOffset + (x - state.ui.url.x1) + 1
+        tab.urlCursor = clamp(pos, 1, #tab.urlInput + 1)
+        clearUrlSelection(tab)
+        return
+    end
+    tab.urlFocus = false
+    clearUrlSelection(tab)
+end
+
+local function handleMouseClick(button, x, y)
+    layoutUi()
+
     if y == 1 then
-        if hitRegion(x, state.ui.back) then
-            goBack()
-            return
-        end
-        if hitRegion(x, state.ui.forward) then
-            goForward()
-            return
-        end
-        if hitRegion(x, state.ui.reload) then
-            reloadPage()
-            return
-        end
-        if hitRegion(x, state.ui.url) then
-            state.urlFocus = true
-            local pos = state.urlOffset + (x - state.ui.url.x1) + 1
-            state.urlCursor = clamp(pos, 1, #state.urlInput + 1)
-            return
-        end
-        state.urlFocus = false
+        handleTabClick(button, x)
         return
     end
 
-    state.urlFocus = false
-    local lineIndex = state.scroll + (y - 1)
-    local line = state.pageLines[lineIndex]
+    if y == 2 then
+        handleToolbarClick(x)
+        return
+    end
+
+    local tab = activeTab()
+    tab.urlFocus = false
+    clearUrlSelection(tab)
+
+    local w, _ = term.getSize()
+    local lineIndex = clamp(tab.scroll + (y - TOP_BAR_ROWS), 1, math.max(1, #tab.pageLines))
+    local column = clamp(x, 1, w)
+    if state.caretMode then
+        if button == 1 then
+            setPageSelection(tab, lineIndex, column, lineIndex, column)
+        end
+        return
+    end
+
+    clearPageSelection(tab)
+    local line = tab.pageLines[lineIndex]
     local href = line and line.links and line.links[x] or nil
     if href then
-        navigate(href, true, false)
+        navigate(href, true, false, tab)
+    end
+end
+
+local function handleMouseDrag(button, x, y)
+    if state.tabDrag and state.tabDrag.button == button then
+        if y ~= 1 then
+            return
+        end
+
+        layoutUi()
+        local target = tabIndexAt(x)
+        if not target then
+            if x < 1 then
+                target = 1
+            elseif x > state.ui.newTab.x1 then
+                target = #state.tabs
+            end
+        end
+
+        if target and target ~= state.tabDrag.index then
+            moveTab(state.tabDrag.index, target)
+            state.tabDrag.index = target
+            layoutUi()
+        end
+        return
+    end
+
+    if not state.caretMode then
+        return
+    end
+    if button ~= 1 or y <= TOP_BAR_ROWS then
+        return
+    end
+
+    local tab = activeTab()
+    if not tab.pageSelection then
+        return
+    end
+
+    local w, _ = term.getSize()
+    local lineIndex = clamp(tab.scroll + (y - TOP_BAR_ROWS), 1, math.max(1, #tab.pageLines))
+    local column = clamp(x, 1, w)
+    tab.pageSelection.endLine = lineIndex
+    tab.pageSelection.endCol = column
+end
+
+local function handleMouseUp(button, _, _)
+    if state.tabDrag and state.tabDrag.button == button then
+        state.tabDrag = nil
     end
 end
 
 local function handleMouseScroll(direction, _, y)
-    if y <= 1 then
+    if y <= TOP_BAR_ROWS then
         return
     end
-    setScroll(state.scroll + direction)
+    local tab = activeTab()
+    setScroll(tab.scroll + direction, tab)
 end
 
 local function focusUrlBar()
-    state.urlFocus = true
-    state.urlCursor = #state.urlInput + 1
+    local tab = activeTab()
+    tab.urlFocus = true
+    tab.urlCursor = #tab.urlInput + 1
+    clearUrlSelection(tab)
 end
 
 local function handleUrlKey(key)
+    local tab = activeTab()
     if key == keys.enter then
-        navigate(state.urlInput, true, true)
+        navigate(tab.urlInput, true, true, tab)
     elseif key == keys.left then
-        state.urlCursor = clamp(state.urlCursor - 1, 1, #state.urlInput + 1)
+        local startPos, _ = getUrlSelection(tab)
+        if startPos then
+            tab.urlCursor = startPos
+            clearUrlSelection(tab)
+        else
+            tab.urlCursor = clamp(tab.urlCursor - 1, 1, #tab.urlInput + 1)
+        end
     elseif key == keys.right then
-        state.urlCursor = clamp(state.urlCursor + 1, 1, #state.urlInput + 1)
+        local _, endPos = getUrlSelection(tab)
+        if endPos then
+            tab.urlCursor = endPos
+            clearUrlSelection(tab)
+        else
+            tab.urlCursor = clamp(tab.urlCursor + 1, 1, #tab.urlInput + 1)
+        end
     elseif key == keys.home then
-        state.urlCursor = 1
+        tab.urlCursor = 1
+        clearUrlSelection(tab)
     elseif key == keys["end"] then
-        state.urlCursor = #state.urlInput + 1
+        tab.urlCursor = #tab.urlInput + 1
+        clearUrlSelection(tab)
     elseif key == keys.backspace then
         deleteUrlBack()
     elseif key == keys.delete then
         deleteUrlForward()
     elseif key == keys.escape then
-        state.urlFocus = false
-        state.urlInput = state.currentUrl
-        state.urlCursor = #state.urlInput + 1
+        tab.urlFocus = false
+        tab.urlInput = tab.currentUrl
+        tab.urlCursor = #tab.urlInput + 1
+        clearUrlSelection(tab)
     end
 end
 
 local function handleNavigationKey(key)
+    local tab = activeTab()
+    if state.caretMode then
+        local w, _ = term.getSize()
+        local maxLine = math.max(1, #tab.pageLines)
+        local selection = tab.pageSelection
+        if not selection then
+            local startLine = clamp(tab.scroll + 1, 1, maxLine)
+            selection = {
+                startLine = startLine,
+                startCol = 1,
+                endLine = startLine,
+                endCol = 1,
+            }
+            tab.pageSelection = selection
+        end
+
+        local line = clamp(selection.endLine or 1, 1, maxLine)
+        local col = clamp(selection.endCol or 1, 1, w)
+        local newLine = line
+        local newCol = col
+
+        if key == keys.left then
+            newCol = col - 1
+            if newCol < 1 then
+                newLine = math.max(1, line - 1)
+                newCol = w
+            end
+        elseif key == keys.right then
+            newCol = col + 1
+            if newCol > w then
+                newLine = math.min(maxLine, line + 1)
+                newCol = 1
+            end
+        elseif key == keys.up then
+            newLine = line - 1
+        elseif key == keys.down then
+            newLine = line + 1
+        elseif key == keys.pageUp then
+            newLine = line - pageHeight()
+        elseif key == keys.pageDown then
+            newLine = line + pageHeight()
+        elseif key == keys.home then
+            newCol = 1
+        elseif key == keys["end"] then
+            newCol = w
+        else
+            return
+        end
+
+        newLine = clamp(newLine, 1, maxLine)
+        newCol = clamp(newCol, 1, w)
+        if state.shiftDown then
+            selection.endLine = newLine
+            selection.endCol = newCol
+        else
+            selection.startLine = newLine
+            selection.startCol = newCol
+            selection.endLine = newLine
+            selection.endCol = newCol
+        end
+
+        local visibleTop = tab.scroll + 1
+        local visibleBottom = tab.scroll + pageHeight()
+        if newLine < visibleTop then
+            setScroll(newLine - 1, tab)
+        elseif newLine > visibleBottom then
+            setScroll(newLine - pageHeight(), tab)
+        end
+        return
+    end
+
     if key == keys.up then
-        setScroll(state.scroll - 1)
+        setScroll(tab.scroll - 1, tab)
     elseif key == keys.down then
-        setScroll(state.scroll + 1)
+        setScroll(tab.scroll + 1, tab)
     elseif key == keys.pageUp then
-        setScroll(state.scroll - pageHeight())
+        setScroll(tab.scroll - pageHeight(), tab)
     elseif key == keys.pageDown then
-        setScroll(state.scroll + pageHeight())
+        setScroll(tab.scroll + pageHeight(), tab)
     elseif key == keys.home then
-        setScroll(0)
+        setScroll(0, tab)
     elseif key == keys["end"] then
-        setScroll(maxScroll())
+        setScroll(maxScroll(tab), tab)
     end
 end
 
+local function selectAllText()
+    local tab = activeTab()
+    if tab.urlFocus then
+        tab.urlSelStart = 1
+        tab.urlSelEnd = #tab.urlInput + 1
+        tab.urlCursor = #tab.urlInput + 1
+        return true
+    end
+
+    if state.caretMode then
+        selectAllPageText(tab)
+        return true
+    end
+
+    return false
+end
+
+local function copySelectedText()
+    local tab = activeTab()
+    local text = ""
+    if tab.urlFocus then
+        text = getSelectedUrlText(tab)
+    elseif state.caretMode then
+        text = getSelectedPageText(tab)
+    end
+
+    if text ~= "" then
+        state.clipboard = text
+        return true
+    end
+    return false
+end
+
+local function cutSelectedText()
+    local tab = activeTab()
+    if tab.urlFocus then
+        local text = getSelectedUrlText(tab)
+        if text == "" then
+            return false
+        end
+        state.clipboard = text
+        deleteUrlSelection(tab)
+        return true
+    end
+
+    if state.caretMode then
+        local text = getSelectedPageText(tab)
+        if text == "" then
+            return false
+        end
+        state.clipboard = text
+        return true
+    end
+
+    return false
+end
+
+local function pasteClipboardText()
+    local tab = activeTab()
+    if not tab.urlFocus then
+        return false
+    end
+    if state.clipboard == nil or state.clipboard == "" then
+        return false
+    end
+
+    insertUrlText(state.clipboard)
+    state.skipNextPaste = true
+    return true
+end
+
 local function handleKeyDown(key)
+    if key ~= keys.v then
+        state.skipNextPaste = false
+    end
+
     if key == keys.leftCtrl or key == keys.rightCtrl then
         state.ctrlDown = true
+        return
+    end
+    if key == keys.leftShift or key == keys.rightShift then
+        state.shiftDown = true
         return
     end
 
     if key == keys.f5 then
         reloadPage()
+        return
+    end
+    if key == keys.f7 then
+        state.caretMode = not state.caretMode
+        if not state.caretMode then
+            for _, tabItem in ipairs(state.tabs) do
+                clearPageSelection(tabItem)
+            end
+        end
         return
     end
 
@@ -2032,6 +2972,38 @@ local function handleKeyDown(key)
         end
         if key == keys.r then
             reloadPage()
+            return
+        end
+        if key == keys.a then
+            selectAllText()
+            return
+        end
+        if key == keys.c then
+            copySelectedText()
+            return
+        end
+        if key == keys.x then
+            cutSelectedText()
+            return
+        end
+        if key == keys.v then
+            pasteClipboardText()
+            return
+        end
+        if key == keys.t then
+            local tab = newTab("about:blank")
+            navigate("about:blank", true, false, tab)
+            tab.urlFocus = true
+            tab.urlCursor = #tab.urlInput + 1
+            clearUrlSelection(tab)
+            return
+        end
+        if key == keys.w then
+            closeActiveTab()
+            return
+        end
+        if key == keys.tab then
+            cycleTabs(1)
             return
         end
         if key == keys.q then
@@ -2048,15 +3020,19 @@ local function handleKeyDown(key)
         end
     end
 
+    local tab = activeTab()
     if key == keys.tab then
-        state.urlFocus = not state.urlFocus
-        if state.urlFocus then
-            state.urlCursor = #state.urlInput + 1
+        tab.urlFocus = not tab.urlFocus
+        if tab.urlFocus then
+            tab.urlCursor = #tab.urlInput + 1
+            clearUrlSelection(tab)
+        else
+            clearUrlSelection(tab)
         end
         return
     end
 
-    if state.urlFocus then
+    if tab.urlFocus then
         handleUrlKey(key)
         return
     end
@@ -2072,39 +3048,79 @@ end
 local function handleKeyUp(key)
     if key == keys.leftCtrl or key == keys.rightCtrl then
         state.ctrlDown = false
+    elseif key == keys.leftShift or key == keys.rightShift then
+        state.shiftDown = false
+    end
+end
+
+local function handleTimer(timerId)
+    if state.tabRevealTimer and timerId == state.tabRevealTimer then
+        state.tabRevealTimer = nil
+        state.tabNameReveal = nil
     end
 end
 
 local function handleChar(character)
-    if state.urlFocus then
+    if activeTab().urlFocus then
         insertUrlText(character)
     end
 end
 
 local function handlePaste(text)
-    if state.urlFocus then
+    if state.skipNextPaste then
+        state.skipNextPaste = false
+        return
+    end
+    if activeTab().urlFocus then
         insertUrlText(text)
+        if text and text ~= "" then
+            state.clipboard = text
+        end
     end
 end
 
 -- SECTION: entrypoint
 
-local function bootstrap()
+local function bootstrap(initialUrls)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.clear()
     term.setCursorPos(1, 1)
-    navigate("about:help", true, false)
+
+    if not initialUrls or #initialUrls == 0 then
+        navigate("about:help", true, false, activeTab())
+        return
+    end
+
+    for i, url in ipairs(initialUrls) do
+        local tab = nil
+        if i == 1 then
+            tab = activeTab()
+        else
+            tab = newTab("about:blank")
+        end
+        navigate(url, true, true, tab)
+    end
+    activateTab(1)
+    draw()
 end
 
-local function main()
-    bootstrap()
+local function main(...)
+    local initialUrls = { ... }
+    bootstrap(initialUrls)
     while state.running do
         local event = { os.pullEvent() }
         local name = event[1]
+        if state.skipNextPaste and name ~= "paste" and name ~= "key_up" then
+            state.skipNextPaste = false
+        end
 
         if name == "mouse_click" then
             handleMouseClick(event[2], event[3], event[4])
+        elseif name == "mouse_drag" then
+            handleMouseDrag(event[2], event[3], event[4])
+        elseif name == "mouse_up" then
+            handleMouseUp(event[2], event[3], event[4])
         elseif name == "mouse_scroll" then
             handleMouseScroll(event[2], event[3], event[4])
         elseif name == "key" then
@@ -2115,8 +3131,10 @@ local function main()
             handleChar(event[2])
         elseif name == "paste" then
             handlePaste(event[2])
+        elseif name == "timer" then
+            handleTimer(event[2])
         elseif name == "term_resize" then
-            renderDocument()
+            renderDocument(activeTab())
         end
 
         draw()
@@ -2130,7 +3148,7 @@ local function main()
     print(APP_TITLE .. " closed")
 end
 
-local ok, err = pcall(main)
+local ok, err = pcall(main, ...)
 if not ok then
     term.setCursorBlink(false)
     term.setBackgroundColor(colors.black)
