@@ -228,6 +228,12 @@ return function(deps)
         local prop = trim((property or ""):lower())
         local raw = trim(value or "")
         local lower = raw:lower()
+        local function parseOverflowValue(candidate)
+            if candidate == "visible" or candidate == "hidden" or candidate == "scroll" or candidate == "auto" then
+                return candidate
+            end
+            return nil
+        end
 
         if prop == "display" then
             if lower == "none" or lower == "block" or lower == "inline" then
@@ -290,6 +296,22 @@ return function(deps)
             local box = parseBoxShorthand(raw)
             style.paddingLeft = box[4]
             style.paddingRight = box[2]
+        elseif prop == "overflow" then
+            local value = parseOverflowValue(lower)
+            if value then
+                style.overflowX = value
+                style.overflowY = value
+            end
+        elseif prop == "overflow-x" then
+            local value = parseOverflowValue(lower)
+            if value then
+                style.overflowX = value
+            end
+        elseif prop == "overflow-y" then
+            local value = parseOverflowValue(lower)
+            if value then
+                style.overflowY = value
+            end
         end
     end
 
@@ -306,6 +328,8 @@ return function(deps)
             marginLeft = 0,
             paddingLeft = 0,
             paddingRight = 0,
+            overflowX = "visible",
+            overflowY = "visible",
         }
     end
 
@@ -370,6 +394,8 @@ return function(deps)
             y = 1,
             indent = 0,
             pendingSpace = false,
+            pendingSpaceStyle = nil,
+            pendingSpaceHref = nil,
         }
 
         function writer:getLine(index)
@@ -397,7 +423,34 @@ return function(deps)
             self.y = self.y + 1
             self:getLine(self.y)
             self.x = self.indent + 1
+            self:clearPendingSpace()
+        end
+
+        function writer:clearPendingSpace()
             self.pendingSpace = false
+            self.pendingSpaceStyle = nil
+            self.pendingSpaceHref = nil
+        end
+
+        function writer:setPendingSpace(style, href)
+            self.pendingSpace = true
+            self.pendingSpaceStyle = style
+            self.pendingSpaceHref = href
+        end
+
+        function writer:flushPendingSpace(fallbackStyle, fallbackHref)
+            if not self.pendingSpace then
+                return
+            end
+            local style = self.pendingSpaceStyle or fallbackStyle
+            local href = self.pendingSpaceHref
+            if href == nil then
+                href = fallbackHref
+            end
+            if style then
+                self:writeSpace(style, href)
+            end
+            self:clearPendingSpace()
         end
 
         function writer:putChar(ch, style, href)
@@ -436,7 +489,7 @@ return function(deps)
         end
 
         function writer:writePreservedText(text, style, href)
-            self.pendingSpace = false
+            self:clearPendingSpace()
             local transformed = transformText(text, style.textTransform)
             for i = 1, #transformed do
                 local ch = transformed:sub(i, i)
@@ -462,7 +515,7 @@ return function(deps)
             while i <= length do
                 local ch = text:sub(i, i)
                 if ch:match("%s") then
-                    self.pendingSpace = true
+                    self:setPendingSpace(style, href)
                     i = i + 1
                 else
                     local j = i
@@ -472,9 +525,8 @@ return function(deps)
                     local word = text:sub(i, j - 1)
                     word = transformText(word, style.textTransform)
                     if self.pendingSpace then
-                        self:writeSpace(style, href)
+                        self:flushPendingSpace(style, href)
                     end
-                    self.pendingSpace = false
                     self:writeWord(word, style, href)
                     i = j
                 end
@@ -487,6 +539,7 @@ return function(deps)
                 return
             end
             if preserveWhitespace then
+                self:flushPendingSpace(style, href)
                 self:writePreservedText(decoded, style, href)
             else
                 self:writeCollapsedText(decoded, style, href)
@@ -508,12 +561,12 @@ return function(deps)
 
             self:setIndent(previousIndent + indentDelta)
             self.x = self.indent + 1
-            self.pendingSpace = false
+            self:clearPendingSpace()
             return previousIndent
         end
 
         function writer:endBlock(style, previousIndent)
-            self.pendingSpace = false
+            self:clearPendingSpace()
             if not self:atLineStart() then
                 self:newLine()
             end
@@ -720,12 +773,34 @@ style, script, head, meta, link, title { display: none; }
             end
         end
 
+        local baseStyle = {
+            display = "block",
+            fg = colors.white,
+            bg = colors.black,
+            whiteSpace = "normal",
+            bold = false,
+            textTransform = "none",
+            marginTop = 0,
+            marginBottom = 0,
+            marginLeft = 0,
+            paddingLeft = 0,
+            paddingRight = 0,
+            overflowX = "visible",
+            overflowY = "visible",
+        }
+        local htmlNode = findFirstTag(root, "html")
+        local bodyNode = findFirstTag(root, "body")
+        local htmlStyle = htmlNode and computeStyle(htmlNode, baseStyle, rules) or baseStyle
+        local bodyStyle = bodyNode and computeStyle(bodyNode, htmlStyle, rules) or htmlStyle
+
         return {
             root = root,
             rules = rules,
             baseUrl = baseUrl,
             title = pageTitle or "",
             source = htmlText,
+            pageOverflowX = bodyStyle.overflowX or htmlStyle.overflowX or "visible",
+            pageOverflowY = bodyStyle.overflowY or htmlStyle.overflowY or "visible",
         }
     end
 
@@ -747,6 +822,8 @@ style, script, head, meta, link, title { display: none; }
             marginLeft = 0,
             paddingLeft = 0,
             paddingRight = 0,
+            overflowX = "visible",
+            overflowY = "visible",
         }
 
         local bodyNode = findFirstTag(document.root, "body")

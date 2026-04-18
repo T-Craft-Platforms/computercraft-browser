@@ -1,52 +1,87 @@
-<html>
-<head>
-<style>
-body { color: white; background-color: black; }
-h1 { color: yellow; margin-top: 0; margin-bottom: 1; }
-h2 { color: orange; margin-top: 1; margin-bottom: 0; }
-p { margin-top: 0; margin-bottom: 1; }
-code, pre { background-color: gray; color: white; }
-a { color: lightblue; }
-</style>
-</head>
-<body>
-<h1>CC Browser</h1>
-<p>This browser supports a practical subset of HTML and CSS in ComputerCraft.</p>
-<h2>Features</h2>
-<ul>
-<li>URL bar</li>
-<li>Back / forward history</li>
-<li>Reload/abort button while loading</li>
-<li>Tabs with page titles</li>
-<li>Tab close buttons</li>
-<li>Top-left browser close button</li>
-<li>Drag-and-drop tab ordering</li>
-<li>Double-click a tab to show its full title</li>
-<li>Caret mode (F7) for page text selection</li>
-<li>F7 indicator in the URL status area when active</li>
-<li>Mouse wheel and keyboard scrolling</li>
-<li>Clickable links</li>
-</ul>
-<h2>Supported HTML</h2>
-<p>headings, paragraphs, div/span, lists, links, br, hr, pre/code, and img alt placeholders.</p>
-<h2>Supported CSS (subset)</h2>
-<p>element/class/id selectors, color/background-color, display, white-space, margin, padding-left, font-weight, text-transform.</p>
-<h2>Keys</h2>
-<ul>
-<li>Enter in URL bar: navigate</li>
-<li>Mouse wheel / Up / Down / PageUp / PageDown: scroll</li>
-<li>Ctrl+L: focus URL bar</li>
-<li>Ctrl+Left and Ctrl+Right: back and forward</li>
-<li>F5 or Ctrl+R: reload</li>
-<li>F7: toggle caret mode</li>
-<li>In caret mode, arrows/home/end/page keys move text selection</li>
-<li>Ctrl+A/C/X/V: select all / copy / cut / paste</li>
-<li>Ctrl+T: new tab</li>
-<li>Ctrl+W: close tab</li>
-<li>Ctrl+Tab: next tab</li>
-<li>Esc: abort load (while loading) or quit</li>
-<li>Ctrl+Q: quit</li>
-</ul>
-<p>Try <a href="https://example.com">https://example.com</a>.</p>
-</body>
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>CC Browser Help</title>
+    <style>
+      body {
+        color: white;
+        background-color: black;
+      }
+
+      h1 {
+        color: yellow;
+        margin-top: 0;
+        margin-bottom: 1em;
+      }
+
+      h2 {
+        color: orange;
+        margin-top: 1em;
+        margin-bottom: 0;
+      }
+
+      p {
+        margin-top: 0;
+        margin-bottom: 1em;
+      }
+
+      code,
+      pre {
+        background-color: gray;
+        color: white;
+      }
+
+      a {
+        color: lightblue;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>CC Browser</h1>
+    <p>This browser supports a practical subset of HTML and CSS in ComputerCraft.</p>
+
+    <h2>Features</h2>
+    <ul>
+      <li>URL bar</li>
+      <li>Back / forward history</li>
+      <li>Reload/abort button while loading</li>
+      <li>Tabs with page titles</li>
+      <li>Tab close buttons</li>
+      <li>Top-left browser close button</li>
+      <li>Drag-and-drop tab ordering</li>
+      <li>Double-click a tab to expand it to full tab-bar width (click again to restore)</li>
+      <li>Caret mode (F7) for page text selection</li>
+      <li>F7 indicator in the URL status area when active</li>
+      <li>Vertical scrollbar with track/thumb on scrollable pages</li>
+      <li>Settings page at <code>about:settings</code> (open from the <code>=</code> menu)</li>
+      <li>Mouse wheel and keyboard scrolling</li>
+      <li>Clickable links</li>
+    </ul>
+
+    <h2>Supported HTML</h2>
+    <p>headings, paragraphs, div/span, lists, links, br, hr, pre/code, and img alt placeholders.</p>
+
+    <h2>Supported CSS (subset)</h2>
+    <p>element/class/id selectors, color/background-color, display, white-space, margin, padding-left, font-weight, text-transform, overflow/overflow-x/overflow-y.</p>
+
+    <h2>Keys</h2>
+    <ul>
+      <li>Enter in URL bar: navigate</li>
+      <li>Mouse wheel / Up / Down / PageUp / PageDown: scroll</li>
+      <li>Ctrl+L: focus URL bar</li>
+      <li>Ctrl+Left and Ctrl+Right: back and forward</li>
+      <li>F5 or Ctrl+R: reload</li>
+      <li>F7: toggle caret mode</li>
+      <li>In caret mode, arrows/home/end/page keys move text selection</li>
+      <li>Ctrl+A/C/X/V: select all / copy / cut / paste</li>
+      <li>Ctrl+T: new tab</li>
+      <li>Ctrl+W: close tab</li>
+      <li>Ctrl+Tab: next tab</li>
+      <li>Esc: abort load (while loading) or quit</li>
+      <li>Ctrl+Q: quit</li>
+    </ul>
+
+    <p>Try <a href="https://example.com">https://example.com</a>.</p>
+  </body>
 </html>

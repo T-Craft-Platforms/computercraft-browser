@@ -16,12 +16,33 @@ return function(deps)
         state.ui.back = { x1 = 1, x2 = 3, y = 2 }
         state.ui.forward = { x1 = 5, x2 = 7, y = 2 }
         state.ui.reload = { x1 = 9, x2 = 11, y = 2 }
-        state.ui.url = { x1 = 13, x2 = w, y = 2 }
         state.ui.newTab = { x1 = math.max(1, w - 2), x2 = w, y = 1 }
+        state.ui.menuButton = { x1 = state.ui.newTab.x1, x2 = state.ui.newTab.x2, y = 2 }
+        state.ui.url = { x1 = 13, x2 = state.ui.menuButton.x1 - 1, y = 2 }
         state.ui.tabs = {}
         state.ui.tabClose = {}
 
         local tabsStart = state.ui.closeBrowser.x2 + 2
+        local expandedIndex = state.expandedTabIndex
+        if expandedIndex and (expandedIndex < 1 or expandedIndex > #state.tabs) then
+            state.expandedTabIndex = nil
+            expandedIndex = nil
+        end
+
+        if expandedIndex then
+            state.ui.newTab = { x1 = w + 1, x2 = w, y = 1 }
+            state.ui.menuButton = { x1 = state.ui.newTab.x1, x2 = state.ui.newTab.x2, y = 2 }
+            state.ui.url = { x1 = 13, x2 = state.ui.menuButton.x1 - 1, y = 2 }
+            local tabsEnd = w
+            if tabsEnd >= tabsStart then
+                state.ui.tabs[1] = { x1 = tabsStart, x2 = tabsEnd, y = 1, index = expandedIndex }
+                if (tabsEnd - tabsStart + 1) >= 4 then
+                    state.ui.tabClose[expandedIndex] = { x1 = tabsEnd, x2 = tabsEnd, y = 1, index = expandedIndex }
+                end
+            end
+            return
+        end
+
         local tabsEnd = state.ui.newTab.x1 - 1
         if tabsEnd < tabsStart or #state.tabs < 1 then
             return
@@ -118,7 +139,13 @@ return function(deps)
     end
 
     local function tabLabelLimit(index)
-        local region = state.ui.tabs[index]
+        local region = nil
+        for _, tabRegion in ipairs(state.ui.tabs) do
+            if tabRegion.index == index then
+                region = tabRegion
+                break
+            end
+        end
         if not region then
             return 0
         end
@@ -131,26 +158,76 @@ return function(deps)
         return math.max(0, width - 1)
     end
 
-    local function revealTabName(index)
-        local tabItem = state.tabs[index]
-        if not tabItem then
-            return
+    local function animatedExpandedLabel(index, label, maxLabel)
+        if maxLabel <= 0 then
+            return ""
+        end
+        if #label <= maxLabel then
+            if state.tabTitleCarousel and state.tabTitleCarousel.index == index then
+                state.tabTitleCarousel = nil
+            end
+            return label
         end
 
-        state.tabNameReveal = {
-            index = index,
-            text = tabTitle(tabItem),
-        }
-        if state.tabRevealTimer and os.cancelTimer then
-            pcall(os.cancelTimer, state.tabRevealTimer)
+        local overflow = #label - maxLabel
+        local now = os.clock()
+        local carousel = state.tabTitleCarousel
+        if (not carousel)
+            or carousel.index ~= index
+            or carousel.label ~= label
+            or carousel.maxLabel ~= maxLabel then
+            carousel = {
+                index = index,
+                label = label,
+                maxLabel = maxLabel,
+                offset = 0,
+                dir = 1,
+                lastTick = now,
+                pauseUntil = now + 0.45,
+            }
+            state.tabTitleCarousel = carousel
         end
-        state.tabRevealTimer = os.startTimer(2)
+
+        local stepInterval = 0.18
+        if now >= (carousel.pauseUntil or 0) then
+            local elapsed = now - (carousel.lastTick or now)
+            local steps = math.floor(elapsed / stepInterval)
+            if steps > 0 then
+                carousel.lastTick = (carousel.lastTick or now) + (steps * stepInterval)
+                for _ = 1, steps do
+                    local nextOffset = carousel.offset + carousel.dir
+                    if nextOffset >= overflow then
+                        carousel.offset = overflow
+                        carousel.dir = -1
+                        carousel.pauseUntil = now + 0.45
+                        carousel.lastTick = now
+                        break
+                    elseif nextOffset <= 0 then
+                        carousel.offset = 0
+                        carousel.dir = 1
+                        carousel.pauseUntil = now + 0.45
+                        carousel.lastTick = now
+                        break
+                    else
+                        carousel.offset = nextOffset
+                    end
+                end
+            end
+        else
+            carousel.lastTick = now
+        end
+
+        local start = 1 + (carousel.offset or 0)
+        return label:sub(start, start + maxLabel - 1)
     end
 
     local function drawTopBar()
         layoutUi()
         local w, _ = term.getSize()
         local tab = activeTab()
+        if not state.expandedTabIndex then
+            state.tabTitleCarousel = nil
+        end
 
         term.setBackgroundColor(colors.gray)
         term.setTextColor(colors.black)
@@ -170,13 +247,20 @@ return function(deps)
             local label = tabTitle(tabItem)
             local closeRegion = state.ui.tabClose[region.index]
             local maxLabel = tabLabelLimit(region.index)
+            local isExpanded = state.expandedTabIndex and region.index == state.expandedTabIndex
 
             if #label > maxLabel then
-                if maxLabel <= 1 then
-                    label = label:sub(1, maxLabel)
+                if isExpanded then
+                    label = animatedExpandedLabel(region.index, label, maxLabel)
                 else
-                    label = label:sub(1, maxLabel - 1) .. "~"
+                    if maxLabel <= 1 then
+                        label = label:sub(1, maxLabel)
+                    else
+                        label = label:sub(1, maxLabel - 1) .. "~"
+                    end
                 end
+            elseif isExpanded then
+                state.tabTitleCarousel = nil
             end
 
             if closeRegion then
@@ -202,16 +286,30 @@ return function(deps)
         end
 
         local newWidth = state.ui.newTab.x2 - state.ui.newTab.x1 + 1
-        writeClipped(state.ui.newTab.x1, 1, string.rep(" ", newWidth), colors.black, colors.lightGray)
-        local plusX = state.ui.newTab.x1 + math.floor((newWidth - 1) / 2)
-        writeClipped(plusX, 1, "+", colors.black, colors.lightGray)
+        if newWidth > 0 then
+            writeClipped(state.ui.newTab.x1, 1, string.rep(" ", newWidth), colors.lightGray, colors.gray)
+            local plusX = state.ui.newTab.x1 + math.floor((newWidth - 1) / 2)
+            writeClipped(plusX, 1, "+", colors.lightGray, colors.gray)
+        end
+        local menuWidth = state.ui.menuButton.x2 - state.ui.menuButton.x1 + 1
+        if menuWidth > 0 then
+            local menuActive = state.menuOpen == true
+            local menuBg = menuActive and colors.white or colors.gray
+            local menuFg = menuActive and colors.black or colors.lightGray
+            writeClipped(state.ui.menuButton.x1, 2, string.rep(" ", menuWidth), menuFg, menuBg)
+            local menuX = state.ui.menuButton.x1 + math.floor((menuWidth - 1) / 2)
+            writeClipped(menuX, 2, "=", menuFg, menuBg)
+        end
 
         local function drawButton(region, label, enabled, active)
             local bg = colors.gray
-            local fg = colors.lightGray
+            local fg = colors.black
             if enabled then
-                bg = active and colors.orange or colors.lightGray
-                fg = colors.black
+                fg = colors.lightGray
+                if active then
+                    bg = colors.gray
+                    fg = colors.yellow
+                end
             end
             local width = region.x2 - region.x1 + 1
             writeClipped(region.x1, region.y, string.rep(" ", width), fg, bg)
@@ -221,7 +319,7 @@ return function(deps)
 
         drawButton(state.ui.back, "<", canGoBack(tab), false)
         drawButton(state.ui.forward, ">", canGoForward(tab), false)
-        drawButton(state.ui.reload, tab.loading and "X" or "R", tab.loading or tab.document ~= nil, tab.loading)
+        drawButton(state.ui.reload, tab.loading and "x" or "r", tab.loading or tab.document ~= nil, tab.loading)
 
         if state.ui.url.x1 <= state.ui.url.x2 then
             local urlFieldBg = colors.lightGray
@@ -264,23 +362,7 @@ return function(deps)
                 end
             end
 
-            local reveal = state.tabNameReveal
-            if reveal and reveal.index == state.activeTab and not tab.urlFocus then
-                local revealText = reveal.text or tabTitle(tab)
-                local revealPadded = " " .. revealText
-                if #revealPadded < fieldWidth then
-                    revealPadded = revealPadded .. string.rep(" ", fieldWidth - #revealPadded)
-                end
-                writeClipped(state.ui.url.x1, 2, revealPadded, colors.white, colors.blue)
-            end
-
             local rightEdge = state.ui.url.x2
-            if tab.loading then
-                local loadingLabel = " loading "
-                local startX = math.max(state.ui.url.x1, rightEdge - #loadingLabel + 1)
-                writeClipped(startX, 2, loadingLabel, colors.yellow, colors.gray)
-                rightEdge = startX - 1
-            end
 
             if state.caretMode and rightEdge >= state.ui.url.x1 then
                 local caretLabel = " F7 "
@@ -308,12 +390,40 @@ return function(deps)
         end
     end
 
+    local function verticalScrollbarGeometry(tab, visibleHeight)
+        if not tab.showVerticalScrollbar then
+            return nil
+        end
+
+        local contentHeight = math.max(1, #tab.pageLines)
+        local maxScroll = math.max(0, contentHeight - visibleHeight)
+        local thumbHeight = visibleHeight
+        if contentHeight > visibleHeight then
+            thumbHeight = math.floor((visibleHeight * visibleHeight) / contentHeight + 0.5)
+            thumbHeight = clamp(thumbHeight, 1, visibleHeight)
+        end
+
+        local travel = visibleHeight - thumbHeight
+        local thumbTop = 1
+        if maxScroll > 0 and travel > 0 then
+            local ratio = tab.scroll / maxScroll
+            thumbTop = 1 + math.floor((ratio * travel) + 0.5)
+        end
+
+        return {
+            thumbTop = thumbTop,
+            thumbHeight = thumbHeight,
+        }
+    end
+
     local function drawPage()
         local w, h = term.getSize()
         local tab = activeTab()
         local firstLine = tab.scroll + 1
         local visibleHeight = math.max(1, h - TOP_BAR_ROWS)
         local selection = state.caretMode and normalizedPageSelection(tab) or nil
+        local viewportWidth = clamp(tab.viewportWidth or w, 1, w)
+        local scrollbar = verticalScrollbarGeometry(tab, visibleHeight)
 
         for row = 1, visibleHeight do
             local lineIndex = firstLine + row - 1
@@ -321,7 +431,7 @@ return function(deps)
             local chars = {}
             local fgs = {}
             local bgs = {}
-            for x = 1, w do
+            for x = 1, viewportWidth do
                 local ch = " "
                 local fg = colors.white
                 local bg = colors.black
@@ -338,21 +448,75 @@ return function(deps)
                 fgs[x] = colors.toBlit(fg)
                 bgs[x] = colors.toBlit(bg)
             end
+            for x = viewportWidth + 1, w do
+                chars[x] = " "
+                fgs[x] = colors.toBlit(colors.white)
+                bgs[x] = colors.toBlit(colors.black)
+            end
+            if scrollbar and w >= 1 then
+                local inThumb = row >= scrollbar.thumbTop and row < (scrollbar.thumbTop + scrollbar.thumbHeight)
+                chars[w] = " "
+                fgs[w] = colors.toBlit(colors.white)
+                bgs[w] = colors.toBlit(inThumb and colors.lightGray or colors.gray)
+            end
             term.setCursorPos(1, row + TOP_BAR_ROWS)
             term.blit(table.concat(chars), table.concat(fgs), table.concat(bgs))
         end
     end
 
+    local function drawMenuPopover()
+        state.ui.menu = nil
+        if not state.menuOpen then
+            return
+        end
+
+        local w, h = term.getSize()
+        if state.ui.menuButton.x1 > w then
+            state.menuOpen = false
+            return
+        end
+        local panelWidth = math.min(24, math.max(14, w))
+        local panelHeight = 3
+        local panelX2 = clamp(state.ui.menuButton.x2, 1, w)
+        local panelX1 = math.max(1, panelX2 - panelWidth + 1)
+        local panelY1 = TOP_BAR_ROWS + 1
+        local panelY2 = math.min(h, panelY1 + panelHeight - 1)
+
+        state.ui.menu = {
+            panel = { x1 = panelX1, x2 = panelX2, y1 = panelY1, y2 = panelY2 },
+        }
+
+        for y = panelY1, panelY2 do
+            writeClipped(panelX1, y, string.rep(" ", panelX2 - panelX1 + 1), colors.black, colors.lightGray)
+        end
+
+        local innerX1 = math.min(panelX2, panelX1 + 1)
+        local textFg = colors.black
+        local textBg = colors.lightGray
+
+        local settingsY = panelY1
+        local helpY = math.min(panelY2, panelY1 + 1)
+        local exitY = math.min(panelY2, panelY1 + 2)
+
+        writeClipped(innerX1, settingsY, "Settings", textFg, textBg)
+        writeClipped(innerX1, helpY, "Help", textFg, textBg)
+        writeClipped(innerX1, exitY, "Exit", textFg, textBg)
+
+        state.ui.menu.settings = { x1 = panelX1, x2 = panelX2, y = settingsY }
+        state.ui.menu.help = { x1 = panelX1, x2 = panelX2, y = helpY }
+        state.ui.menu.exit = { x1 = panelX1, x2 = panelX2, y = exitY }
+    end
+
     local function draw()
         drawTopBar()
         drawPage()
+        drawMenuPopover()
     end
 
     return {
         layoutUi = layoutUi,
         tabIndexAt = tabIndexAt,
         tabCloseIndexAt = tabCloseIndexAt,
-        revealTabName = revealTabName,
         drawTopBar = drawTopBar,
         drawPage = drawPage,
         draw = draw,
