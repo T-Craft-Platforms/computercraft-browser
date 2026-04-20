@@ -23,6 +23,7 @@ local createNetwork = loadModule("lib/network.lua")
 local createHtml = loadModule("lib/html.lua")
 local createContent = loadModule("lib/content.lua")
 local createUi = loadModule("ui/view.lua")
+local createSandbox = loadModule("lib/sandbox.lua")
 
 local browserSettings = {
     home_page = "about:home",
@@ -551,6 +552,10 @@ local content = createContent({
     html = html,
     network = network,
 })
+local sandbox = createSandbox({
+    core = core,
+    scriptDir = SCRIPT_DIR,
+})
 
 local clamp = core.clamp
 local startsWith = core.startsWith
@@ -599,6 +604,10 @@ local renderDocumentWindowLines = content.renderDocumentWindowLines or function(
 end
 
 local TOP_BAR_ROWS = 2
+
+local function effectiveTopBarRows()
+    return state.fullscreen and 0 or TOP_BAR_ROWS
+end
 local ANIMATION_TICK_SECONDS = 0.15
 local HIGH_USAGE_FRAME_THRESHOLD_MS = 750
 local HIGH_USAGE_FRAME_THRESHOLD_LOADING_MS = 10000
@@ -671,6 +680,7 @@ local state = {
     tabs = { createTab(homePageUrl()) },
     activeTab = 1,
     menuOpen = false,
+    fullscreen = false,
     expandedTabIndex = nil,
     tabDrag = nil,
     scrollbarDrag = nil,
@@ -918,7 +928,7 @@ end
 
 local function pageHeight()
     local _, h = term.getSize()
-    return math.max(1, h - TOP_BAR_ROWS)
+    return math.max(1, h - effectiveTopBarRows())
 end
 
 local function pageContentWidth(tab)
@@ -1134,6 +1144,7 @@ local ui = createUi({
     state = state,
     clamp = clamp,
     topBarRows = TOP_BAR_ROWS,
+    effectiveTopBarRows = effectiveTopBarRows,
     activeTab = activeTab,
     isFavoriteUrl = isFavoriteUrl,
     canFavoriteUrl = canFavoriteUrl,
@@ -1342,8 +1353,8 @@ local function verticalScrollbarMetrics(tab)
 
     return {
         x = w,
-        y1 = TOP_BAR_ROWS + 1,
-        y2 = TOP_BAR_ROWS + viewportHeight,
+        y1 = effectiveTopBarRows() + 1,
+        y2 = effectiveTopBarRows() + viewportHeight,
         viewportHeight = viewportHeight,
         maxScroll = maxValue,
         thumbTop = thumbTop,
@@ -1921,6 +1932,12 @@ local function toggleCurrentPageFavorite()
     return addBrowserFavorite(currentUrl, title)
 end
 
+local function toggleFullscreen()
+    state.fullscreen = not state.fullscreen
+    state.menuOpen = false
+    rerenderAllTabs()
+end
+
 local function hitMenuPanel(x, y)
     local menu = state.ui.menu
     local panel = menu and menu.panel or nil
@@ -1965,6 +1982,10 @@ local function handleMenuClick(x, y)
     if hitRegion(x, y, menu.print) then
         state.menuOpen = false
         printCurrentPage()
+        return true
+    end
+    if hitRegion(x, y, menu.fullscreen) then
+        toggleFullscreen()
         return true
     end
     if hitRegion(x, y, menu.exit) then
@@ -2754,6 +2775,141 @@ local function loadDocumentWithAbort(tab, normalized, allowFallback, requestOpti
     return result, aborted
 end
 
+local function isLuaUrl(url)
+    local stripped = (url or ""):gsub("[?#].*$", ""):lower()
+    return stripped:match("%.lua$") ~= nil
+end
+
+local function promptLuaExecution(url, luaSource, tab)
+    local target = tab or activeTab()
+    local choice = nil
+
+    local keyActions = {}
+    if keys.s then
+        keyActions[keys.s] = "sandboxed"
+    end
+    if keys.y then
+        keyActions[keys.y] = "full"
+    end
+    if keys.n then
+        keyActions[keys.n] = "no"
+    end
+    if keys.escape then
+        keyActions[keys.escape] = "no"
+    end
+
+    openModal({
+        id = "lua_applet_prompt",
+        title = "Executable Content",
+        titleBackground = colors.orange,
+        titleForeground = colors.white,
+        lines = {
+            "This URL contains a Lua applet.",
+            "Run it?",
+            "",
+            "(S)andboxed / (Y)es / (N)o",
+        },
+        buttons = {
+            {
+                id = "sandboxed",
+                label = "[Sandboxed]",
+                shortLabel = "[S]",
+                background = colors.cyan,
+                foreground = colors.white,
+            },
+            {
+                id = "full",
+                label = "[Yes]",
+                shortLabel = "[Y]",
+                background = colors.lime,
+                foreground = colors.black,
+            },
+            {
+                id = "no",
+                label = "[No]",
+                shortLabel = "[N]",
+                background = colors.red,
+                foreground = colors.white,
+            },
+        },
+        keyActions = keyActions,
+        autoClose = false,
+        onButton = function(buttonId)
+            choice = buttonId
+            clearModal()
+            return false
+        end,
+    })
+    draw()
+
+    -- Wait for user choice
+    while choice == nil and state.modal.open do
+        local event = { os.pullEvent() }
+        handleModalEvent(event)
+        if state.running then
+            draw()
+        end
+    end
+
+    if not choice or choice == "no" then
+        return "no"
+    end
+    return choice
+end
+
+local function executeLuaApplet(luaSource, sourceUrl, mode, tab)
+    local target = tab or activeTab()
+    local w, h = term.getSize()
+    local topRows = effectiveTopBarRows()
+    local contentHeight = math.max(1, h - topRows)
+
+    -- Create a content-area window for the applet
+    local contentWindow
+    if window and window.create then
+        contentWindow = window.create(term.current(), 1, topRows + 1, w, contentHeight, true)
+    else
+        contentWindow = term.current()
+    end
+
+    contentWindow.setBackgroundColor(colors.black)
+    contentWindow.setTextColor(colors.white)
+    contentWindow.clear()
+    contentWindow.setCursorPos(1, 1)
+
+    local ok, errMsg = sandbox.executeApplet(luaSource, sourceUrl, mode, contentWindow)
+
+    if not ok then
+        contentWindow.setBackgroundColor(colors.black)
+        contentWindow.setTextColor(colors.red)
+        local cx, cy = contentWindow.getCursorPos()
+        contentWindow.setCursorPos(1, cy + 1)
+        contentWindow.write("Error: " .. tostring(errMsg or "Unknown error"))
+    end
+
+    -- After applet finishes, show a status line
+    local cx, cy = contentWindow.getCursorPos()
+    local cw, ch = contentWindow.getSize()
+    if cy < ch then
+        contentWindow.setCursorPos(1, cy + 1)
+    end
+    contentWindow.setTextColor(colors.yellow)
+    contentWindow.write("[Applet finished - press any key]")
+
+    -- Wait for a key press before returning to browser
+    while true do
+        local event = { os.pullEvent() }
+        if event[1] == "key" or event[1] == "mouse_click" then
+            break
+        end
+        if event[1] == "term_resize" then
+            -- Redraw in case of resize
+            break
+        end
+    end
+
+    return ok, errMsg
+end
+
 navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     local target = tab or activeTab()
     local normalized, inferred = normalizeInputUrl(rawInput)
@@ -2766,6 +2922,107 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     target.urlOffset = 0
     clearUrlSelection(target)
     draw()
+
+    -- Detect .lua URLs and handle applet execution
+    if isLuaUrl(normalized) then
+        local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback or inferred, requestOptions)
+        target.loading = false
+
+        if not body then
+            -- Failed to fetch; show error page
+            local errUrl = normalized
+            local errBody = makeErrorPage(errUrl, err or "Unknown error")
+            target.document = buildDocument(errBody, errUrl)
+            target.currentUrl = errUrl
+            target.urlInput = errUrl
+            target.urlCursor = #target.urlInput + 1
+            target.urlOffset = 0
+            target.status = target.document.title or ""
+            target.urlFocus = false
+            clearUrlSelection(target)
+            clearPageSelection(target)
+            target.formState = {}
+            target.formMeta = nil
+            target.focusedFormControl = nil
+            target.renderRevision = 0
+            target.lastRenderSignature = nil
+            target.aboutUpdateIntervalMs = nil
+            target.settingsStickyStatus = nil
+            if addToHistory then
+                pushHistory(target, errUrl)
+            end
+            target.scroll = 0
+            renderDocument(target)
+            draw()
+            if scheduleAboutUpdateTimer then
+                scheduleAboutUpdateTimer()
+            end
+            return false
+        end
+
+        local resolvedUrl = finalUrl or normalized
+        target.currentUrl = resolvedUrl
+        target.urlInput = resolvedUrl
+        target.urlCursor = #target.urlInput + 1
+        target.urlOffset = 0
+
+        -- Prompt the user
+        local userChoice = promptLuaExecution(resolvedUrl, body, target)
+
+        if userChoice == "sandboxed" or userChoice == "full" then
+            -- Execute the Lua applet
+            local mode = (userChoice == "sandboxed") and "sandboxed" or "full"
+
+            if addToHistory then
+                pushHistory(target, resolvedUrl)
+            end
+            if shouldTrackNavigationInHistory(normalized) then
+                addBrowserHistory(resolvedUrl, "Lua Applet: " .. resolvedUrl)
+            end
+
+            executeLuaApplet(body, resolvedUrl, mode, target)
+
+            -- After applet finishes, show the source code in content area
+            local sourceHtml = "<html><body><h3>Lua Applet</h3>"
+                .. "<p><b>URL:</b> <code>" .. escapeHtml(resolvedUrl) .. "</code></p>"
+                .. "<p><i>Applet execution finished (" .. mode .. " mode).</i></p>"
+                .. "<hr><pre>" .. escapeHtml(body) .. "</pre></body></html>"
+            target.document = buildDocument(sourceHtml, resolvedUrl)
+            target.status = "Lua Applet: " .. resolvedUrl
+        else
+            -- User chose "No": display the source code as text
+            local sourceHtml = "<html><body><h3>Lua Source</h3>"
+                .. "<p><b>URL:</b> <code>" .. escapeHtml(resolvedUrl) .. "</code></p>"
+                .. "<pre>" .. escapeHtml(body) .. "</pre></body></html>"
+            target.document = buildDocument(sourceHtml, resolvedUrl)
+            target.status = resolvedUrl
+
+            if addToHistory then
+                pushHistory(target, resolvedUrl)
+            end
+            if shouldTrackNavigationInHistory(normalized) then
+                addBrowserHistory(resolvedUrl, "Lua Source: " .. resolvedUrl)
+            end
+        end
+
+        target.urlFocus = false
+        clearUrlSelection(target)
+        clearPageSelection(target)
+        target.formState = {}
+        target.formMeta = nil
+        target.focusedFormControl = nil
+        target.renderRevision = 0
+        target.lastRenderSignature = nil
+        target.aboutUpdateIntervalMs = nil
+        target.settingsStickyStatus = nil
+        target.scroll = 0
+        renderDocument(target)
+        draw()
+        if scheduleAboutUpdateTimer then
+            scheduleAboutUpdateTimer()
+        end
+        return true
+    end
 
     local result, aborted = loadDocumentWithAbort(target, normalized, allowFallback or inferred, requestOptions)
     target.loading = false
@@ -3021,6 +3278,7 @@ end
 
 local function handleMouseClick(button, x, y)
     layoutUi()
+    local topRows = effectiveTopBarRows()
 
     if state.menuOpen then
         if hitMenuPanel(x, y) then
@@ -3032,14 +3290,32 @@ local function handleMouseClick(button, x, y)
         end
     end
 
-    if y == 1 then
-        handleTabClick(button, x)
-        return
+    -- Floating menu button in fullscreen mode (top-right corner)
+    if state.fullscreen then
+        if hitRegion(x, y, state.ui.menuButton) then
+            state.menuOpen = not state.menuOpen
+            if state.menuOpen then
+                local tab = activeTab()
+                tab.urlFocus = false
+                clearUrlSelection(tab)
+                tab.focusedFormControl = nil
+            end
+            state.tabDrag = nil
+            state.scrollbarDrag = nil
+            return
+        end
     end
 
-    if y == 2 then
-        handleToolbarClick(x)
-        return
+    if not state.fullscreen then
+        if y == 1 then
+            handleTabClick(button, x)
+            return
+        end
+
+        if y == 2 then
+            handleToolbarClick(x)
+            return
+        end
     end
 
     local tab = activeTab()
@@ -3055,7 +3331,7 @@ local function handleMouseClick(button, x, y)
             return
         end
 
-        local clickRow = clamp(y - TOP_BAR_ROWS, 1, scrollbar.viewportHeight)
+        local clickRow = clamp(y - topRows, 1, scrollbar.viewportHeight)
         local thumbBottom = scrollbar.thumbTop + scrollbar.thumbHeight - 1
         if clickRow >= scrollbar.thumbTop and clickRow <= thumbBottom then
             state.scrollbarDrag = {
@@ -3072,7 +3348,7 @@ local function handleMouseClick(button, x, y)
     end
 
     local viewportWidth = pageContentWidth(tab)
-    local lineIndex = clamp(tab.scroll + (y - TOP_BAR_ROWS), 1, pageLineCount(tab))
+    local lineIndex = clamp(tab.scroll + (y - topRows), 1, pageLineCount(tab))
     local column = clamp(x, 1, viewportWidth)
     if state.caretMode then
         if button == 1 then
@@ -3112,7 +3388,7 @@ local function handleMouseDrag(button, x, y)
             return
         end
 
-        local row = clamp(y - TOP_BAR_ROWS, 1, scrollbar.viewportHeight)
+        local row = clamp(y - effectiveTopBarRows(), 1, scrollbar.viewportHeight)
         local travel = scrollbar.viewportHeight - scrollbar.thumbHeight
         if travel <= 0 or scrollbar.maxScroll <= 0 then
             setScroll(0, tab)
@@ -3154,7 +3430,7 @@ local function handleMouseDrag(button, x, y)
     if not state.caretMode then
         return
     end
-    if button ~= 1 or y <= TOP_BAR_ROWS then
+    if button ~= 1 or y <= effectiveTopBarRows() then
         return
     end
 
@@ -3164,7 +3440,7 @@ local function handleMouseDrag(button, x, y)
     end
 
     local w = pageContentWidth(tab)
-    local lineIndex = clamp(tab.scroll + (y - TOP_BAR_ROWS), 1, pageLineCount(tab))
+    local lineIndex = clamp(tab.scroll + (y - effectiveTopBarRows()), 1, pageLineCount(tab))
     local column = clamp(x, 1, w)
     tab.pageSelection.endLine = lineIndex
     tab.pageSelection.endCol = column
@@ -3180,7 +3456,7 @@ local function handleMouseUp(button, _, _)
 end
 
 local function handleMouseScroll(direction, _, y)
-    if y <= TOP_BAR_ROWS then
+    if y <= effectiveTopBarRows() then
         return
     end
     local tab = activeTab()
@@ -3544,6 +3820,10 @@ local function handleKeyDown(key)
             printCurrentPage()
             return
         end
+        if key == keys.k then
+            toggleFullscreen()
+            return
+        end
         if key == keys.left then
             goBack()
             return
@@ -3580,6 +3860,10 @@ local function handleKeyDown(key)
     end
 
     if key == keys.escape then
+        if state.fullscreen then
+            toggleFullscreen()
+            return
+        end
         state.running = false
         return
     end
