@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>Favorites</title>
+    <title>History</title>
     <style>
       body {
         color: white;
@@ -15,7 +15,8 @@
         margin-bottom: 1em;
       }
 
-      h2 {
+      h2,
+      h3 {
         color: orange;
         margin-top: 1em;
         margin-bottom: 0;
@@ -38,16 +39,20 @@
     </style>
   </head>
   <body>
-    <h1>{{APP_ICON}} Favorites</h1>
-    <p>App: <code>{{APP_TITLE}}</code> <code>{{APP_VERSION}}</code></p>
+    <h1>{{APP_ICON}} {{APP_TITLE}} History</h1>
+    <p>Version: <code>{{APP_VERSION}}</code></p>
     <p><code>{{CURRENT_URL}}</code></p>
-    <p>Total favorites: <code>{{FAVORITES_COUNT}}</code></p>
 
-    <h2>Favorite Pages</h2>
-    <ul>
-      {{FAVORITES_LIST}}
-    </ul>
+    <h2>Status</h2>
+    <p><code>{{STATUS_MESSAGE}}</code></p>
+    <p>{{HISTORY_HINT}}</p>
+    <p>Total entries: <code>{{HISTORY_COUNT}}</code></p>
 
-    <p><a href="about:home">Back to home</a> | <a href="about:history">History</a> | <a href="about:help">Help</a></p>
+    <h2>Actions</h2>
+    <p><a href="{{CLEAR_ALL_URL}}">Delete all history</a></p>
+    <p><a href="about:settings">Settings</a> | <a href="about:home">Home</a></p>
+
+    <h2>Entries (chronological)</h2>
+    {{HISTORY_GROUPS}}
   </body>
 </html>

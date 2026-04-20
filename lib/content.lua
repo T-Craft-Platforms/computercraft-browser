@@ -19,6 +19,71 @@ return function(deps)
     local nodeTextContent = html.nodeTextContent
 
     local fetchTextResource = network.fetchTextResource
+    local YIELD_EVENT = "__cc_browser_content_yield"
+    local YIELD_STEP_BUDGET = 1400
+    local yieldSteps = 0
+
+    local COLOR_LUMA = {
+        [colors.white] = 240,
+        [colors.orange] = 180,
+        [colors.magenta] = 164,
+        [colors.lightBlue] = 188,
+        [colors.yellow] = 210,
+        [colors.lime] = 165,
+        [colors.pink] = 200,
+        [colors.gray] = 76,
+        [colors.lightGray] = 153,
+        [colors.cyan] = 136,
+        [colors.purple] = 130,
+        [colors.blue] = 90,
+        [colors.brown] = 108,
+        [colors.green] = 120,
+        [colors.red] = 114,
+        [colors.black] = 17,
+    }
+
+    local function cooperativeYield()
+        if os and type(os.queueEvent) == "function" and type(os.pullEventRaw) == "function" then
+            os.queueEvent(YIELD_EVENT)
+            os.pullEventRaw(YIELD_EVENT)
+            return
+        end
+        if sleep then
+            sleep(0)
+        end
+    end
+
+    local function maybeYield(stepCost)
+        yieldSteps = yieldSteps + (stepCost or 1)
+        if yieldSteps >= YIELD_STEP_BUDGET then
+            yieldSteps = 0
+            cooperativeYield()
+        end
+    end
+
+    local function colorLuma(color)
+        return COLOR_LUMA[color] or 128
+    end
+
+    local function ensureContrastingForeground(foreground, background)
+        if not background then
+            return foreground or colors.white
+        end
+        local fg = foreground or colors.white
+        if fg == background then
+            if colorLuma(background) >= 128 then
+                return colors.black
+            end
+            return colors.white
+        end
+        if math.abs(colorLuma(fg) - colorLuma(background)) < 48 then
+            if colorLuma(background) >= 128 then
+                return colors.black
+            end
+            return colors.white
+        end
+        return fg
+    end
 
     local function parseDeclarations(source)
         local declarations = {}
@@ -198,6 +263,7 @@ return function(deps)
 
         local current = node
         for i = #parts, 1, -1 do
+            maybeYield()
             local part = parts[i]
             if i == #parts then
                 if not matchesSimpleSelector(current, part) then
@@ -207,6 +273,7 @@ return function(deps)
             else
                 local matched = false
                 while current do
+                    maybeYield()
                     if matchesSimpleSelector(current, part) then
                         matched = true
                         current = current.parent
@@ -232,14 +299,6 @@ return function(deps)
             style.fg = colors.lightBlue
         elseif tag == "strong" or tag == "b" then
             style.bold = true
-        elseif tag == "toast" then
-            style.display = "block"
-            style.marginTop = math.max(style.marginTop, 1)
-            style.marginBottom = math.max(style.marginBottom, 1)
-            style.paddingLeft = math.max(style.paddingLeft, 1)
-            style.paddingRight = math.max(style.paddingRight, 1)
-            style.fg = colors.white
-            style.bg = colors.gray
         elseif tag == "pre" then
             style.display = "block"
             style.whiteSpace = "pre"
@@ -354,6 +413,16 @@ return function(deps)
             if value then
                 style.overflowY = value
             end
+        elseif prop == "position" then
+            if lower == "static" or lower == "relative" or lower == "absolute" or lower == "fixed" or lower == "sticky" then
+                style.position = lower
+            end
+        elseif prop == "top" then
+            style.top = parseLength(raw)
+        elseif prop == "right" then
+            style.right = parseLength(raw)
+        elseif prop == "left" then
+            style.left = parseLength(raw)
         end
     end
 
@@ -372,31 +441,19 @@ return function(deps)
             paddingRight = 0,
             overflowX = "visible",
             overflowY = "visible",
+            position = "static",
+            top = 0,
+            right = 0,
+            left = 0,
         }
     end
 
     local function computeStyle(node, parentStyle, rules)
         local style = newComputedStyle(parentStyle)
         applyTagDefaults(style, node.tag)
-        if node.tag == "toast" then
-            local toastType = trim(node.attrs and node.attrs.type or ""):lower()
-            if toastType == "success" then
-                style.fg = colors.black
-                style.bg = colors.lime
-            elseif toastType == "error" then
-                style.fg = colors.white
-                style.bg = colors.red
-            elseif toastType == "warning" then
-                style.fg = colors.black
-                style.bg = colors.orange
-            elseif toastType == "info" then
-                style.fg = colors.white
-                style.bg = colors.blue
-            end
-        end
-
         local appliedMeta = {}
         for _, rule in ipairs(rules) do
+            maybeYield()
             for _, selector in ipairs(rule.selectors) do
                 local parsedSelector = getParsedSelector(selector)
                 if selectorMatchesNode(parsedSelector, node) then
@@ -444,11 +501,26 @@ return function(deps)
         }
     end
 
-    local function createWriter(width, pageBackground)
+    local function createWriter(width, pageBackground, options)
+        local config = options or {}
+        local rawWindowStart = tonumber(config.windowStartLine)
+        if rawWindowStart then
+            rawWindowStart = math.floor(rawWindowStart)
+        end
+        local windowStartLine = math.max(1, rawWindowStart or 1)
+        local requestedWindowEnd = tonumber(config.windowEndLine)
+        if requestedWindowEnd then
+            requestedWindowEnd = math.floor(requestedWindowEnd)
+        end
+        local windowEndLine = nil
+        if requestedWindowEnd and requestedWindowEnd >= windowStartLine then
+            windowEndLine = requestedWindowEnd
+        end
+
         local writer = {
             width = math.max(1, width),
             pageBackground = pageBackground or colors.black,
-            lines = { createEmptyLine() },
+            lines = {},
             x = 1,
             y = 1,
             indent = 0,
@@ -456,9 +528,34 @@ return function(deps)
             pendingSpaceStyle = nil,
             pendingSpaceHref = nil,
             pendingSpaceControl = nil,
+            currentLineLastChar = nil,
+            maxNonBlankLine = 0,
+            windowStartLine = windowStartLine,
+            windowEndLine = windowEndLine,
+            storeAllLines = windowEndLine == nil,
         }
 
+        if writer.storeAllLines then
+            writer.lines[1] = createEmptyLine()
+        end
+
+        function writer:isLineVisible(index)
+            if self.storeAllLines then
+                return true
+            end
+            if index < self.windowStartLine then
+                return false
+            end
+            if self.windowEndLine and index > self.windowEndLine then
+                return false
+            end
+            return true
+        end
+
         function writer:getLine(index)
+            if not self:isLineVisible(index) then
+                return nil
+            end
             local line = self.lines[index]
             if not line then
                 line = createEmptyLine()
@@ -476,6 +573,7 @@ return function(deps)
             self.indent = clamp(value, 0, maxIndent)
             if self.x < (self.indent + 1) then
                 self.x = self.indent + 1
+                self.currentLineLastChar = nil
             end
         end
 
@@ -483,6 +581,7 @@ return function(deps)
             self.y = self.y + 1
             self:getLine(self.y)
             self.x = self.indent + 1
+            self.currentLineLastChar = nil
             self:clearPendingSpace()
         end
 
@@ -524,11 +623,19 @@ return function(deps)
                 self:newLine()
             end
             local line = self:getLine(self.y)
-            line.chars[self.x] = ch
-            line.fg[self.x] = style.fg or colors.white
-            line.bg[self.x] = style.bg or self.pageBackground
-            line.links[self.x] = href
-            line.controls[self.x] = controlKey
+            if line then
+                local bg = style.bg or self.pageBackground
+                local fg = ensureContrastingForeground(style.fg, bg)
+                line.chars[self.x] = ch
+                line.fg[self.x] = fg
+                line.bg[self.x] = bg
+                line.links[self.x] = href
+                line.controls[self.x] = controlKey
+            end
+            if ch ~= " " then
+                self.maxNonBlankLine = math.max(self.maxNonBlankLine, self.y)
+            end
+            self.currentLineLastChar = ch
             self.x = self.x + 1
         end
 
@@ -536,8 +643,7 @@ return function(deps)
             if self:atLineStart() then
                 return
             end
-            local line = self:getLine(self.y)
-            if line.chars[self.x - 1] == " " then
+            if self.currentLineLastChar == " " then
                 return
             end
             self:putChar(" ", style, href, controlKey)
@@ -559,6 +665,7 @@ return function(deps)
             self:clearPendingSpace()
             local transformed = transformText(text, style.textTransform)
             for i = 1, #transformed do
+                maybeYield()
                 local ch = transformed:sub(i, i)
                 if ch == "\r" then
                     -- Ignore.
@@ -580,6 +687,7 @@ return function(deps)
             local i = 1
             local length = #text
             while i <= length do
+                maybeYield()
                 local ch = text:sub(i, i)
                 if ch:match("%s") then
                     self:setPendingSpace(style, href, controlKey)
@@ -637,6 +745,7 @@ return function(deps)
 
             self:setIndent(previousIndent + indentDelta)
             self.x = self.indent + 1
+            self.currentLineLastChar = nil
             self:clearPendingSpace()
             return previousIndent
         end
@@ -652,6 +761,11 @@ return function(deps)
             end
             self:setIndent(previousIndent or 0)
             self.x = self.indent + 1
+            self.currentLineLastChar = nil
+        end
+
+        function writer:contentLineCount()
+            return math.max(1, self.maxNonBlankLine)
         end
 
         return writer
@@ -1173,6 +1287,7 @@ return function(deps)
     end
 
     local function renderNode(node, parentStyle, rules, writer, context, baseUrl)
+        maybeYield()
         if node.type == "text" then
             writer:writeText(node.text or "", parentStyle, context.currentHref, parentStyle.whiteSpace == "pre")
             return
@@ -1271,6 +1386,7 @@ return function(deps)
         end
 
         for _, child in ipairs(node.children or {}) do
+            maybeYield()
             renderNode(child, style, rules, writer, context, baseUrl)
         end
 
@@ -1293,6 +1409,7 @@ return function(deps)
     end
 
     local function findFirstTag(node, tagName)
+        maybeYield()
         if node.type == "element" and node.tag == tagName then
             return node
         end
@@ -1374,6 +1491,7 @@ style, script, head, meta, link, title { display: none; }
         local loaded = 0
         local seen = {}
         for _, href in ipairs(cssLinks) do
+            maybeYield()
             if loaded >= maxExternalStylesheets then
                 break
             end
@@ -1419,16 +1537,24 @@ style, script, head, meta, link, title { display: none; }
         }
     end
 
-    local function renderDocumentLines(document, width, formState, focusControlKey)
+    local function renderDocumentInternal(document, width, formState, focusControlKey, windowStartLine, windowLineCount)
+        local useWindow = windowStartLine ~= nil and windowLineCount ~= nil
+        local startLine = math.max(1, parseInteger(windowStartLine, 1) or 1)
+        local lineCount = math.max(1, parseInteger(windowLineCount, 1) or 1)
+
         if not document then
-            return { createEmptyLine() }, {
+            local emptyLines = {}
+            if (not useWindow) or startLine <= 1 then
+                emptyLines[1] = createEmptyLine()
+            end
+            return emptyLines, {
                 formsById = {},
                 formOrder = {},
                 formsByHtmlId = {},
                 controlsByKey = {},
                 controlOrder = {},
                 formState = formState or {},
-            }
+            }, 1
         end
 
         local contentWidth = math.max(1, width or 1)
@@ -1455,7 +1581,14 @@ style, script, head, meta, link, title { display: none; }
             baseStyle.bg = bodyStyle.bg or baseStyle.bg
         end
 
-        local writer = createWriter(contentWidth, baseStyle.bg)
+        local writerOptions = nil
+        if useWindow then
+            writerOptions = {
+                windowStartLine = startLine,
+                windowEndLine = startLine + lineCount - 1,
+            }
+        end
+        local writer = createWriter(contentWidth, baseStyle.bg, writerOptions)
         local context = {
             currentHref = nil,
             listStack = {},
@@ -1470,7 +1603,13 @@ style, script, head, meta, link, title { display: none; }
         }
         local renderRoot = bodyNode or findFirstTag(document.root, "html") or document.root
         renderNode(renderRoot, baseStyle, document.rules, writer, context, document.baseUrl)
-        trimTrailingBlankLines(writer.lines)
+
+        local totalLines = writer:contentLineCount()
+        if writer.storeAllLines then
+            trimTrailingBlankLines(writer.lines)
+            totalLines = math.max(1, #writer.lines)
+        end
+
         return writer.lines, {
             formsById = context.formsById,
             formOrder = context.formOrder,
@@ -1478,12 +1617,22 @@ style, script, head, meta, link, title { display: none; }
             controlsByKey = context.controlsByKey,
             controlOrder = context.controlOrder,
             formState = context.formState,
-        }
+        }, totalLines
+    end
+
+    local function renderDocumentLines(document, width, formState, focusControlKey)
+        local lines, meta = renderDocumentInternal(document, width, formState, focusControlKey, nil, nil)
+        return lines, meta
+    end
+
+    local function renderDocumentWindowLines(document, width, startLine, lineCount, formState, focusControlKey)
+        return renderDocumentInternal(document, width, formState, focusControlKey, startLine, lineCount)
     end
 
     return {
         createEmptyLine = createEmptyLine,
         buildDocument = buildDocument,
         renderDocumentLines = renderDocumentLines,
+        renderDocumentWindowLines = renderDocumentWindowLines,
     }
 end

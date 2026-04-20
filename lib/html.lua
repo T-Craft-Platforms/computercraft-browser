@@ -3,6 +3,28 @@ return function(core)
     local decodeEntities = core.decodeEntities
     local RAW_TEXT_TAGS = core.RAW_TEXT_TAGS
     local VOID_TAGS = core.VOID_TAGS
+    local YIELD_EVENT = "__cc_browser_html_yield"
+    local YIELD_STEP_BUDGET = 2200
+    local yieldSteps = 0
+
+    local function cooperativeYield()
+        if os and type(os.queueEvent) == "function" and type(os.pullEventRaw) == "function" then
+            os.queueEvent(YIELD_EVENT)
+            os.pullEventRaw(YIELD_EVENT)
+            return
+        end
+        if sleep then
+            sleep(0)
+        end
+    end
+
+    local function maybeYield(stepCost)
+        yieldSteps = yieldSteps + (stepCost or 1)
+        if yieldSteps >= YIELD_STEP_BUDGET then
+            yieldSteps = 0
+            cooperativeYield()
+        end
+    end
 
     local function parseAttributes(raw)
         local attrs = {}
@@ -10,6 +32,7 @@ return function(core)
         local length = #raw
 
         while i <= length do
+            maybeYield()
             while i <= length and raw:sub(i, i):match("%s") do
                 i = i + 1
             end
@@ -80,6 +103,7 @@ return function(core)
         local length = #html
 
         while i <= length do
+            maybeYield()
             local ch = html:sub(i, i)
             if quote then
                 if ch == quote then
@@ -113,6 +137,7 @@ return function(core)
         local length = #html
 
         while i <= length do
+            maybeYield()
             local lt = html:find("<", i, true)
             if not lt then
                 appendTextNode(stack[#stack], html:sub(i))
@@ -199,6 +224,7 @@ return function(core)
     end
 
     local function walkNode(node, fn)
+        maybeYield()
         fn(node)
         if node.children then
             for _, child in ipairs(node.children) do
@@ -208,6 +234,7 @@ return function(core)
     end
 
     local function nodeTextContent(node)
+        maybeYield()
         if node.type == "text" then
             return node.text or ""
         end

@@ -428,7 +428,7 @@ return function(deps)
             return nil
         end
 
-        local contentHeight = math.max(1, #tab.pageLines)
+        local contentHeight = math.max(1, tonumber(tab.pageContentHeight) or #tab.pageLines)
         local maxScroll = math.max(0, contentHeight - visibleHeight)
         local thumbHeight = visibleHeight
         if contentHeight > visibleHeight then
@@ -495,6 +495,19 @@ return function(deps)
             term.setCursorPos(1, row + TOP_BAR_ROWS)
             term.blit(table.concat(chars), table.concat(fgs), table.concat(bgs))
         end
+
+        local currentUrl = tostring(tab.currentUrl or ""):lower()
+        local statusText = tostring(tab.settingsStickyStatus or "")
+        if statusText ~= "" and currentUrl:sub(1, #"about:settings") == "about:settings" then
+            local badge = " " .. statusText .. " "
+            local maxBadgeWidth = math.max(12, math.floor(w * 0.55))
+            if #badge > maxBadgeWidth then
+                local inner = math.max(1, maxBadgeWidth - 5)
+                badge = " " .. statusText:sub(1, inner) .. "... "
+            end
+            local x = math.max(1, w - #badge + 1)
+            writeClipped(x, TOP_BAR_ROWS + 1, badge, colors.black, colors.lime)
+        end
     end
 
     local function drawMenuPopover()
@@ -509,7 +522,7 @@ return function(deps)
             return
         end
         local panelWidth = math.min(24, math.max(14, w))
-        local panelHeight = 4
+        local panelHeight = 6
         local panelX2 = clamp(state.ui.menuButton.x2, 1, w)
         local panelX1 = math.max(1, panelX2 - panelWidth + 1)
         local panelY1 = TOP_BAR_ROWS + 1
@@ -530,7 +543,9 @@ return function(deps)
         local settingsY = panelY1
         local helpY = math.min(panelY2, panelY1 + 1)
         local favoritesY = math.min(panelY2, panelY1 + 2)
-        local exitY = math.min(panelY2, panelY1 + 3)
+        local historyY = math.min(panelY2, panelY1 + 3)
+        local printY = math.min(panelY2, panelY1 + 4)
+        local exitY = math.min(panelY2, panelY1 + 5)
 
         writeClipped(innerX1, settingsY, "Settings", textFg, textBg)
         writeClipped(innerX1, helpY, "Help", textFg, textBg)
@@ -554,6 +569,8 @@ return function(deps)
 
         writeClipped(favTextX1, favoritesY, string.rep(" ", favTextX2 - favTextX1 + 1), textFg, textBg)
         writeClipped(favTextX1 + 1, favoritesY, "Favorites", textFg, textBg)
+        writeClipped(innerX1, historyY, "History", textFg, textBg)
+        writeClipped(innerX1, printY, "Print", textFg, textBg)
         writeClipped(innerX1, exitY, "Exit", textFg, textBg)
 
         state.ui.menu.settings = { x1 = panelX1, x2 = panelX2, y = settingsY }
@@ -565,6 +582,8 @@ return function(deps)
         end
         state.ui.menu.addFavoriteEnabled = addFavoriteEnabled
         state.ui.menu.favorites = { x1 = panelX1, x2 = favTextX2, y = favoritesY }
+        state.ui.menu.history = { x1 = panelX1, x2 = panelX2, y = historyY }
+        state.ui.menu.print = { x1 = panelX1, x2 = panelX2, y = printY }
         state.ui.menu.exit = { x1 = panelX1, x2 = panelX2, y = exitY }
     end
 

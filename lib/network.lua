@@ -163,6 +163,42 @@ return function(core, options)
         end)
     end
 
+    local function normalizeUpdateIntervalMs(rawInterval)
+        local value = tonumber(rawInterval)
+        if not value then
+            return nil
+        end
+        value = math.floor(value + 0.5)
+        if value < 1 then
+            return nil
+        end
+        return value
+    end
+
+    local function applyTemplateTokens(template, tokenValues)
+        local body = template or ""
+        local minUpdateMs = nil
+
+        body = body:gsub("{{([%w_]+)@(%d+)}}", function(tokenName, intervalText)
+            local tokenValue = tokenValues and tokenValues[tokenName] or nil
+            if tokenValue == nil then
+                return ("{{%s@%s}}"):format(tokenName, intervalText)
+            end
+
+            local intervalMs = normalizeUpdateIntervalMs(intervalText)
+            if intervalMs and ((not minUpdateMs) or intervalMs < minUpdateMs) then
+                minUpdateMs = intervalMs
+            end
+            return tostring(tokenValue)
+        end)
+
+        for tokenName, tokenValue in pairs(tokenValues or {}) do
+            body = replaceToken(body, "{{" .. tokenName .. "}}", tostring(tokenValue))
+        end
+
+        return body, minUpdateMs
+    end
+
     local function renderCenteredLogoAscii()
         local icon = tostring(aboutApi.appIcon or "[CC]")
         local logoLines = {
@@ -271,33 +307,171 @@ return function(core, options)
 
     local function renderHomePage(template, url)
         local favoritesMarkup, favoritesCount = renderFavoritesItems(listFavorites())
-        local body = template or ""
-        body = replaceToken(body, "{{APP_TITLE}}", escapeHtml(tostring(aboutApi.appTitle or "CC Browser")))
-        body = replaceToken(body, "{{APP_VERSION}}", escapeHtml(tostring(aboutApi.appVersion or "0.0.0")))
-        body = replaceToken(body, "{{APP_ICON}}", escapeHtml(tostring(aboutApi.appIcon or "[CC]")))
-        body = replaceToken(body, "{{CURRENT_URL}}", escapeHtml(url or "about:home"))
-        body = replaceToken(body, "{{MINECRAFT_TIME}}", escapeHtml(formatMinecraftTime()))
-        body = replaceToken(body, "{{REAL_TIME}}", escapeHtml(formatRealTime()))
-        body = replaceToken(body, "{{FAVORITES_COUNT}}", tostring(favoritesCount))
-        body = replaceToken(body, "{{FAVORITES_LIST}}", favoritesMarkup)
-        return body
+        local tokenValues = {
+            APP_TITLE = escapeHtml(tostring(aboutApi.appTitle or "CC Browser")),
+            APP_VERSION = escapeHtml(tostring(aboutApi.appVersion or "0.0.0")),
+            APP_ICON = escapeHtml(tostring(aboutApi.appIcon or "[CC]")),
+            CURRENT_URL = escapeHtml(url or "about:home"),
+            MINECRAFT_TIME = escapeHtml(formatMinecraftTime()),
+            REAL_TIME = escapeHtml(formatRealTime()),
+            FAVORITES_COUNT = tostring(favoritesCount),
+            FAVORITES_LIST = favoritesMarkup,
+        }
+        return applyTemplateTokens(template, tokenValues)
     end
 
     local function renderFavoritesPage(template, url)
         local favoritesMarkup, favoritesCount = renderFavoritesItems(listFavorites())
-        local body = template or ""
-        body = replaceToken(body, "{{APP_TITLE}}", escapeHtml(tostring(aboutApi.appTitle or "CC Browser")))
-        body = replaceToken(body, "{{APP_VERSION}}", escapeHtml(tostring(aboutApi.appVersion or "0.0.0")))
-        body = replaceToken(body, "{{APP_ICON}}", escapeHtml(tostring(aboutApi.appIcon or "[CC]")))
-        body = replaceToken(body, "{{CURRENT_URL}}", escapeHtml(url or "about:favorites"))
-        body = replaceToken(body, "{{FAVORITES_COUNT}}", tostring(favoritesCount))
-        body = replaceToken(body, "{{FAVORITES_LIST}}", favoritesMarkup)
-        return body
+        local tokenValues = {
+            APP_TITLE = escapeHtml(tostring(aboutApi.appTitle or "CC Browser")),
+            APP_VERSION = escapeHtml(tostring(aboutApi.appVersion or "0.0.0")),
+            APP_ICON = escapeHtml(tostring(aboutApi.appIcon or "[CC]")),
+            CURRENT_URL = escapeHtml(url or "about:favorites"),
+            FAVORITES_COUNT = tostring(favoritesCount),
+            FAVORITES_LIST = favoritesMarkup,
+        }
+        return applyTemplateTokens(template, tokenValues)
+    end
+
+    local settingsStatusMessage = nil
+    local settingsStatusUntil = 0
+
+    local function setSettingsStatus(message, durationSeconds)
+        settingsStatusMessage = tostring(message or "")
+        if os and type(os.clock) == "function" then
+            settingsStatusUntil = os.clock() + math.max(0, tonumber(durationSeconds) or 0)
+        else
+            settingsStatusUntil = 0
+        end
+    end
+
+    local function activeSettingsStatus()
+        if not settingsStatusMessage or settingsStatusMessage == "" then
+            return nil
+        end
+        if not (os and type(os.clock) == "function") then
+            return settingsStatusMessage
+        end
+        if os.clock() <= (settingsStatusUntil or 0) then
+            return settingsStatusMessage
+        end
+        return nil
+    end
+
+    local function renderHistoryPage(template, url, params)
+        local statusMessage = "Ready."
+        local action = trim(tostring(params.action or "")):lower()
+
+        if action == "delete_entry" then
+            if type(aboutApi.removeHistoryEntry) ~= "function" then
+                statusMessage = "History API is unavailable."
+            else
+                local ok, err = aboutApi.removeHistoryEntry(params.id or params.entry_id)
+                if ok then
+                    statusMessage = "History entry removed."
+                else
+                    statusMessage = tostring(err or "Could not remove history entry.")
+                end
+            end
+        elseif action == "delete_day" then
+            if type(aboutApi.clearHistoryDay) ~= "function" then
+                statusMessage = "History API is unavailable."
+            else
+                local ok, err = aboutApi.clearHistoryDay(params.day or "")
+                if ok then
+                    statusMessage = "History day cleared."
+                else
+                    statusMessage = tostring(err or "Could not clear history day.")
+                end
+            end
+        elseif action == "clear_all" then
+            if type(aboutApi.clearHistory) ~= "function" then
+                statusMessage = "History API is unavailable."
+            else
+                local ok, err = aboutApi.clearHistory()
+                if ok then
+                    statusMessage = "All history cleared."
+                else
+                    statusMessage = tostring(err or "Could not clear history.")
+                end
+            end
+        end
+
+        local historyEnabled = true
+        if type(aboutApi.getSetting) == "function" then
+            local raw = trim(tostring(aboutApi.getSetting("history_enabled") or "true")):lower()
+            historyEnabled = not (raw == "false" or raw == "0" or raw == "no" or raw == "off" or raw == "disabled")
+        end
+
+        local entries = {}
+        if type(aboutApi.listHistory) == "function" then
+            local listed = aboutApi.listHistory()
+            if type(listed) == "table" then
+                entries = listed
+            end
+        end
+
+        local groupsMarkup = {}
+        if #entries == 0 then
+            groupsMarkup[#groupsMarkup + 1] = "<p><i>No history yet.</i></p>"
+        else
+            local currentDay = nil
+            local openedList = false
+            for _, entry in ipairs(entries) do
+                local day = trim(tostring(entry.day or ""))
+                if day == "" then
+                    day = "Unknown"
+                end
+                if day ~= currentDay then
+                    if openedList then
+                        groupsMarkup[#groupsMarkup + 1] = "</ul>"
+                    end
+                    currentDay = day
+                    openedList = true
+                    local deleteDayUrl = "about:history?action=delete_day&day=" .. urlEncode(day)
+                    groupsMarkup[#groupsMarkup + 1] = ("<h3>%s</h3><p><a href=\"%s\">Delete this day</a></p><ul>")
+                        :format(escapeHtml(day), escapeHtml(deleteDayUrl))
+                end
+
+                local entryUrl = tostring(entry.url or "")
+                local entryTitle = trim(tostring(entry.title or ""))
+                if entryTitle == "" then
+                    entryTitle = entryUrl
+                end
+                local timestamp = trim(tostring(entry.timestamp or ""))
+                if timestamp == "" then
+                    timestamp = day
+                end
+                local deleteEntryUrl = "about:history?action=delete_entry&id=" .. urlEncode(tostring(entry.id or ""))
+                groupsMarkup[#groupsMarkup + 1] =
+                    ("<li><code>%s</code> <a href=\"%s\">%s</a> <a href=\"%s\">[delete]</a></li>")
+                        :format(escapeHtml(timestamp), escapeHtml(entryUrl), escapeHtml(entryTitle), escapeHtml(deleteEntryUrl))
+            end
+            if openedList then
+                groupsMarkup[#groupsMarkup + 1] = "</ul>"
+            end
+        end
+
+        local historyHint = historyEnabled
+            and "History tracking is enabled."
+            or "History tracking is disabled."
+
+        local tokenValues = {
+            APP_TITLE = escapeHtml(tostring(aboutApi.appTitle or "CC Browser")),
+            APP_VERSION = escapeHtml(tostring(aboutApi.appVersion or "0.0.0")),
+            APP_ICON = escapeHtml(tostring(aboutApi.appIcon or "[CC]")),
+            CURRENT_URL = escapeHtml(url or "about:history"),
+            STATUS_MESSAGE = escapeHtml(statusMessage),
+            HISTORY_HINT = escapeHtml(historyHint),
+            HISTORY_COUNT = tostring(#entries),
+            HISTORY_GROUPS = table.concat(groupsMarkup),
+            CLEAR_ALL_URL = escapeHtml("about:history?action=clear_all"),
+        }
+        return applyTemplateTokens(template, tokenValues)
     end
 
     local function renderSettingsPage(template, url, params)
-        local statusMessage = "Ready."
-        local statusToastType = "info"
+        local statusMessage = activeSettingsStatus() or "Ready."
         local action = (params.action or ""):lower()
 
         if action == "set" then
@@ -312,42 +486,63 @@ return function(core, options)
                 elseif choice == "custom" then
                     value = tostring(params.home_page_custom or "")
                 end
+            elseif key == "turtle_mode" or key == "virtual_views" then
+                key = "turtle_mode"
+                local choice = tostring(params.turtle_mode_choice or params.virtual_views_choice or ""):lower()
+                if choice == "enabled" then
+                    value = "true"
+                elseif choice == "disabled" then
+                    value = "false"
+                end
+            elseif key == "usage_guard_enabled" then
+                local choice = tostring(params.usage_guard_choice or ""):lower()
+                if choice == "enabled" then
+                    value = "true"
+                elseif choice == "disabled" then
+                    value = "false"
+                end
+            elseif key == "history_enabled" then
+                local choice = tostring(params.history_choice or ""):lower()
+                if choice == "enabled" then
+                    value = "true"
+                elseif choice == "disabled" then
+                    value = "false"
+                end
+            elseif key == "persistence_enabled" then
+                local choice = tostring(params.persistence_choice or ""):lower()
+                if choice == "enabled" then
+                    value = "true"
+                elseif choice == "disabled" then
+                    value = "false"
+                end
             end
             if key == "" then
                 statusMessage = "Missing setting key."
-                statusToastType = "error"
             elseif key == "home_page" and trim(tostring(value or "")) == "" then
                 statusMessage = "Missing home page value."
-                statusToastType = "error"
             elseif type(aboutApi.setSetting) ~= "function" then
                 statusMessage = "Settings API is unavailable."
-                statusToastType = "error"
             else
                 local ok, err = aboutApi.setSetting(key, value)
                 if ok then
                     statusMessage = ("Saved %s = %s"):format(key, value)
-                    statusToastType = "success"
                 else
                     statusMessage = tostring(err or "Failed to save setting.")
-                    statusToastType = "error"
                 end
             end
+            setSettingsStatus(statusMessage, 3)
         elseif action == "get" then
             local key = params.key or ""
             if key == "" then
                 statusMessage = "Missing setting key."
-                statusToastType = "error"
             elseif type(aboutApi.getSetting) ~= "function" then
                 statusMessage = "Settings API is unavailable."
-                statusToastType = "error"
             else
                 local value = aboutApi.getSetting(key)
                 if value == nil then
                     statusMessage = ("No value set for %s"):format(key)
-                    statusToastType = "info"
                 else
                     statusMessage = ("%s = %s"):format(key, tostring(value))
-                    statusToastType = "success"
                 end
             end
         end
@@ -383,7 +578,6 @@ return function(core, options)
             end
         end
 
-        local body = template or ""
         local homePageValue = tostring(settings.home_page or "about:home")
         local selectedChoice = tostring(params.home_page_choice or ""):lower()
         if selectedChoice ~= "about:home" and selectedChoice ~= "about:blank" and selectedChoice ~= "custom" then
@@ -408,20 +602,82 @@ return function(core, options)
             customValue = homePageValue
         end
 
-        body = replaceToken(body, "{{APP_TITLE}}", escapeHtml(tostring(aboutApi.appTitle or "CC Browser")))
-        body = replaceToken(body, "{{APP_VERSION}}", escapeHtml(tostring(aboutApi.appVersion or "0.0.0")))
-        body = replaceToken(body, "{{APP_ICON}}", escapeHtml(tostring(aboutApi.appIcon or "[CC]")))
-        body = replaceToken(body, "{{CURRENT_URL}}", escapeHtml(url or "about:settings"))
-        body = replaceToken(body, "{{STATUS_TOAST_TYPE}}", escapeHtml(statusToastType))
-        body = replaceToken(body, "{{STATUS_MESSAGE}}", escapeHtml(statusMessage))
-        body = replaceToken(body, "{{LOGO_ASCII}}", escapeHtml(renderCenteredLogoAscii()))
-        body = replaceToken(body, "{{HOME_PAGE_RADIO_HOME_CHECKED}}", selectedChoice == "about:home" and "checked" or "")
-        body = replaceToken(body, "{{HOME_PAGE_RADIO_BLANK_CHECKED}}", selectedChoice == "about:blank" and "checked" or "")
-        body = replaceToken(body, "{{HOME_PAGE_RADIO_CUSTOM_CHECKED}}", selectedChoice == "custom" and "checked" or "")
-        body = replaceToken(body, "{{HOME_PAGE_CUSTOM_VALUE}}", escapeHtml(customValue))
-        body = replaceToken(body, "{{SETTINGS_LIST}}", table.concat(settingsItems))
-        body = replaceToken(body, "{{PARAMS_LIST}}", table.concat(paramItems))
-        return body
+        local turtleModeValue = tostring(settings.turtle_mode or settings.virtual_views or "false"):lower()
+        local turtleModeChoice = tostring(params.turtle_mode_choice or params.virtual_views_choice or ""):lower()
+        if turtleModeChoice ~= "enabled" and turtleModeChoice ~= "disabled" then
+            if turtleModeValue == "false" or turtleModeValue == "0" or turtleModeValue == "off"
+                or turtleModeValue == "no" or turtleModeValue == "disabled" then
+                turtleModeChoice = "disabled"
+            else
+                turtleModeChoice = "enabled"
+            end
+        end
+
+        local usageGuardValue = tostring(settings.usage_guard_enabled or "true"):lower()
+        local usageGuardChoice = tostring(params.usage_guard_choice or ""):lower()
+        if usageGuardChoice ~= "enabled" and usageGuardChoice ~= "disabled" then
+            if usageGuardValue == "false" or usageGuardValue == "0" or usageGuardValue == "off"
+                or usageGuardValue == "no" or usageGuardValue == "disabled" then
+                usageGuardChoice = "disabled"
+            else
+                usageGuardChoice = "enabled"
+            end
+        end
+        local turtleModeEnabled = turtleModeChoice == "enabled"
+        if turtleModeEnabled and usageGuardChoice ~= "disabled" then
+            usageGuardChoice = "disabled"
+            if action == "set" and tostring(params.key or ""):lower() == "usage_guard_enabled" then
+                statusMessage = "High-usage crash guard is unavailable while turtle mode is enabled."
+                setSettingsStatus(statusMessage, 3)
+            end
+        end
+
+        local historyValue = tostring(settings.history_enabled or "true"):lower()
+        local historyChoice = tostring(params.history_choice or ""):lower()
+        if historyChoice ~= "enabled" and historyChoice ~= "disabled" then
+            if historyValue == "false" or historyValue == "0" or historyValue == "off"
+                or historyValue == "no" or historyValue == "disabled" then
+                historyChoice = "disabled"
+            else
+                historyChoice = "enabled"
+            end
+        end
+
+        local persistenceValue = tostring(settings.persistence_enabled or "true"):lower()
+        local persistenceChoice = tostring(params.persistence_choice or ""):lower()
+        if persistenceChoice ~= "enabled" and persistenceChoice ~= "disabled" then
+            if persistenceValue == "false" or persistenceValue == "0" or persistenceValue == "off"
+                or persistenceValue == "no" or persistenceValue == "disabled" then
+                persistenceChoice = "disabled"
+            else
+                persistenceChoice = "enabled"
+            end
+        end
+
+        local tokenValues = {
+            APP_TITLE = escapeHtml(tostring(aboutApi.appTitle or "CC Browser")),
+            APP_VERSION = escapeHtml(tostring(aboutApi.appVersion or "0.0.0")),
+            APP_ICON = escapeHtml(tostring(aboutApi.appIcon or "[CC]")),
+            CURRENT_URL = escapeHtml(url or "about:settings"),
+            STATUS_MESSAGE = escapeHtml(statusMessage),
+            LOGO_ASCII = escapeHtml(renderCenteredLogoAscii()),
+            HOME_PAGE_RADIO_HOME_CHECKED = selectedChoice == "about:home" and "checked" or "",
+            HOME_PAGE_RADIO_BLANK_CHECKED = selectedChoice == "about:blank" and "checked" or "",
+            HOME_PAGE_RADIO_CUSTOM_CHECKED = selectedChoice == "custom" and "checked" or "",
+            TURTLE_MODE_RADIO_ENABLED_CHECKED = turtleModeChoice == "enabled" and "checked" or "",
+            TURTLE_MODE_RADIO_DISABLED_CHECKED = turtleModeChoice == "disabled" and "checked" or "",
+            USAGE_GUARD_RADIO_ENABLED_CHECKED = usageGuardChoice == "enabled" and "checked" or "",
+            USAGE_GUARD_RADIO_DISABLED_CHECKED = usageGuardChoice == "disabled" and "checked" or "",
+            HISTORY_RADIO_ENABLED_CHECKED = historyChoice == "enabled" and "checked" or "",
+            HISTORY_RADIO_DISABLED_CHECKED = historyChoice == "disabled" and "checked" or "",
+            PERSISTENCE_RADIO_ENABLED_CHECKED = persistenceChoice == "enabled" and "checked" or "",
+            PERSISTENCE_RADIO_DISABLED_CHECKED = persistenceChoice == "disabled" and "checked" or "",
+            HOME_PAGE_CUSTOM_VALUE = escapeHtml(customValue),
+            SETTINGS_LIST = table.concat(settingsItems),
+            PARAMS_LIST = table.concat(paramItems),
+        }
+        local body, minUpdateMs = applyTemplateTokens(template, tokenValues)
+        return body, minUpdateMs, statusMessage
     end
 
     local function fetchTextResource(url, allowHttpFallback, requestOptions)
@@ -450,14 +706,28 @@ return function(core, options)
             if not body then
                 return nil, url, nil, "Unsupported about page: " .. url
             end
+            local aboutUpdateMs = nil
+            local responseUrl = url
+            local settingsStatus = nil
             if pageName == "settings" then
-                body = renderSettingsPage(body, url, params)
+                responseUrl = "about:settings"
+                body, aboutUpdateMs, settingsStatus = renderSettingsPage(body, responseUrl, params)
             elseif pageName == "home" then
-                body = renderHomePage(body, url)
+                body, aboutUpdateMs = renderHomePage(body, url)
             elseif pageName == "favorites" then
-                body = renderFavoritesPage(body, url)
+                body, aboutUpdateMs = renderFavoritesPage(body, url)
+            elseif pageName == "history" then
+                responseUrl = "about:history"
+                body, aboutUpdateMs = renderHistoryPage(body, responseUrl, params)
             end
-            return body, url, { ["Content-Type"] = "text/html" }, nil
+            local headers = { ["Content-Type"] = "text/html" }
+            if aboutUpdateMs then
+                headers["X-CC-About-Update-Ms"] = tostring(aboutUpdateMs)
+            end
+            if pageName == "settings" then
+                headers["X-CC-Settings-Status"] = tostring(settingsStatus or "")
+            end
+            return body, responseUrl, headers, nil
         end
 
         if parsed and parsed.scheme == "file" then

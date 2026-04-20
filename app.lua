@@ -26,13 +26,30 @@ local createUi = loadModule("ui/view.lua")
 
 local browserSettings = {
     home_page = "about:home",
+    turtle_mode = "false",
+    history_enabled = "true",
+    persistence_enabled = "true",
+    usage_guard_enabled = "true",
 }
 local browserFavorites = {}
+local browserHistory = {}
+local nextBrowserHistoryId = 1
+local BROWSER_STATE_PATH = fs.combine(SCRIPT_DIR, "browser-state.tbl")
+local persistBrowserState
+
+local function settingEnabledRaw(name, defaultEnabled)
+    local defaultText = defaultEnabled and "true" or "false"
+    local raw = core.trim(tostring(browserSettings[name] or defaultText)):lower()
+    return not (raw == "false" or raw == "0" or raw == "no" or raw == "off" or raw == "disabled")
+end
 
 local function normalizeSettingKey(key)
     local normalized = tostring(key or ""):lower()
     normalized = normalized:gsub("[^%w_%-]", "_")
     normalized = normalized:gsub("_+", "_")
+    if normalized == "virtual_views" then
+        normalized = "turtle_mode"
+    end
     return normalized
 end
 
@@ -60,7 +77,87 @@ local function setBrowserSetting(key, value)
     if value == nil then
         return false, "Missing setting value"
     end
+    if normalized == "turtle_mode" then
+        local lowered = core.trim(tostring(value)):lower()
+        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
+            browserSettings[normalized] = "true"
+            browserSettings.usage_guard_enabled = "false"
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
+            browserSettings[normalized] = "false"
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+        return false, "Invalid turtle_mode value (expected true/false)"
+    end
+    if normalized == "history_enabled" then
+        local lowered = core.trim(tostring(value)):lower()
+        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
+            browserSettings[normalized] = "true"
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
+            browserSettings[normalized] = "false"
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+        return false, "Invalid history_enabled value (expected true/false)"
+    end
+    if normalized == "persistence_enabled" then
+        local lowered = core.trim(tostring(value)):lower()
+        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
+            browserSettings[normalized] = "true"
+            if persistBrowserState then
+                persistBrowserState(true)
+            end
+            return true, nil
+        end
+        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
+            browserSettings[normalized] = "false"
+            if persistBrowserState then
+                persistBrowserState(true)
+            end
+            return true, nil
+        end
+        return false, "Invalid persistence_enabled value (expected true/false)"
+    end
+    if normalized == "usage_guard_enabled" then
+        local lowered = core.trim(tostring(value)):lower()
+        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
+            if settingEnabledRaw("turtle_mode", false) then
+                browserSettings[normalized] = "false"
+                return false, "usage_guard_enabled cannot be enabled while turtle_mode is enabled"
+            end
+            browserSettings[normalized] = "true"
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
+            browserSettings[normalized] = "false"
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+        return false, "Invalid usage_guard_enabled value (expected true/false)"
+    end
     browserSettings[normalized] = tostring(value)
+    if persistBrowserState then
+        persistBrowserState()
+    end
     return true, nil
 end
 
@@ -110,6 +207,9 @@ local function addBrowserFavorite(url, title)
         url = normalizedUrl,
         title = favoriteTitle,
     }
+    if persistBrowserState then
+        persistBrowserState()
+    end
     return true, nil
 end
 
@@ -163,8 +263,271 @@ local function removeBrowserFavorite(url)
         return false, "Not in favorites"
     end
     table.remove(browserFavorites, index)
+    if persistBrowserState then
+        persistBrowserState()
+    end
     return true, nil
 end
+
+local function historyTimestampParts()
+    if os and type(os.date) == "function" then
+        local okDate, dayText = pcall(os.date, "%Y-%m-%d")
+        local okDateTime, dateTimeText = pcall(os.date, "%Y-%m-%d %H:%M:%S")
+        if okDate and okDateTime and dayText and dateTimeText then
+            return tostring(dayText), tostring(dateTimeText)
+        end
+    end
+    local fallback = ("clock %.2fs"):format((os and type(os.clock) == "function") and os.clock() or 0)
+    return "Unknown", fallback
+end
+
+local function copyBrowserHistoryEntry(entry)
+    return {
+        id = tonumber(entry.id) or 0,
+        url = tostring(entry.url or ""),
+        title = tostring(entry.title or ""),
+        day = tostring(entry.day or "Unknown"),
+        timestamp = tostring(entry.timestamp or ""),
+    }
+end
+
+local function listBrowserHistory()
+    local copied = {}
+    for i, entry in ipairs(browserHistory) do
+        copied[i] = copyBrowserHistoryEntry(entry)
+    end
+    return copied
+end
+
+local function removeBrowserHistoryEntry(entryId)
+    local wanted = tonumber(entryId)
+    if not wanted then
+        return false, "Missing history entry id"
+    end
+    wanted = math.max(1, math.floor(wanted))
+
+    for i, entry in ipairs(browserHistory) do
+        if tonumber(entry.id) == wanted then
+            table.remove(browserHistory, i)
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+    end
+    return false, "History entry not found"
+end
+
+local function clearBrowserHistoryDay(day)
+    local wanted = core.trim(tostring(day or ""))
+    if wanted == "" then
+        return false, "Missing history day"
+    end
+
+    local kept = {}
+    local removed = 0
+    for _, entry in ipairs(browserHistory) do
+        if tostring(entry.day or "") == wanted then
+            removed = removed + 1
+        else
+            kept[#kept + 1] = entry
+        end
+    end
+
+    if removed <= 0 then
+        return false, "History day not found"
+    end
+
+    browserHistory = kept
+    if persistBrowserState then
+        persistBrowserState()
+    end
+    return true, nil
+end
+
+local function clearBrowserHistory()
+    browserHistory = {}
+    if persistBrowserState then
+        persistBrowserState()
+    end
+    return true, nil
+end
+
+local function shouldTrackNavigationInHistory(rawUrl)
+    local normalizedUrl = core.trim(tostring(rawUrl or "")):lower()
+    if normalizedUrl == "" then
+        return false
+    end
+    if core.startsWith(normalizedUrl, "about:history?action=") then
+        return false
+    end
+    if core.startsWith(normalizedUrl, "about:settings?action=set") then
+        return false
+    end
+    return true
+end
+
+local function addBrowserHistory(url, title)
+    if not settingEnabledRaw("history_enabled", true) then
+        return false
+    end
+
+    local normalizedUrl = core.trim(tostring(url or ""))
+    if normalizedUrl == "" then
+        return false
+    end
+    local lowerUrl = normalizedUrl:lower()
+    if core.startsWith(lowerUrl, "about:history")
+        and lowerUrl:find("?action=", 1, true) then
+        return false
+    end
+
+    local day, timestamp = historyTimestampParts()
+    local normalizedTitle = core.trim(tostring(title or ""))
+    browserHistory[#browserHistory + 1] = {
+        id = nextBrowserHistoryId,
+        url = normalizedUrl,
+        title = normalizedTitle,
+        day = day,
+        timestamp = timestamp,
+    }
+    nextBrowserHistoryId = nextBrowserHistoryId + 1
+
+    if persistBrowserState then
+        persistBrowserState()
+    end
+    return true
+end
+
+local function loadBrowserState()
+    if not (fs and fs.exists and fs.open) then
+        return false, "Filesystem unavailable"
+    end
+    if not (textutils and type(textutils.unserialize) == "function") then
+        return false, "Serializer unavailable"
+    end
+    if not fs.exists(BROWSER_STATE_PATH) then
+        return false, "No saved state"
+    end
+
+    local handle = fs.open(BROWSER_STATE_PATH, "r")
+    if not handle then
+        return false, "Could not open saved state"
+    end
+    local payload = handle.readAll() or ""
+    handle.close()
+    if payload == "" then
+        return false, "Saved state is empty"
+    end
+
+    local okParse, decoded = pcall(textutils.unserialize, payload)
+    if not okParse or type(decoded) ~= "table" then
+        return false, "Saved state is invalid"
+    end
+
+    if type(decoded.settings) == "table" then
+        for key, rawValue in pairs(decoded.settings) do
+            local normalized = normalizeSettingKey(key)
+            if normalized ~= "" then
+                browserSettings[normalized] = tostring(rawValue)
+            end
+        end
+    end
+
+    browserFavorites = {}
+    if type(decoded.favorites) == "table" then
+        for _, item in ipairs(decoded.favorites) do
+            local url = core.trim(tostring(item and item.url or ""))
+            if url ~= "" then
+                local title = core.trim(tostring(item and item.title or ""))
+                if title == "" then
+                    title = url
+                end
+                browserFavorites[#browserFavorites + 1] = {
+                    url = url,
+                    title = title,
+                }
+            end
+        end
+    end
+
+    browserHistory = {}
+    local maxId = 0
+    if type(decoded.history) == "table" then
+        for _, item in ipairs(decoded.history) do
+            local url = core.trim(tostring(item and item.url or ""))
+            if url ~= "" then
+                local id = tonumber(item.id)
+                if not id then
+                    id = maxId + 1
+                else
+                    id = math.max(1, math.floor(id))
+                end
+                if id <= maxId then
+                    id = maxId + 1
+                end
+                maxId = id
+
+                local title = core.trim(tostring(item.title or ""))
+                local day = core.trim(tostring(item.day or ""))
+                local timestamp = core.trim(tostring(item.timestamp or ""))
+                if day == "" then
+                    day = "Unknown"
+                end
+                if timestamp == "" then
+                    timestamp = day
+                end
+
+                browserHistory[#browserHistory + 1] = {
+                    id = id,
+                    url = url,
+                    title = title,
+                    day = day,
+                    timestamp = timestamp,
+                }
+            end
+        end
+    end
+    nextBrowserHistoryId = math.max(maxId + 1, 1)
+
+    if settingEnabledRaw("turtle_mode", false) then
+        browserSettings.usage_guard_enabled = "false"
+    end
+    return true, nil
+end
+
+persistBrowserState = function(forceWrite)
+    if (not forceWrite) and not settingEnabledRaw("persistence_enabled", true) then
+        return false, "Persistence disabled"
+    end
+    if not (fs and fs.open) then
+        return false, "Filesystem unavailable"
+    end
+    if not (textutils and type(textutils.serialize) == "function") then
+        return false, "Serializer unavailable"
+    end
+
+    local snapshot = {
+        version = 1,
+        settings = listBrowserSettings(),
+        favorites = listBrowserFavorites(),
+        history = listBrowserHistory(),
+    }
+    local encoded = textutils.serialize(snapshot)
+    if not encoded then
+        return false, "Failed to encode state"
+    end
+
+    local handle = fs.open(BROWSER_STATE_PATH, "w")
+    if not handle then
+        return false, "Could not open state file for writing"
+    end
+    handle.write(encoded)
+    handle.close()
+    return true, nil
+end
+
+loadBrowserState()
 
 local network = createNetwork(core, {
     aboutPagesDir = fs.combine(SCRIPT_DIR, "about-pages"),
@@ -176,6 +539,10 @@ local network = createNetwork(core, {
         getSetting = getBrowserSetting,
         setSetting = setBrowserSetting,
         listFavorites = listBrowserFavorites,
+        listHistory = listBrowserHistory,
+        removeHistoryEntry = removeBrowserHistoryEntry,
+        clearHistoryDay = clearBrowserHistoryDay,
+        clearHistory = clearBrowserHistory,
     },
 })
 local html = createHtml(core)
@@ -200,6 +567,17 @@ local function homePageUrl()
     return homePage
 end
 
+local function turtleModeEnabled()
+    return settingEnabledRaw("turtle_mode", false)
+end
+
+local function usageGuardEnabled()
+    if turtleModeEnabled() then
+        return false
+    end
+    return settingEnabledRaw("usage_guard_enabled", true)
+end
+
 local fetchTextResource = network.fetchTextResource
 local makeErrorPage = network.makeErrorPage
 local looksLikeHtml = network.looksLikeHtml
@@ -207,10 +585,54 @@ local looksLikeHtml = network.looksLikeHtml
 local createEmptyLine = content.createEmptyLine
 local buildDocument = content.buildDocument
 local renderDocumentLines = content.renderDocumentLines
+local renderDocumentWindowLines = content.renderDocumentWindowLines or function(
+    document,
+    width,
+    startLine,
+    lineCount,
+    formState,
+    focusControlKey
+)
+    local lines, meta = renderDocumentLines(document, width, formState, focusControlKey)
+    local totalLines = math.max(1, #lines)
+    return lines, meta, totalLines
+end
 
 local TOP_BAR_ROWS = 2
 local ANIMATION_TICK_SECONDS = 0.15
+local HIGH_USAGE_FRAME_THRESHOLD_MS = 750
+local HIGH_USAGE_FRAME_THRESHOLD_LOADING_MS = 10000
+local HIGH_USAGE_STRIKE_LIMIT = 1
+local HIGH_USAGE_COOLDOWN_SECONDS = 2.0
+local ABOUT_UPDATE_INTERVAL_HEADER = "X-CC-About-Update-Ms"
+local SETTINGS_STATUS_HEADER = "X-CC-Settings-Status"
 local scheduleAnimationTick
+
+local function parseAboutUpdateIntervalMs(headers)
+    local raw = getHeader(headers, ABOUT_UPDATE_INTERVAL_HEADER)
+    local intervalMs = tonumber(raw)
+    if not intervalMs then
+        return nil
+    end
+    intervalMs = math.floor(intervalMs + 0.5)
+    if intervalMs < 1 then
+        return nil
+    end
+    return intervalMs
+end
+
+local function parseSettingsStatusMessage(headers, currentUrl)
+    local normalizedUrl = trim(tostring(currentUrl or "")):lower()
+    if not startsWith(normalizedUrl, "about:settings") then
+        return nil
+    end
+    local raw = getHeader(headers, SETTINGS_STATUS_HEADER)
+    local parsed = trim(tostring(raw or ""))
+    if parsed == "" then
+        return nil
+    end
+    return parsed
+end
 
 local function createTab(initialUrl)
     local startingUrl = initialUrl or homePageUrl()
@@ -227,6 +649,11 @@ local function createTab(initialUrl)
         historyIndex = 0,
         document = nil,
         pageLines = { createEmptyLine() },
+        pageContentHeight = 1,
+        pageWindowStart = 1,
+        pageWindowEnd = 1,
+        renderRevision = 0,
+        lastRenderSignature = nil,
         viewportWidth = 1,
         showVerticalScrollbar = false,
         pageSelection = nil,
@@ -235,6 +662,8 @@ local function createTab(initialUrl)
         focusedFormControl = nil,
         loading = false,
         status = "",
+        aboutUpdateIntervalMs = nil,
+        settingsStickyStatus = nil,
     }
 end
 
@@ -256,9 +685,26 @@ local state = {
     },
     tabTitleCarousel = nil,
     animationTimer = nil,
+    aboutUpdate = {
+        timer = nil,
+        tabIndex = nil,
+        intervalMs = nil,
+    },
     running = true,
     ctrlDown = false,
     shiftDown = false,
+    highUsage = {
+        frozen = false,
+        overCount = 0,
+        lastFrameMs = 0,
+        cooldownUntil = 0,
+        loadingFrame = false,
+    },
+    modal = {
+        open = false,
+        spec = nil,
+        layout = nil,
+    },
     ui = {
         tabs = {},
         tabClose = {},
@@ -335,6 +781,20 @@ local function clearPageSelection(tab)
     target.pageSelection = nil
 end
 
+local function bumpRenderRevision(tab)
+    local target = tab or activeTab()
+    target.renderRevision = (target.renderRevision or 0) + 1
+end
+
+local function pageLineCount(tab)
+    local target = tab or activeTab()
+    local count = tonumber(target.pageContentHeight)
+    if not count then
+        count = #target.pageLines
+    end
+    return math.max(1, math.floor(count or 1))
+end
+
 local function normalizedPageSelection(tab)
     local target = tab or activeTab()
     local selection = target.pageSelection
@@ -379,7 +839,7 @@ end
 local function setPageSelection(tab, startLine, startCol, endLine, endCol)
     local target = tab or activeTab()
     local w = math.max(1, target.viewportWidth or 1)
-    local maxLine = math.max(1, #target.pageLines)
+    local maxLine = pageLineCount(target)
 
     target.pageSelection = {
         startLine = clamp(startLine, 1, maxLine),
@@ -391,13 +851,14 @@ end
 
 local function selectAllPageText(tab)
     local target = tab or activeTab()
-    if #target.pageLines < 1 then
+    local totalLines = pageLineCount(target)
+    if totalLines < 1 then
         clearPageSelection(target)
         return
     end
 
     local width = math.max(1, target.viewportWidth or 1)
-    setPageSelection(target, 1, 1, math.max(1, #target.pageLines), width)
+    setPageSelection(target, 1, 1, totalLines, width)
 end
 
 local function getSelectedPageText(tab)
@@ -408,6 +869,32 @@ local function getSelectedPageText(tab)
     end
 
     local w = math.max(1, target.viewportWidth or 1)
+    local sourceLines = target.pageLines or {}
+    local missingRange = false
+    for lineIndex = selection.startLine, selection.endLine do
+        if sourceLines[lineIndex] == nil then
+            missingRange = true
+            break
+        end
+    end
+    if missingRange and target.document then
+        local requestedCount = selection.endLine - selection.startLine + 1
+        local windowLines = select(
+            1,
+            renderDocumentWindowLines(
+                target.document,
+                w,
+                selection.startLine,
+                requestedCount,
+                target.formState,
+                target.focusedFormControl
+            )
+        )
+        if type(windowLines) == "table" then
+            sourceLines = windowLines
+        end
+    end
+
     local parts = {}
     for lineIndex = selection.startLine, selection.endLine do
         local startCol = (lineIndex == selection.startLine) and selection.startCol or 1
@@ -418,7 +905,7 @@ local function getSelectedPageText(tab)
             startCol, endCol = endCol, startCol
         end
 
-        local line = target.pageLines[lineIndex]
+        local line = sourceLines[lineIndex] or target.pageLines[lineIndex]
         local chars = {}
         for x = startCol, endCol do
             chars[#chars + 1] = (line and line.chars and line.chars[x]) or " "
@@ -454,7 +941,7 @@ local function maxScroll(tab)
     if pageOverflowY(target) == "hidden" then
         return 0
     end
-    return math.max(0, #target.pageLines - pageHeight())
+    return math.max(0, pageLineCount(target) - pageHeight())
 end
 
 local function setScroll(value, tab)
@@ -563,6 +1050,11 @@ local function closeTab(index)
         tab.historyIndex = 1
         tab.document = buildDocument("<html><body></body></html>", "about:blank")
         tab.pageLines = { createEmptyLine() }
+        tab.pageContentHeight = 1
+        tab.pageWindowStart = 1
+        tab.pageWindowEnd = 1
+        tab.renderRevision = 0
+        tab.lastRenderSignature = nil
         tab.viewportWidth = 1
         tab.showVerticalScrollbar = false
         clearPageSelection(tab)
@@ -571,6 +1063,7 @@ local function closeTab(index)
         tab.focusedFormControl = nil
         tab.loading = false
         tab.status = ""
+        tab.aboutUpdateIntervalMs = nil
         state.tabDrag = nil
         state.scrollbarDrag = nil
         state.menuOpen = false
@@ -655,14 +1148,35 @@ local ui = createUi({
 local layoutUi = ui.layoutUi
 local tabIndexAt = ui.tabIndexAt
 local tabCloseIndexAt = ui.tabCloseIndexAt
-local draw = ui.draw
+local drawBase = ui.draw
+local draw
 local navigate
+local scheduleAboutUpdateTimer
 
 local function renderDocument(tab)
     local target = tab or activeTab()
+    local turtleMode = turtleModeEnabled()
+    local w, h = term.getSize()
+    local visibleHeight = pageHeight()
+
+    local function makeRenderSignature()
+        local focusKey = target.focusedFormControl or ""
+        return table.concat({
+            tostring(target.document),
+            turtleMode and "turtle" or "full",
+            tostring(w),
+            tostring(h),
+            tostring(pageOverflowY(target)),
+            tostring(focusKey),
+            tostring(target.renderRevision or 0),
+        }, "|")
+    end
+
     if not target.document then
         target.pageLines = { createEmptyLine() }
-        local w, _ = term.getSize()
+        target.pageContentHeight = 1
+        target.pageWindowStart = 1
+        target.pageWindowEnd = 1
         target.viewportWidth = w
         target.showVerticalScrollbar = false
         target.formMeta = {
@@ -674,10 +1188,26 @@ local function renderDocument(tab)
             formState = target.formState or {},
         }
         setScroll(0, target)
+        target.lastRenderSignature = makeRenderSignature()
         return
     end
 
-    local w, _ = term.getSize()
+    local viewportStart = math.max(1, (target.scroll or 0) + 1)
+    local viewportEnd = viewportStart + visibleHeight - 1
+    local renderSignature = makeRenderSignature()
+    if target.lastRenderSignature == renderSignature then
+        if turtleMode then
+            local windowStart = tonumber(target.pageWindowStart) or 1
+            local windowEnd = tonumber(target.pageWindowEnd) or 0
+            if viewportStart >= windowStart and viewportEnd <= windowEnd then
+                return
+            end
+        else
+            return
+        end
+    end
+
+    local requestedScroll = target.scroll or 0
     local canShowScrollbarColumn = w >= 2
     local overflowY = pageOverflowY(target)
     local forceScrollbar = overflowY == "scroll"
@@ -685,24 +1215,82 @@ local function renderDocument(tab)
     local reserveScrollbar = canShowScrollbarColumn and forceScrollbar
     local contentWidth = math.max(1, w - (reserveScrollbar and 1 or 0))
 
-    local lines, formMeta = renderDocumentLines(
-        target.document,
-        contentWidth,
-        target.formState,
-        target.focusedFormControl
-    )
-    if (not reserveScrollbar) and canShowScrollbarColumn and allowVerticalScrolling and #lines > pageHeight() then
-        reserveScrollbar = true
-        contentWidth = math.max(1, w - 1)
+    local lines = {}
+    local formMeta = nil
+    local totalLines = 1
+    local windowStart = 1
+    local windowEnd = 1
+
+    if turtleMode then
+        local overscan = math.max(2, math.floor(visibleHeight / 3))
+        local windowLineCount = visibleHeight + (overscan * 2)
+
+        local function renderWindowAt(widthValue, startLine)
+            local linesOut, metaOut, totalOut = renderDocumentWindowLines(
+                target.document,
+                widthValue,
+                startLine,
+                windowLineCount,
+                target.formState,
+                target.focusedFormControl
+            )
+            totalOut = math.max(1, tonumber(totalOut) or (#linesOut or 0))
+            return linesOut or {}, metaOut, totalOut
+        end
+
+        windowStart = math.max(1, requestedScroll + 1 - overscan)
+        lines, formMeta, totalLines = renderWindowAt(contentWidth, windowStart)
+        if (not reserveScrollbar) and canShowScrollbarColumn and allowVerticalScrolling and totalLines > visibleHeight then
+            reserveScrollbar = true
+            contentWidth = math.max(1, w - 1)
+            lines, formMeta, totalLines = renderWindowAt(contentWidth, windowStart)
+        end
+
+        target.pageContentHeight = totalLines
+        target.viewportWidth = contentWidth
+        target.showVerticalScrollbar = reserveScrollbar and allowVerticalScrolling
+        setScroll(requestedScroll, target)
+
+        if target.scroll ~= requestedScroll then
+            windowStart = math.max(1, target.scroll + 1 - overscan)
+            lines, formMeta, totalLines = renderWindowAt(contentWidth, windowStart)
+        end
+
+        windowEnd = windowStart + windowLineCount - 1
+    else
         lines, formMeta = renderDocumentLines(
             target.document,
             contentWidth,
             target.formState,
             target.focusedFormControl
         )
+        lines = lines or { createEmptyLine() }
+        totalLines = math.max(1, #lines)
+        if (not reserveScrollbar) and canShowScrollbarColumn and allowVerticalScrolling and totalLines > visibleHeight then
+            reserveScrollbar = true
+            contentWidth = math.max(1, w - 1)
+            lines, formMeta = renderDocumentLines(
+                target.document,
+                contentWidth,
+                target.formState,
+                target.focusedFormControl
+            )
+            lines = lines or { createEmptyLine() }
+            totalLines = math.max(1, #lines)
+        end
+
+        target.pageContentHeight = totalLines
+        target.viewportWidth = contentWidth
+        target.showVerticalScrollbar = reserveScrollbar and allowVerticalScrolling
+        setScroll(requestedScroll, target)
+        windowStart = 1
+        windowEnd = totalLines
     end
 
     target.pageLines = lines
+    target.pageContentHeight = totalLines
+    target.pageWindowStart = windowStart
+    target.pageWindowEnd = windowEnd
     target.formMeta = formMeta or {
         formsById = {},
         formOrder = {},
@@ -718,9 +1306,7 @@ local function renderDocument(tab)
             target.focusedFormControl = nil
         end
     end
-    target.viewportWidth = contentWidth
-    target.showVerticalScrollbar = reserveScrollbar and allowVerticalScrolling
-    setScroll(target.scroll, target)
+    target.lastRenderSignature = makeRenderSignature()
 end
 
 local function hitRegion(x, y, region)
@@ -739,7 +1325,7 @@ local function verticalScrollbarMetrics(tab)
     end
 
     local viewportHeight = pageHeight()
-    local contentHeight = math.max(1, #target.pageLines)
+    local contentHeight = pageLineCount(target)
     local maxValue = maxScroll(target)
     local thumbHeight = viewportHeight
     if contentHeight > viewportHeight then
@@ -769,6 +1355,395 @@ local function rerenderAllTabs()
     for _, tab in ipairs(state.tabs) do
         renderDocument(tab)
     end
+end
+
+local function clearModal()
+    state.modal.open = false
+    state.modal.spec = nil
+    state.modal.layout = nil
+end
+
+local function openModal(spec)
+    if type(spec) ~= "table" then
+        return false
+    end
+    state.modal.open = true
+    state.modal.spec = spec
+    state.modal.layout = nil
+    return true
+end
+
+local function modalButtons(spec)
+    local source = (spec and spec.buttons) or {}
+    local buttons = {}
+    for index, item in ipairs(source) do
+        local id = tostring(item.id or index)
+        local label = tostring(item.label or ("[" .. id .. "]"))
+        local shortLabel = item.shortLabel and tostring(item.shortLabel) or nil
+        buttons[#buttons + 1] = {
+            id = id,
+            label = label,
+            shortLabel = shortLabel,
+            background = item.background or colors.gray,
+            foreground = item.foreground or colors.white,
+        }
+    end
+    if #buttons == 0 then
+        buttons[1] = {
+            id = "ok",
+            label = "[OK]",
+            shortLabel = "[OK]",
+            background = colors.gray,
+            foreground = colors.white,
+        }
+    end
+    return buttons
+end
+
+local function drawModal()
+    local modal = state.modal
+    if not modal.open then
+        modal.layout = nil
+        return false
+    end
+
+    local spec = modal.spec
+    if type(spec) ~= "table" then
+        clearModal()
+        return false
+    end
+
+    local w, h = term.getSize()
+    local bodyLines = {}
+    local sourceLines = spec.lines
+    if type(sourceLines) == "table" then
+        for _, line in ipairs(sourceLines) do
+            bodyLines[#bodyLines + 1] = tostring(line or "")
+        end
+    end
+    if #bodyLines == 0 then
+        bodyLines[1] = tostring(spec.message or "")
+    end
+
+    local buttons = modalButtons(spec)
+    local hasTitle = trim(tostring(spec.title or "")) ~= ""
+    local bodyCount = math.max(1, #bodyLines)
+    local panelHeight = math.max(7, bodyCount + (hasTitle and 4 or 3))
+    panelHeight = math.min(h, panelHeight)
+
+    local panelWidth = math.min(w, math.max(20, math.min(spec.maxWidth or 58, w - 2)))
+    local x1 = math.max(1, math.floor((w - panelWidth) / 2) + 1)
+    local y1 = math.max(1, math.floor((h - panelHeight) / 2) + 1)
+    local x2 = x1 + panelWidth - 1
+    local y2 = y1 + panelHeight - 1
+
+    local background = spec.background or colors.lightGray
+    local foreground = spec.foreground or colors.black
+    local titleBackground = spec.titleBackground or colors.red
+    local titleForeground = spec.titleForeground or colors.white
+
+    local function fillRow(y, rowBackground, rowForeground)
+        term.setCursorPos(x1, y)
+        term.setBackgroundColor(rowBackground)
+        term.setTextColor(rowForeground)
+        term.write(string.rep(" ", panelWidth))
+    end
+
+    local function writeLine(y, text, rowBackground, rowForeground)
+        if y < y1 or y > y2 then
+            return
+        end
+        fillRow(y, rowBackground, rowForeground)
+        local content = tostring(text or "")
+        local maxChars = math.max(0, panelWidth - 2)
+        if #content > maxChars then
+            content = content:sub(1, maxChars)
+        end
+        term.setCursorPos(x1 + 1, y)
+        term.setBackgroundColor(rowBackground)
+        term.setTextColor(rowForeground)
+        term.write(content)
+    end
+
+    for y = y1, y2 do
+        fillRow(y, background, foreground)
+    end
+
+    local contentY = y1 + 1
+    if hasTitle then
+        writeLine(y1, tostring(spec.title), titleBackground, titleForeground)
+        contentY = y1 + 2
+    end
+
+    local buttonY = math.max(contentY, y2 - 1)
+    local maxBodyY = buttonY - 1
+    for _, line in ipairs(bodyLines) do
+        if contentY > maxBodyY then
+            break
+        end
+        writeLine(contentY, line, background, foreground)
+        contentY = contentY + 1
+    end
+
+    local labels = {}
+    local totalWidth = 0
+    for index, button in ipairs(buttons) do
+        labels[index] = button.label
+        totalWidth = totalWidth + #button.label
+    end
+
+    local buttonGap = 2
+    totalWidth = totalWidth + (math.max(0, #buttons - 1) * buttonGap)
+    local contentWidth = math.max(1, panelWidth - 2)
+    if totalWidth > contentWidth then
+        totalWidth = 0
+        for index, button in ipairs(buttons) do
+            local label = button.shortLabel or button.label
+            labels[index] = label
+            totalWidth = totalWidth + #label
+        end
+        buttonGap = 1
+        totalWidth = totalWidth + (math.max(0, #buttons - 1) * buttonGap)
+    end
+
+    local left = x1 + 1
+    local right = x2 - 1
+    local cursorX = left
+    if totalWidth < (right - left + 1) then
+        cursorX = left + math.floor(((right - left + 1) - totalWidth) / 2)
+    end
+
+    local layoutButtons = {}
+    for index, button in ipairs(buttons) do
+        local available = right - cursorX + 1
+        if available < 1 then
+            break
+        end
+
+        local label = labels[index]
+        if #label > available then
+            label = label:sub(1, available)
+        end
+
+        term.setCursorPos(cursorX, buttonY)
+        term.setBackgroundColor(button.background)
+        term.setTextColor(button.foreground)
+        term.write(label)
+
+        layoutButtons[#layoutButtons + 1] = {
+            id = button.id,
+            x1 = cursorX,
+            x2 = cursorX + #label - 1,
+            y = buttonY,
+        }
+
+        cursorX = cursorX + #label + buttonGap
+    end
+
+    term.setCursorBlink(false)
+    modal.layout = {
+        panel = { x1 = x1, x2 = x2, y1 = y1, y2 = y2 },
+        buttons = layoutButtons,
+    }
+    return true
+end
+
+draw = function()
+    drawBase()
+    drawModal()
+end
+
+local function triggerModalButton(buttonId, source)
+    local modal = state.modal
+    if not modal.open then
+        return false
+    end
+
+    local spec = modal.spec
+    if type(spec) ~= "table" then
+        clearModal()
+        return false
+    end
+
+    local shouldClose = spec.autoClose ~= false
+    if type(spec.onButton) == "function" then
+        local ok, callbackResult = pcall(spec.onButton, buttonId, source, spec)
+        if not ok then
+            shouldClose = true
+        elseif callbackResult == false then
+            shouldClose = false
+        elseif callbackResult == true then
+            shouldClose = true
+        end
+    end
+
+    if shouldClose and state.modal.open then
+        clearModal()
+    end
+    return true
+end
+
+local function dismissUsageGuard(continueBrowsing)
+    local guard = state.highUsage
+    guard.frozen = false
+    guard.overCount = 0
+    guard.cooldownUntil = os.clock() + HIGH_USAGE_COOLDOWN_SECONDS
+    if state.modal.open and state.modal.spec and state.modal.spec.id == "high_usage_guard" then
+        clearModal()
+    end
+
+    if continueBrowsing then
+        renderDocument(activeTab())
+        draw()
+        return
+    end
+
+    closeActiveTab()
+    if state.running then
+        renderDocument(activeTab())
+        draw()
+    end
+end
+
+local function activateUsageGuard(frameMs)
+    local guard = state.highUsage
+    if not usageGuardEnabled() or guard.frozen then
+        return false
+    end
+    guard.frozen = true
+    guard.lastFrameMs = frameMs or 0
+    guard.overCount = 0
+    local keyActions = {}
+    if keys.enter then
+        keyActions[keys.enter] = "continue"
+    end
+    if keys.c then
+        keyActions[keys.c] = "continue"
+    end
+    if keys.escape then
+        keyActions[keys.escape] = "close"
+    end
+    if keys.q then
+        keyActions[keys.q] = "close"
+    end
+    if keys.backspace then
+        keyActions[keys.backspace] = "close"
+    end
+    openModal({
+        id = "high_usage_guard",
+        title = "High Usage Detected",
+        titleBackground = colors.red,
+        titleForeground = colors.white,
+        lines = {
+            "Browser paused to prevent a crash.",
+            ("Slow frame: %dms"):format(math.floor((guard.lastFrameMs or 0) + 0.5)),
+            "Choose: close tab or continue.",
+        },
+        buttons = {
+            {
+                id = "close",
+                label = "[Close]",
+                shortLabel = "[X]",
+                background = colors.red,
+                foreground = colors.white,
+            },
+            {
+                id = "continue",
+                label = "[Continue]",
+                shortLabel = "[Go]",
+                background = colors.lime,
+                foreground = colors.black,
+            },
+        },
+        keyActions = keyActions,
+        autoClose = false,
+        onButton = function(buttonId)
+            if buttonId == "continue" then
+                dismissUsageGuard(true)
+            else
+                dismissUsageGuard(false)
+            end
+            return false
+        end,
+    })
+    draw()
+    return true
+end
+
+local function handleModalEvent(event)
+    if not state.modal.open then
+        return false
+    end
+
+    local spec = state.modal.spec or {}
+    local name = event[1]
+    if name == "timer" then
+        if state.animationTimer and event[2] == state.animationTimer then
+            state.animationTimer = nil
+            scheduleAnimationTick()
+        end
+        return true
+    end
+
+    if name == "term_resize" then
+        draw()
+        return true
+    end
+
+    if name == "key" then
+        local key = event[2]
+        local action = nil
+        if type(spec.keyActions) == "table" then
+            action = spec.keyActions[key]
+        end
+
+        if not action then
+            local buttons = modalButtons(spec)
+            if key == keys.enter and buttons[1] then
+                action = buttons[1].id
+            elseif key == keys.escape and buttons[#buttons] then
+                action = buttons[#buttons].id
+            end
+        end
+
+        if action then
+            triggerModalButton(action, "key")
+        else
+            draw()
+        end
+        return true
+    end
+
+    if name == "mouse_click" then
+        local x = event[3]
+        local y = event[4]
+        local layout = state.modal.layout
+        if not layout then
+            draw()
+            layout = state.modal.layout
+        end
+        if layout and type(layout.buttons) == "table" then
+            for _, button in ipairs(layout.buttons) do
+                if y == button.y and x >= button.x1 and x <= button.x2 then
+                    triggerModalButton(button.id, "mouse")
+                    return true
+                end
+            end
+        end
+        draw()
+        return true
+    end
+
+    if name == "mouse_drag"
+        or name == "mouse_up"
+        or name == "mouse_scroll"
+        or name == "char"
+        or name == "paste"
+        or name == "key_up" then
+        return true
+    end
+
+    return false
 end
 
 local function findFirstTabByUrlPrefix(prefix)
@@ -818,6 +1793,121 @@ local function openOrFocusFavoritesTab()
     navigate("about:favorites", true, false, tab)
 end
 
+local function openOrFocusHistoryTab()
+    local existingIndex = findFirstTabByUrlPrefix("about:history")
+    if existingIndex then
+        activateTab(existingIndex)
+        return
+    end
+
+    local tab = newTab("about:history")
+    navigate("about:history", true, false, tab)
+end
+
+local function pageLineToPrintableText(line, width)
+    local limit = math.max(1, tonumber(width) or 1)
+    local highest = 0
+    local chars = (line and line.chars) or {}
+    for index, ch in pairs(chars) do
+        if ch and ch ~= " " and index > highest and index <= limit then
+            highest = index
+        end
+    end
+    if highest <= 0 then
+        return ""
+    end
+    local out = {}
+    for x = 1, highest do
+        out[x] = chars[x] or " "
+    end
+    return table.concat(out)
+end
+
+local function printablePageLines(tab)
+    local target = tab or activeTab()
+    local terminalWidth = term and term.getSize and term.getSize() or 1
+    local width = math.max(1, tonumber(target.viewportWidth) or tonumber(terminalWidth) or 1)
+    local lines = target.pageLines or { createEmptyLine() }
+    local totalLines = math.max(1, pageLineCount(target))
+
+    if turtleModeEnabled() and target.document then
+        local fullLines = renderDocumentLines(
+            target.document,
+            width,
+            target.formState,
+            target.focusedFormControl
+        )
+        if type(fullLines) == "table" and #fullLines > 0 then
+            lines = fullLines
+            totalLines = math.max(1, #fullLines)
+        end
+    end
+
+    local output = {}
+    for index = 1, totalLines do
+        output[#output + 1] = pageLineToPrintableText(lines[index], width)
+    end
+    while #output > 1 and output[#output] == "" do
+        table.remove(output)
+    end
+    return output
+end
+
+local function printCurrentPage(tab)
+    local target = tab or activeTab()
+    local lines = printablePageLines(target)
+    local outputDir = fs.combine(SCRIPT_DIR, "prints")
+    if not fs.exists(outputDir) then
+        fs.makeDir(outputDir)
+    end
+
+    local stamp = nil
+    if os and type(os.date) == "function" then
+        local okDate, dateText = pcall(os.date, "%Y%m%d-%H%M%S")
+        if okDate and dateText and dateText ~= "" then
+            stamp = tostring(dateText)
+        end
+    end
+    if not stamp then
+        stamp = tostring(math.floor(((os and type(os.clock) == "function") and os.clock() or 0) * 1000))
+    end
+
+    local baseName = "page-" .. stamp
+    local candidate = fs.combine(outputDir, baseName .. ".txt")
+    local nextSuffix = 1
+    while fs.exists(candidate) do
+        candidate = fs.combine(outputDir, ("%s-%d.txt"):format(baseName, nextSuffix))
+        nextSuffix = nextSuffix + 1
+    end
+
+    local handle = fs.open(candidate, "w")
+    if not handle then
+        target.status = "Print failed: could not open output file"
+        return false
+    end
+
+    local pageTitle = trim((target.document and target.document.title) or "")
+    if pageTitle == "" then
+        pageTitle = trim(target.currentUrl or "")
+    end
+    handle.writeLine("Title: " .. pageTitle)
+    handle.writeLine("URL: " .. trim(target.currentUrl or ""))
+    if os and type(os.date) == "function" then
+        local okDate, dateText = pcall(os.date, "%Y-%m-%d %H:%M:%S")
+        if okDate and dateText then
+            handle.writeLine("Printed: " .. tostring(dateText))
+        end
+    end
+    handle.writeLine("")
+    for _, line in ipairs(lines) do
+        handle.writeLine(line)
+    end
+    handle.close()
+
+    target.status = "Printed to " .. candidate
+    return true
+end
+
 local function toggleCurrentPageFavorite()
     local tab = activeTab()
     local currentUrl = trim(tab.currentUrl or "")
@@ -865,6 +1955,16 @@ local function handleMenuClick(x, y)
     if hitRegion(x, y, menu.favorites) then
         state.menuOpen = false
         openOrFocusFavoritesTab()
+        return true
+    end
+    if hitRegion(x, y, menu.history) then
+        state.menuOpen = false
+        openOrFocusHistoryTab()
+        return true
+    end
+    if hitRegion(x, y, menu.print) then
+        state.menuOpen = false
+        printCurrentPage()
         return true
     end
     if hitRegion(x, y, menu.exit) then
@@ -956,9 +2056,13 @@ end
 
 local function setFocusedFormControl(tab, key)
     local target = tab or activeTab()
+    local changed = target.focusedFormControl ~= key or target.urlFocus
     target.focusedFormControl = key
     target.urlFocus = false
     clearUrlSelection(target)
+    if changed then
+        bumpRenderRevision(target)
+    end
 end
 
 local function clampControlCursor(stateEntry)
@@ -1040,6 +2144,7 @@ local function resetForm(tab, formId)
             target.formState[key] = nextState
         end
     end
+    bumpRenderRevision(target)
     return true
 end
 
@@ -1139,7 +2244,16 @@ local function refreshCurrentDocumentWithoutNavigation(tab)
     if currentUrl == "" then
         return false
     end
+    state.highUsage.loadingFrame = true
     local previousScroll = target.scroll or 0
+    local previousFormState = target.formState or {}
+    local previousFocusedControl = target.focusedFormControl
+    local wasUrlFocused = target.urlFocus
+    local previousUrlInput = target.urlInput or currentUrl
+    local previousUrlCursor = target.urlCursor or (#previousUrlInput + 1)
+    local previousUrlOffset = target.urlOffset or 0
+    local previousUrlSelStart = target.urlSelStart
+    local previousUrlSelEnd = target.urlSelEnd
 
     local body, finalUrl, headers, err = fetchTextResource(currentUrl, false)
     if not body then
@@ -1153,19 +2267,36 @@ local function refreshCurrentDocumentWithoutNavigation(tab)
         body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
     end
 
-    target.document = buildDocument(body, finalUrl or currentUrl)
+    local resolvedUrl = finalUrl or currentUrl
+    target.document = buildDocument(body, resolvedUrl)
+    target.currentUrl = resolvedUrl
+    target.aboutUpdateIntervalMs = parseAboutUpdateIntervalMs(headers)
+    target.settingsStickyStatus = parseSettingsStatusMessage(headers, resolvedUrl)
     target.status = target.document.title or target.status
-    target.urlInput = currentUrl
-    target.urlCursor = #target.urlInput + 1
-    target.urlOffset = 0
-    target.urlFocus = false
-    clearUrlSelection(target)
-    clearPageSelection(target)
-    target.formState = {}
+    if wasUrlFocused then
+        target.urlInput = previousUrlInput
+        target.urlCursor = clamp(previousUrlCursor, 1, #target.urlInput + 1)
+        target.urlOffset = math.max(0, tonumber(previousUrlOffset) or 0)
+        target.urlFocus = true
+        target.urlSelStart = previousUrlSelStart
+        target.urlSelEnd = previousUrlSelEnd
+    else
+        target.urlInput = resolvedUrl
+        target.urlCursor = #target.urlInput + 1
+        target.urlOffset = 0
+        target.urlFocus = false
+        clearUrlSelection(target)
+    end
+    target.formState = previousFormState
     target.formMeta = nil
-    target.focusedFormControl = nil
+    target.focusedFormControl = previousFocusedControl
+    target.renderRevision = 0
+    target.lastRenderSignature = nil
     target.scroll = previousScroll
     renderDocument(target)
+    if scheduleAboutUpdateTimer then
+        scheduleAboutUpdateTimer()
+    end
     return true
 end
 
@@ -1236,6 +2367,7 @@ local function submitForm(tab, formId, submitterKey)
 end
 
 local function cycleSelect(tab, control, stateEntry, direction)
+    local target = tab or activeTab()
     local options = control.options or {}
     if #options == 0 then
         return false
@@ -1249,6 +2381,7 @@ local function cycleSelect(tab, control, stateEntry, direction)
     end
     stateEntry.selectedIndex = nextIndex
     stateEntry.selectedIndices = { nextIndex }
+    bumpRenderRevision(target)
     return true
 end
 
@@ -1265,6 +2398,7 @@ local function activateFormControl(tab, key)
         local inputType = tostring(control.inputType or "text"):lower()
         if inputType == "checkbox" then
             stateEntry.checked = not not stateEntry.checked
+            bumpRenderRevision(target)
             return true
         end
         if inputType == "radio" then
@@ -1287,6 +2421,7 @@ local function activateFormControl(tab, key)
             else
                 stateEntry.checked = true
             end
+            bumpRenderRevision(target)
             return true
         end
         if inputType == "submit" or inputType == "image" then
@@ -1302,11 +2437,13 @@ local function activateFormControl(tab, key)
             return true
         end
         stateEntry.cursor = #tostring(stateEntry.value or "") + 1
+        bumpRenderRevision(target)
         return true
     end
 
     if control.tag == "textarea" then
         stateEntry.cursor = #tostring(stateEntry.value or "") + 1
+        bumpRenderRevision(target)
         return true
     end
 
@@ -1325,6 +2462,7 @@ local function activateFormControl(tab, key)
         if buttonType == "submit" and control.formId then
             return submitForm(target, control.formId, key)
         end
+        bumpRenderRevision(target)
         return true
     end
 
@@ -1526,10 +2664,14 @@ local function loadDocumentWithAbort(tab, normalized, allowFallback, requestOpti
         if not looksLikeHtml(body, contentType) then
             body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
         end
+        local aboutUpdateIntervalMs = parseAboutUpdateIntervalMs(headers)
+        local settingsStickyStatus = parseSettingsStatusMessage(headers, finalUrl or normalized)
 
         return {
             finalUrl = finalUrl,
             document = buildDocument(body, finalUrl),
+            aboutUpdateIntervalMs = aboutUpdateIntervalMs,
+            settingsStickyStatus = settingsStickyStatus,
         }, false
     end
 
@@ -1550,10 +2692,14 @@ local function loadDocumentWithAbort(tab, normalized, allowFallback, requestOpti
             if not looksLikeHtml(body, contentType) then
                 body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
             end
+            local aboutUpdateIntervalMs = parseAboutUpdateIntervalMs(headers)
+            local settingsStickyStatus = parseSettingsStatusMessage(headers, finalUrl or normalized)
 
             result = {
                 finalUrl = finalUrl,
                 document = buildDocument(body, finalUrl),
+                aboutUpdateIntervalMs = aboutUpdateIntervalMs,
+                settingsStickyStatus = settingsStickyStatus,
             }
         end)
 
@@ -1611,6 +2757,7 @@ end
 navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     local target = tab or activeTab()
     local normalized, inferred = normalizeInputUrl(rawInput)
+    state.highUsage.loadingFrame = true
 
     target.loading = true
     target.status = "Loading " .. normalized
@@ -1625,6 +2772,9 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     if aborted then
         target.status = "Load aborted"
         draw()
+        if scheduleAboutUpdateTimer then
+            scheduleAboutUpdateTimer()
+        end
         return false
     end
 
@@ -1652,6 +2802,10 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     target.formState = {}
     target.formMeta = nil
     target.focusedFormControl = nil
+    target.renderRevision = 0
+    target.lastRenderSignature = nil
+    target.aboutUpdateIntervalMs = result and result.aboutUpdateIntervalMs or nil
+    target.settingsStickyStatus = result and result.settingsStickyStatus or nil
 
     if addToHistory then
         pushHistory(target, finalUrl)
@@ -1660,10 +2814,16 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     else
         pushHistory(target, finalUrl)
     end
+    if shouldTrackNavigationInHistory(normalized) then
+        addBrowserHistory(finalUrl, target.document and target.document.title or "")
+    end
 
     target.scroll = 0
     renderDocument(target)
     draw()
+    if scheduleAboutUpdateTimer then
+        scheduleAboutUpdateTimer()
+    end
     return true
 end
 
@@ -1912,7 +3072,7 @@ local function handleMouseClick(button, x, y)
     end
 
     local viewportWidth = pageContentWidth(tab)
-    local lineIndex = clamp(tab.scroll + (y - TOP_BAR_ROWS), 1, math.max(1, #tab.pageLines))
+    local lineIndex = clamp(tab.scroll + (y - TOP_BAR_ROWS), 1, pageLineCount(tab))
     local column = clamp(x, 1, viewportWidth)
     if state.caretMode then
         if button == 1 then
@@ -2004,7 +3164,7 @@ local function handleMouseDrag(button, x, y)
     end
 
     local w = pageContentWidth(tab)
-    local lineIndex = clamp(tab.scroll + (y - TOP_BAR_ROWS), 1, math.max(1, #tab.pageLines))
+    local lineIndex = clamp(tab.scroll + (y - TOP_BAR_ROWS), 1, pageLineCount(tab))
     local column = clamp(x, 1, w)
     tab.pageSelection.endLine = lineIndex
     tab.pageSelection.endCol = column
@@ -2076,7 +3236,7 @@ local function handleNavigationKey(key)
     local tab = activeTab()
     if state.caretMode then
         local w = pageContentWidth(tab)
-        local maxLine = math.max(1, #tab.pageLines)
+        local maxLine = pageLineCount(tab)
         local selection = tab.pageSelection
         if not selection then
             local startLine = clamp(tab.scroll + 1, 1, maxLine)
@@ -2173,6 +3333,7 @@ local function selectAllText()
         if control and isEditableFormControl(control) then
             local value = tostring(stateEntry.value or "")
             stateEntry.cursor = #value + 1
+            bumpRenderRevision(tab)
             return true
         end
     end
@@ -2251,6 +3412,7 @@ local function cutSelectedText()
             state.localClipboardPendingPaste = true
             stateEntry.value = ""
             stateEntry.cursor = 1
+            bumpRenderRevision(tab)
             return true
         end
     end
@@ -2287,6 +3449,7 @@ local function pasteClipboardText()
             insertIntoFormControl(stateEntry, control, state.clipboard)
             state.localClipboardPendingPaste = false
             state.skipNextPaste = true
+            bumpRenderRevision(tab)
             return true
         end
     end
@@ -2377,6 +3540,10 @@ local function handleKeyDown(key)
             state.running = false
             return
         end
+        if key == keys.p then
+            printCurrentPage()
+            return
+        end
         if key == keys.left then
             goBack()
             return
@@ -2390,6 +3557,7 @@ local function handleKeyDown(key)
     local tab = activeTab()
     if tab.focusedFormControl then
         if handleFocusedFormControlKey(tab, key) then
+            bumpRenderRevision(tab)
             return
         end
     end
@@ -2427,6 +3595,45 @@ local function handleKeyUp(key)
     end
 end
 
+scheduleAboutUpdateTimer = function()
+    if not os.startTimer then
+        return
+    end
+
+    local update = state.aboutUpdate
+    local tab = activeTab()
+    local intervalMs = tonumber(tab.aboutUpdateIntervalMs)
+    local currentUrl = trim(tab.currentUrl or ""):lower()
+    local shouldUpdate = (intervalMs and intervalMs > 0)
+        and startsWith(currentUrl, "about:")
+        and not tab.loading
+        and not state.modal.open
+
+    if not shouldUpdate then
+        update.timer = nil
+        update.tabIndex = nil
+        update.intervalMs = nil
+        return
+    end
+
+    intervalMs = math.floor(intervalMs + 0.5)
+    if intervalMs < 1 then
+        update.timer = nil
+        update.tabIndex = nil
+        update.intervalMs = nil
+        return
+    end
+
+    if update.timer and update.tabIndex == state.activeTab and update.intervalMs == intervalMs then
+        return
+    end
+
+    update.timer = nil
+    update.tabIndex = state.activeTab
+    update.intervalMs = intervalMs
+    update.timer = os.startTimer(intervalMs / 1000)
+end
+
 scheduleAnimationTick = function()
     if not os.startTimer then
         return
@@ -2441,6 +3648,23 @@ local function handleTimer(timerId)
     if state.animationTimer and timerId == state.animationTimer then
         state.animationTimer = nil
         scheduleAnimationTick()
+        return
+    end
+
+    local aboutUpdate = state.aboutUpdate
+    if aboutUpdate.timer and timerId == aboutUpdate.timer then
+        aboutUpdate.timer = nil
+        aboutUpdate.tabIndex = nil
+        aboutUpdate.intervalMs = nil
+
+        local tab = activeTab()
+        local currentUrl = trim(tab.currentUrl or ""):lower()
+        if startsWith(currentUrl, "about:") and not tab.loading and not state.modal.open then
+            refreshCurrentDocumentWithoutNavigation(tab)
+        end
+        if scheduleAboutUpdateTimer then
+            scheduleAboutUpdateTimer()
+        end
     end
 end
 
@@ -2465,7 +3689,9 @@ local function handleChar(character)
         return
     end
 
-    handleFocusedFormControlChar(tab, character)
+    if handleFocusedFormControlChar(tab, character) then
+        bumpRenderRevision(tab)
+    end
 end
 
 local function resolvePasteText(text)
@@ -2492,6 +3718,7 @@ local function handlePaste(text)
         return
     end
     if handleFocusedFormControlPaste(tab, pasteText) then
+        bumpRenderRevision(tab)
         if pasteText and pasteText ~= "" then
             state.clipboard = pasteText
         end
@@ -2508,6 +3735,9 @@ local function bootstrap(initialUrls)
     if not initialUrls or #initialUrls == 0 then
         local homePage = homePageUrl()
         navigate(homePage, true, true, activeTab())
+        if scheduleAboutUpdateTimer then
+            scheduleAboutUpdateTimer()
+        end
         return
     end
 
@@ -2522,6 +3752,9 @@ local function bootstrap(initialUrls)
     end
     activateTab(1)
     draw()
+    if scheduleAboutUpdateTimer then
+        scheduleAboutUpdateTimer()
+    end
 end
 
 local function run(...)
@@ -2530,34 +3763,80 @@ local function run(...)
     while state.running do
         local event = { os.pullEvent() }
         local name = event[1]
+        local frameStart = os.clock()
+        state.highUsage.loadingFrame = false
         if state.skipNextPaste and name ~= "paste" and name ~= "key_up" then
             state.skipNextPaste = false
         end
 
-        if name == "mouse_click" then
-            handleMouseClick(event[2], event[3], event[4])
-        elseif name == "mouse_drag" then
-            handleMouseDrag(event[2], event[3], event[4])
-        elseif name == "mouse_up" then
-            handleMouseUp(event[2], event[3], event[4])
-        elseif name == "mouse_scroll" then
-            handleMouseScroll(event[2], event[3], event[4])
-        elseif name == "key" then
-            handleKeyDown(event[2])
-        elseif name == "key_up" then
-            handleKeyUp(event[2])
-        elseif name == "char" then
-            handleChar(event[2])
-        elseif name == "paste" then
-            handlePaste(event[2])
-        elseif name == "timer" then
-            handleTimer(event[2])
-        elseif name == "term_resize" then
-            rerenderAllTabs()
+        if state.highUsage.frozen and not state.modal.open then
+            state.highUsage.frozen = false
+            activateUsageGuard(state.highUsage.lastFrameMs or 0)
         end
 
-        renderDocument(activeTab())
-        draw()
+        if state.modal.open then
+            local hadModal = state.modal.open
+            handleModalEvent(event)
+            if state.running and (hadModal or state.modal.open) then
+                draw()
+            end
+        else
+            if name == "mouse_click" then
+                handleMouseClick(event[2], event[3], event[4])
+            elseif name == "mouse_drag" then
+                handleMouseDrag(event[2], event[3], event[4])
+            elseif name == "mouse_up" then
+                handleMouseUp(event[2], event[3], event[4])
+            elseif name == "mouse_scroll" then
+                handleMouseScroll(event[2], event[3], event[4])
+            elseif name == "key" then
+                handleKeyDown(event[2])
+            elseif name == "key_up" then
+                handleKeyUp(event[2])
+            elseif name == "char" then
+                handleChar(event[2])
+            elseif name == "paste" then
+                handlePaste(event[2])
+            elseif name == "timer" then
+                handleTimer(event[2])
+            elseif name == "term_resize" then
+                rerenderAllTabs()
+            end
+
+            renderDocument(activeTab())
+            draw()
+
+            local guard = state.highUsage
+            local frameMs = (os.clock() - frameStart) * 1000
+            guard.lastFrameMs = frameMs
+
+            if usageGuardEnabled() then
+                local now = os.clock()
+                local frameThreshold = HIGH_USAGE_FRAME_THRESHOLD_MS
+                if guard.loadingFrame then
+                    frameThreshold = HIGH_USAGE_FRAME_THRESHOLD_LOADING_MS
+                end
+                if now < (guard.cooldownUntil or 0) then
+                    guard.overCount = 0
+                elseif frameMs >= frameThreshold then
+                    guard.overCount = (guard.overCount or 0) + 1
+                    if guard.overCount >= HIGH_USAGE_STRIKE_LIMIT then
+                        activateUsageGuard(frameMs)
+                    end
+                else
+                    guard.overCount = 0
+                end
+            else
+                guard.overCount = 0
+                guard.frozen = false
+                if state.modal.open and state.modal.spec and state.modal.spec.id == "high_usage_guard" then
+                    clearModal()
+                end
+            end
+        end
+        if scheduleAboutUpdateTimer then
+            scheduleAboutUpdateTimer()
+        end
     end
 
     term.setCursorBlink(false)

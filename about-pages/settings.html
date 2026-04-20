@@ -41,6 +41,14 @@
         margin-bottom: 1em;
       }
 
+      .settings-status {
+        position: sticky;
+        top: 0;
+        right: 0;
+        margin-top: 0;
+        margin-bottom: 1em;
+      }
+
       label {
         color: orange;
       }
@@ -58,25 +66,9 @@
     <pre>{{LOGO_ASCII}}</pre>
     <h1>{{APP_ICON}} {{APP_TITLE}}</h1>
     <p>Version: <code>{{APP_VERSION}}</code></p>
-    <p>This is the special <code>about:settings</code> page. Browser API is available only on <code>about:</code> pages.</p>
-
-    <h2>Status</h2>
-    <toast type="{{STATUS_TOAST_TYPE}}">{{STATUS_MESSAGE}}</toast>
-
-    <h2>Current URL</h2>
-    <p><code>{{CURRENT_URL}}</code></p>
+    <p class="settings-status"><code>{{STATUS_MESSAGE@500}}</code></p>
 
     <h2>Settings</h2>
-    <ul>
-      {{SETTINGS_LIST}}
-    </ul>
-
-    <h2>Query Params</h2>
-    <ul>
-      {{PARAMS_LIST}}
-    </ul>
-
-    <h2>Actions</h2>
     <form id="set-home-page-form" class="settings-form" name="set_home_page" method="get" action="about:settings">
       <input name="action" type="hidden" value="set">
       <input name="key" type="hidden" value="home_page">
@@ -87,7 +79,7 @@
 
       <input id="home-page-blank" name="home_page_choice" type="radio" value="about:blank" {{HOME_PAGE_RADIO_BLANK_CHECKED}}>
       <label for="home-page-blank">about:blank</label><br>
-
+      
       <input id="home-page-custom" name="home_page_choice" type="radio" value="custom" {{HOME_PAGE_RADIO_CUSTOM_CHECKED}}>
       <input id="home-page-custom-value" class="setting-value" name="home_page_custom" type="text" value="{{HOME_PAGE_CUSTOM_VALUE}}" size="32" maxlength="128">
       <br>
@@ -95,7 +87,61 @@
       <button id="set-home-page-submit" name="submit_set_home_page" type="submit" value="1">Save</button>
     </form>
 
-    <p>You can still type custom commands in the URL bar, e.g. <code>about:settings?action=set&amp;key=home_page&amp;value=https%3A%2F%2Fexample.com</code>.</p>
-    <p><a href="about:help">Back to help</a></p>
+    <form id="set-turtle-mode-form" class="settings-form" name="set_turtle_mode" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="turtle_mode">
+
+      <label for="turtle-mode-enabled">Turtle mode</label><br>
+      <input id="turtle-mode-enabled" name="turtle_mode_choice" type="radio" value="enabled" {{TURTLE_MODE_RADIO_ENABLED_CHECKED}}>
+      <label for="turtle-mode-enabled">Enabled</label><br>
+
+      <input id="turtle-mode-disabled" name="turtle_mode_choice" type="radio" value="disabled" {{TURTLE_MODE_RADIO_DISABLED_CHECKED}}>
+      <label for="turtle-mode-disabled">Disabled (Recommended)</label><br>
+
+      <button id="set-turtle-mode-submit" name="submit_set_turtle_mode" type="submit" value="1">Save</button>
+    </form>
+    <p><code>Turtle mode</code> is very stable, but usually much slower.</p>
+
+    <form id="set-usage-guard-form" class="settings-form" name="set_usage_guard" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="usage_guard_enabled">
+
+      <label for="usage-guard-enabled">High-usage crash guard (requires turtle mode disabled)</label><br>
+      <input id="usage-guard-enabled" name="usage_guard_choice" type="radio" value="enabled" {{USAGE_GUARD_RADIO_ENABLED_CHECKED}}>
+      <label for="usage-guard-enabled">Enabled (freeze + prompt)</label><br>
+
+      <input id="usage-guard-disabled" name="usage_guard_choice" type="radio" value="disabled" {{USAGE_GUARD_RADIO_DISABLED_CHECKED}}>
+      <label for="usage-guard-disabled">Disabled</label><br>
+
+      <button id="set-usage-guard-submit" name="submit_set_usage_guard" type="submit" value="1">Save</button>
+    </form>
+
+    <form id="set-history-form" class="settings-form" name="set_history_enabled" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="history_enabled">
+
+      <label for="history-enabled">Browsing history tracking</label><br>
+      <input id="history-enabled" name="history_choice" type="radio" value="enabled" {{HISTORY_RADIO_ENABLED_CHECKED}}>
+      <label for="history-enabled">Enabled (Recommended)</label><br>
+
+      <input id="history-disabled" name="history_choice" type="radio" value="disabled" {{HISTORY_RADIO_DISABLED_CHECKED}}>
+      <label for="history-disabled">Disabled</label><br>
+
+      <button id="set-history-submit" name="submit_set_history" type="submit" value="1">Save</button>
+    </form>
+
+    <form id="set-persistence-form" class="settings-form" name="set_persistence_enabled" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="persistence_enabled">
+
+      <label for="persistence-enabled">Persist browser data</label><br>
+      <input id="persistence-enabled" name="persistence_choice" type="radio" value="enabled" {{PERSISTENCE_RADIO_ENABLED_CHECKED}}>
+      <label for="persistence-enabled">Enabled (Recommended)</label><br>
+
+      <input id="persistence-disabled" name="persistence_choice" type="radio" value="disabled" {{PERSISTENCE_RADIO_DISABLED_CHECKED}}>
+      <label for="persistence-disabled">Disabled</label><br>
+
+      <button id="set-persistence-submit" name="submit_set_persistence" type="submit" value="1">Save</button>
+    </form>
   </body>
 </html>
