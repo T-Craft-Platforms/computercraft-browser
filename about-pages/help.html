@@ -54,16 +54,18 @@
       <li>Caret mode (F7) for page text selection</li>
       <li>F7 indicator in the URL status area when active</li>
       <li>Vertical scrollbar with track/thumb on scrollable pages</li>
+      <li>Home page at <code>about:home</code></li>
       <li>Settings page at <code>about:settings</code> (open from the <code>=</code> menu)</li>
+      <li>Favorites page at <code>about:favorites</code> (open from the <code>=</code> menu)</li>
       <li>Mouse wheel and keyboard scrolling</li>
       <li>Clickable links</li>
     </ul>
 
     <h2>Supported HTML</h2>
-    <p>headings, paragraphs, div/span, lists, links, br, hr, pre/code, and img alt placeholders.</p>
+    <p>headings, paragraphs, div/span, lists, links, br, hr, pre/code, img alt placeholders, <code>toast</code>, and forms (<code>form</code>, <code>input</code> major types, <code>select</code>/<code>option</code>, <code>textarea</code>, <code>button</code>).</p>
 
     <h2>Supported CSS (subset)</h2>
-    <p>element/class/id selectors, color/background-color, display, white-space, margin, padding-left, font-weight, text-transform, overflow/overflow-x/overflow-y.</p>
+    <p>element/class/id selectors, basic attribute selectors (including <code>[name]</code> and <code>[name=value]</code>), color/background-color, display, white-space, margin, padding-left, font-weight, text-transform, overflow/overflow-x/overflow-y.</p>
 
     <h2>Keys</h2>
     <ul>
@@ -75,6 +77,8 @@
       <li>F7: toggle caret mode</li>
       <li>In caret mode, arrows/home/end/page keys move text selection</li>
       <li>Ctrl+A/C/X/V: select all / copy / cut / paste</li>
+      <li>Inside forms: Enter submits, Space toggles checkbox/radio/buttons, Tab/Shift+Tab moves focus</li>
+      <li>Form submit uses background fetch and does not navigate away</li>
       <li>Ctrl+T: new tab</li>
       <li>Ctrl+W: close tab</li>
       <li>Ctrl+Tab: next tab</li>

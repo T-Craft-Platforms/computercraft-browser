@@ -35,6 +35,23 @@
       a {
         color: lightblue;
       }
+
+      form {
+        margin-top: 1em;
+        margin-bottom: 1em;
+      }
+
+      label {
+        color: orange;
+      }
+
+      input,
+      select,
+      button,
+      textarea {
+        color: black;
+        background-color: lightgray;
+      }
     </style>
   </head>
   <body>
@@ -44,7 +61,7 @@
     <p>This is the special <code>about:settings</code> page. Browser API is available only on <code>about:</code> pages.</p>
 
     <h2>Status</h2>
-    <p><code>{{STATUS_MESSAGE}}</code></p>
+    <toast type="{{STATUS_TOAST_TYPE}}">{{STATUS_MESSAGE}}</toast>
 
     <h2>Current URL</h2>
     <p><code>{{CURRENT_URL}}</code></p>
@@ -60,15 +77,25 @@
     </ul>
 
     <h2>Actions</h2>
-    <ul>
-      <li><a href="about:settings?action=get&key=home_page">Get <code>home_page</code></a></li>
-      <li><a href="about:settings?action=set&key=home_page&value=about%3Ahelp">Set <code>home_page</code> to <code>about:help</code></a></li>
-      <li><a href="about:settings?action=set&key=home_page&value=about%3Ablank">Set <code>home_page</code> to <code>about:blank</code></a></li>
-      <li><a href="about:settings?action=set&key=home_page&value=https%3A%2F%2Fexample.com">Set <code>home_page</code> to <code>https://example.com</code></a></li>
-      <li><a href="about:settings?foo=bar&test=123">Open with sample params</a></li>
-    </ul>
+    <form id="set-home-page-form" class="settings-form" name="set_home_page" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="home_page">
 
-    <p>You can also type custom commands in the URL bar, e.g. <code>about:settings?action=set&key=home_page&value=https%3A%2F%2Fexample.com</code>.</p>
+      <label for="home-page-home">Home page value</label><br>
+      <input id="home-page-home" name="home_page_choice" type="radio" value="about:home" {{HOME_PAGE_RADIO_HOME_CHECKED}}>
+      <label for="home-page-home">about:home</label><br>
+
+      <input id="home-page-blank" name="home_page_choice" type="radio" value="about:blank" {{HOME_PAGE_RADIO_BLANK_CHECKED}}>
+      <label for="home-page-blank">about:blank</label><br>
+
+      <input id="home-page-custom" name="home_page_choice" type="radio" value="custom" {{HOME_PAGE_RADIO_CUSTOM_CHECKED}}>
+      <input id="home-page-custom-value" class="setting-value" name="home_page_custom" type="text" value="{{HOME_PAGE_CUSTOM_VALUE}}" size="32" maxlength="128">
+      <br>
+
+      <button id="set-home-page-submit" name="submit_set_home_page" type="submit" value="1">Save</button>
+    </form>
+
+    <p>You can still type custom commands in the URL bar, e.g. <code>about:settings?action=set&amp;key=home_page&amp;value=https%3A%2F%2Fexample.com</code>.</p>
     <p><a href="about:help">Back to help</a></p>
   </body>
 </html>

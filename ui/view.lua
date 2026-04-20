@@ -3,6 +3,12 @@ return function(deps)
     local clamp = deps.clamp
     local TOP_BAR_ROWS = deps.topBarRows or 2
     local activeTab = deps.activeTab
+    local isFavoriteUrl = deps.isFavoriteUrl or function()
+        return false
+    end
+    local canFavoriteUrl = deps.canFavoriteUrl or function()
+        return false
+    end
     local canGoBack = deps.canGoBack
     local canGoForward = deps.canGoForward
     local tabTitle = deps.tabTitle
@@ -324,7 +330,23 @@ return function(deps)
         if state.ui.url.x1 <= state.ui.url.x2 then
             local urlFieldBg = colors.lightGray
             local urlFieldFg = colors.black
-            local fieldWidth = state.ui.url.x2 - state.ui.url.x1 + 1
+            local fullUrlX1 = state.ui.url.x1
+            local fullUrlX2 = state.ui.url.x2
+            local caretLabel = state.caretMode and " F7 " or nil
+            local inputX1 = fullUrlX1
+            local inputX2 = fullUrlX2
+            if caretLabel then
+                local totalWidth = fullUrlX2 - fullUrlX1 + 1
+                if totalWidth > #caretLabel then
+                    inputX2 = fullUrlX2 - #caretLabel
+                else
+                    inputX2 = fullUrlX1
+                end
+            end
+            if inputX2 < inputX1 then
+                inputX2 = inputX1
+            end
+            local fieldWidth = inputX2 - inputX1 + 1
             local cursor = clamp(tab.urlCursor, 1, #tab.urlInput + 1)
             tab.urlCursor = cursor
 
@@ -337,13 +359,17 @@ return function(deps)
             if tab.urlOffset < 0 then
                 tab.urlOffset = 0
             end
+            local maxOffset = math.max(0, (#tab.urlInput + 1) - fieldWidth)
+            if tab.urlOffset > maxOffset then
+                tab.urlOffset = maxOffset
+            end
 
             local visible = tab.urlInput:sub(tab.urlOffset + 1, tab.urlOffset + fieldWidth)
             if #visible < fieldWidth then
                 visible = visible .. string.rep(" ", fieldWidth - #visible)
             end
 
-            writeClipped(state.ui.url.x1, 2, visible, urlFieldFg, urlFieldBg)
+            writeClipped(inputX1, 2, visible, urlFieldFg, urlFieldBg)
 
             local selStart, selEnd = getUrlSelection(tab)
             if selStart then
@@ -353,7 +379,7 @@ return function(deps)
                 local drawEnd = math.min(selEnd - 1, visibleEnd)
                 for charIndex = drawStart, drawEnd do
                     local relative = charIndex - visibleStart + 1
-                    local cursorX = state.ui.url.x1 + relative - 1
+                    local cursorX = inputX1 + relative - 1
                     local ch = visible:sub(relative, relative)
                     if ch == "" then
                         ch = " "
@@ -362,19 +388,26 @@ return function(deps)
                 end
             end
 
-            local rightEdge = state.ui.url.x2
-
-            if state.caretMode and rightEdge >= state.ui.url.x1 then
-                local caretLabel = " F7 "
-                local caretX = math.max(state.ui.url.x1, rightEdge - #caretLabel + 1)
-                writeClipped(caretX, 2, caretLabel, colors.black, colors.lime)
+            if caretLabel then
+                local indicatorX1 = math.max(inputX2 + 1, fullUrlX1)
+                if indicatorX1 <= fullUrlX2 then
+                    writeClipped(
+                        indicatorX1,
+                        2,
+                        string.rep(" ", fullUrlX2 - indicatorX1 + 1),
+                        colors.black,
+                        colors.lime
+                    )
+                    local labelX = math.max(indicatorX1, fullUrlX2 - #caretLabel + 1)
+                    writeClipped(labelX, 2, caretLabel, colors.black, colors.lime)
+                end
             end
 
             local cursorVisible = false
             if tab.urlFocus then
                 local offset = cursor - tab.urlOffset
-                local cursorX = state.ui.url.x1 + offset - 1
-                if cursorX >= state.ui.url.x1 and cursorX <= state.ui.url.x2 then
+                local cursorX = inputX1 + offset - 1
+                if cursorX >= inputX1 and cursorX <= inputX2 then
                     local cursorChar = visible:sub(offset, offset)
                     if cursorChar == "" then
                         cursorChar = " "
@@ -476,7 +509,7 @@ return function(deps)
             return
         end
         local panelWidth = math.min(24, math.max(14, w))
-        local panelHeight = 3
+        local panelHeight = 4
         local panelX2 = clamp(state.ui.menuButton.x2, 1, w)
         local panelX1 = math.max(1, panelX2 - panelWidth + 1)
         local panelY1 = TOP_BAR_ROWS + 1
@@ -496,14 +529,42 @@ return function(deps)
 
         local settingsY = panelY1
         local helpY = math.min(panelY2, panelY1 + 1)
-        local exitY = math.min(panelY2, panelY1 + 2)
+        local favoritesY = math.min(panelY2, panelY1 + 2)
+        local exitY = math.min(panelY2, panelY1 + 3)
 
         writeClipped(innerX1, settingsY, "Settings", textFg, textBg)
         writeClipped(innerX1, helpY, "Help", textFg, textBg)
+        local currentTab = activeTab()
+        local currentUrl = tostring(currentTab.currentUrl or "")
+        local addFavoriteEnabled = canFavoriteUrl(currentUrl)
+        local favoriteActive = addFavoriteEnabled and isFavoriteUrl(currentUrl)
+        local favTextX1 = panelX1
+        local favTextX2 = panelX2
+        local heartX1 = nil
+        local heartX2 = nil
+
+        if addFavoriteEnabled then
+            local heartLabel = "<3"
+            heartX2 = panelX2
+            heartX1 = math.max(panelX1, heartX2 - #heartLabel + 1)
+            favTextX2 = math.max(panelX1, heartX1 - 1)
+            local heartFg = favoriteActive and colors.red or colors.gray
+            writeClipped(heartX1, favoritesY, heartLabel, heartFg, textBg)
+        end
+
+        writeClipped(favTextX1, favoritesY, string.rep(" ", favTextX2 - favTextX1 + 1), textFg, textBg)
+        writeClipped(favTextX1 + 1, favoritesY, "Favorites", textFg, textBg)
         writeClipped(innerX1, exitY, "Exit", textFg, textBg)
 
         state.ui.menu.settings = { x1 = panelX1, x2 = panelX2, y = settingsY }
         state.ui.menu.help = { x1 = panelX1, x2 = panelX2, y = helpY }
+        if addFavoriteEnabled and heartX1 and heartX2 then
+            state.ui.menu.addFavorite = { x1 = heartX1, x2 = heartX2, y = favoritesY }
+        else
+            state.ui.menu.addFavorite = nil
+        end
+        state.ui.menu.addFavoriteEnabled = addFavoriteEnabled
+        state.ui.menu.favorites = { x1 = panelX1, x2 = favTextX2, y = favoritesY }
         state.ui.menu.exit = { x1 = panelX1, x2 = panelX2, y = exitY }
     end
 

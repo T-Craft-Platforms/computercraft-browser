@@ -5,6 +5,7 @@ return function(core, options)
     local parseUrl = core.parseUrl
     local decodeUrlPath = core.decodeUrlPath
     local escapeHtml = core.escapeHtml
+    local trim = core.trim
 
     local aboutPagesDir = options.aboutPagesDir or "/src/browser/about-pages"
     local aboutApi = options.aboutApi or {}
@@ -31,12 +32,24 @@ return function(core, options)
         return content
     end
 
-    local function fetchRemote(url)
+    local function fetchRemote(url, requestOptions)
         if not http then
             return nil, nil, "HTTP API is disabled"
         end
 
-        local ok, response, err = pcall(http.get, url, nil, true)
+        local method = tostring((requestOptions and requestOptions.method) or "GET"):upper()
+        local headers = requestOptions and requestOptions.headers or nil
+        local body = requestOptions and requestOptions.body or nil
+
+        local ok, response, err
+        if method == "GET" then
+            ok, response, err = pcall(http.get, url, headers, true)
+        elseif method == "POST" then
+            ok, response, err = pcall(http.post, url, tostring(body or ""), headers, true)
+        else
+            return nil, nil, ("Unsupported HTTP method: %s"):format(method)
+        end
+
         if not ok then
             return nil, nil, tostring(response)
         end
@@ -108,6 +121,17 @@ return function(core, options)
         return params
     end
 
+    local function mergeParams(base, extra)
+        local merged = {}
+        for key, value in pairs(base or {}) do
+            merged[key] = value
+        end
+        for key, value in pairs(extra or {}) do
+            merged[key] = value
+        end
+        return merged
+    end
+
     local function parseAboutUrl(url)
         local raw = tostring(url or ""):match("^about:(.*)$") or ""
         local pageName = raw:match("^([^/?#]+)") or ""
@@ -133,7 +157,10 @@ return function(core, options)
 
     local function replaceToken(source, token, value)
         local escaped = token:gsub("([%%%^%$%(%)%.%[%]%*%+%-%?])", "%%%1")
-        return (source or ""):gsub(escaped, value or "")
+        local replacement = tostring(value or "")
+        return (source or ""):gsub(escaped, function()
+            return replacement
+        end)
     end
 
     local function renderCenteredLogoAscii()
@@ -161,37 +188,166 @@ return function(core, options)
         return table.concat(padded, "\n")
     end
 
+    local function listFavorites()
+        local favorites = {}
+        if type(aboutApi.listFavorites) == "function" then
+            local listed = aboutApi.listFavorites()
+            if type(listed) == "table" then
+                favorites = listed
+            end
+        end
+        return favorites
+    end
+
+    local function renderFavoritesItems(favorites)
+        local items = {}
+        local count = 0
+        for _, favorite in ipairs(favorites or {}) do
+            local url = tostring((favorite and favorite.url) or "")
+            if url ~= "" then
+                count = count + 1
+                local title = tostring((favorite and favorite.title) or "")
+                if title == "" then
+                    title = url
+                end
+                items[#items + 1] = ("<li><a href=\"%s\">%s</a> <code>%s</code></li>")
+                    :format(escapeHtml(url), escapeHtml(title), escapeHtml(url))
+            end
+        end
+        if count == 0 then
+            items[#items + 1] = "<li><i>No favorites yet.</i></li>"
+        end
+        return table.concat(items), count
+    end
+
+    local function formatMinecraftTime()
+        if not os or type(os.time) ~= "function" then
+            return "Unavailable"
+        end
+
+        local okTime, current = pcall(os.time, "ingame")
+        if not okTime or type(current) ~= "number" then
+            okTime, current = pcall(os.time)
+            if not okTime or type(current) ~= "number" then
+                return "Unavailable"
+            end
+        end
+
+        local normalized = current % 24
+        if normalized < 0 then
+            normalized = normalized + 24
+        end
+        local hour = math.floor(normalized)
+        local minute = math.floor(((normalized - hour) * 60) + 0.5)
+        if minute >= 60 then
+            minute = 0
+            hour = (hour + 1) % 24
+        end
+
+        local dayText = ""
+        if type(os.day) == "function" then
+            local okDay, day = pcall(os.day, "ingame")
+            if not okDay or type(day) ~= "number" then
+                okDay, day = pcall(os.day)
+            end
+            if okDay and type(day) == "number" then
+                dayText = (" Day %d"):format(day)
+            end
+        end
+
+        return ("%02d:%02d%s"):format(hour, minute, dayText)
+    end
+
+    local function formatRealTime()
+        if not os or type(os.date) ~= "function" then
+            return "Unavailable"
+        end
+        local okDate, formatted = pcall(os.date, "%Y-%m-%d %H:%M:%S")
+        if okDate and formatted then
+            return tostring(formatted)
+        end
+        return "Unavailable"
+    end
+
+    local function renderHomePage(template, url)
+        local favoritesMarkup, favoritesCount = renderFavoritesItems(listFavorites())
+        local body = template or ""
+        body = replaceToken(body, "{{APP_TITLE}}", escapeHtml(tostring(aboutApi.appTitle or "CC Browser")))
+        body = replaceToken(body, "{{APP_VERSION}}", escapeHtml(tostring(aboutApi.appVersion or "0.0.0")))
+        body = replaceToken(body, "{{APP_ICON}}", escapeHtml(tostring(aboutApi.appIcon or "[CC]")))
+        body = replaceToken(body, "{{CURRENT_URL}}", escapeHtml(url or "about:home"))
+        body = replaceToken(body, "{{MINECRAFT_TIME}}", escapeHtml(formatMinecraftTime()))
+        body = replaceToken(body, "{{REAL_TIME}}", escapeHtml(formatRealTime()))
+        body = replaceToken(body, "{{FAVORITES_COUNT}}", tostring(favoritesCount))
+        body = replaceToken(body, "{{FAVORITES_LIST}}", favoritesMarkup)
+        return body
+    end
+
+    local function renderFavoritesPage(template, url)
+        local favoritesMarkup, favoritesCount = renderFavoritesItems(listFavorites())
+        local body = template or ""
+        body = replaceToken(body, "{{APP_TITLE}}", escapeHtml(tostring(aboutApi.appTitle or "CC Browser")))
+        body = replaceToken(body, "{{APP_VERSION}}", escapeHtml(tostring(aboutApi.appVersion or "0.0.0")))
+        body = replaceToken(body, "{{APP_ICON}}", escapeHtml(tostring(aboutApi.appIcon or "[CC]")))
+        body = replaceToken(body, "{{CURRENT_URL}}", escapeHtml(url or "about:favorites"))
+        body = replaceToken(body, "{{FAVORITES_COUNT}}", tostring(favoritesCount))
+        body = replaceToken(body, "{{FAVORITES_LIST}}", favoritesMarkup)
+        return body
+    end
+
     local function renderSettingsPage(template, url, params)
-        local statusMessage = ""
+        local statusMessage = "Ready."
+        local statusToastType = "info"
         local action = (params.action or ""):lower()
 
         if action == "set" then
             local key = params.key or ""
             local value = params.value or ""
+            if key == "home_page" then
+                local choice = tostring(params.home_page_choice or ""):lower()
+                if choice == "about:home" then
+                    value = "about:home"
+                elseif choice == "about:blank" then
+                    value = "about:blank"
+                elseif choice == "custom" then
+                    value = tostring(params.home_page_custom or "")
+                end
+            end
             if key == "" then
                 statusMessage = "Missing setting key."
+                statusToastType = "error"
+            elseif key == "home_page" and trim(tostring(value or "")) == "" then
+                statusMessage = "Missing home page value."
+                statusToastType = "error"
             elseif type(aboutApi.setSetting) ~= "function" then
                 statusMessage = "Settings API is unavailable."
+                statusToastType = "error"
             else
                 local ok, err = aboutApi.setSetting(key, value)
                 if ok then
                     statusMessage = ("Saved %s = %s"):format(key, value)
+                    statusToastType = "success"
                 else
                     statusMessage = tostring(err or "Failed to save setting.")
+                    statusToastType = "error"
                 end
             end
         elseif action == "get" then
             local key = params.key or ""
             if key == "" then
                 statusMessage = "Missing setting key."
+                statusToastType = "error"
             elseif type(aboutApi.getSetting) ~= "function" then
                 statusMessage = "Settings API is unavailable."
+                statusToastType = "error"
             else
                 local value = aboutApi.getSetting(key)
                 if value == nil then
                     statusMessage = ("No value set for %s"):format(key)
+                    statusToastType = "info"
                 else
                     statusMessage = ("%s = %s"):format(key, tostring(value))
+                    statusToastType = "success"
                 end
             end
         end
@@ -211,9 +367,8 @@ return function(core, options)
         else
             for _, key in ipairs(settingKeys) do
                 local value = tostring(settings[key] or "")
-                local getLink = "about:settings?action=get&key=" .. urlEncode(key)
-                settingsItems[#settingsItems + 1] = ("<li><b>%s</b> = <code>%s</code> [<a href=\"%s\">get</a>]</li>")
-                    :format(escapeHtml(key), escapeHtml(value), escapeHtml(getLink))
+                settingsItems[#settingsItems + 1] = ("<li><b>%s</b> = <code>%s</code></li>")
+                    :format(escapeHtml(key), escapeHtml(value))
             end
         end
 
@@ -229,18 +384,49 @@ return function(core, options)
         end
 
         local body = template or ""
+        local homePageValue = tostring(settings.home_page or "about:home")
+        local selectedChoice = tostring(params.home_page_choice or ""):lower()
+        if selectedChoice ~= "about:home" and selectedChoice ~= "about:blank" and selectedChoice ~= "custom" then
+            if homePageValue == "about:home" then
+                selectedChoice = "about:home"
+            elseif homePageValue == "about:blank" then
+                selectedChoice = "about:blank"
+            else
+                selectedChoice = "custom"
+            end
+        end
+
+        local customValue = ""
+        if selectedChoice == "custom" then
+            customValue = tostring(params.home_page_custom or "")
+            if customValue == "" then
+                if homePageValue ~= "about:home" and homePageValue ~= "about:blank" then
+                    customValue = homePageValue
+                end
+            end
+        elseif homePageValue ~= "about:home" and homePageValue ~= "about:blank" then
+            customValue = homePageValue
+        end
+
         body = replaceToken(body, "{{APP_TITLE}}", escapeHtml(tostring(aboutApi.appTitle or "CC Browser")))
         body = replaceToken(body, "{{APP_VERSION}}", escapeHtml(tostring(aboutApi.appVersion or "0.0.0")))
         body = replaceToken(body, "{{APP_ICON}}", escapeHtml(tostring(aboutApi.appIcon or "[CC]")))
         body = replaceToken(body, "{{CURRENT_URL}}", escapeHtml(url or "about:settings"))
+        body = replaceToken(body, "{{STATUS_TOAST_TYPE}}", escapeHtml(statusToastType))
         body = replaceToken(body, "{{STATUS_MESSAGE}}", escapeHtml(statusMessage))
         body = replaceToken(body, "{{LOGO_ASCII}}", escapeHtml(renderCenteredLogoAscii()))
+        body = replaceToken(body, "{{HOME_PAGE_RADIO_HOME_CHECKED}}", selectedChoice == "about:home" and "checked" or "")
+        body = replaceToken(body, "{{HOME_PAGE_RADIO_BLANK_CHECKED}}", selectedChoice == "about:blank" and "checked" or "")
+        body = replaceToken(body, "{{HOME_PAGE_RADIO_CUSTOM_CHECKED}}", selectedChoice == "custom" and "checked" or "")
+        body = replaceToken(body, "{{HOME_PAGE_CUSTOM_VALUE}}", escapeHtml(customValue))
         body = replaceToken(body, "{{SETTINGS_LIST}}", table.concat(settingsItems))
         body = replaceToken(body, "{{PARAMS_LIST}}", table.concat(paramItems))
         return body
     end
 
-    local function fetchTextResource(url, allowHttpFallback)
+    local function fetchTextResource(url, allowHttpFallback, requestOptions)
+        local request = requestOptions or {}
+        local method = tostring(request.method or "GET"):upper()
         local parsed = parseUrl(url)
         if parsed and parsed.scheme == "about" then
             if url == "about:blank" then
@@ -248,6 +434,14 @@ return function(core, options)
             end
 
             local pageName, params = parseAboutUrl(url)
+            if method == "POST" then
+                local requestHeaders = request.headers or {}
+                local contentType = tostring(requestHeaders["Content-Type"] or requestHeaders["content-type"] or ""):lower()
+                if contentType:find("application/x%-www%-form%-urlencoded", 1, false) then
+                    local bodyParams = parseQueryString(request.body or "")
+                    params = mergeParams(params, bodyParams)
+                end
+            end
             if not isValidAboutPageName(pageName) then
                 return nil, url, nil, "Unsupported about page: " .. url
             end
@@ -258,6 +452,10 @@ return function(core, options)
             end
             if pageName == "settings" then
                 body = renderSettingsPage(body, url, params)
+            elseif pageName == "home" then
+                body = renderHomePage(body, url)
+            elseif pageName == "favorites" then
+                body = renderFavoritesPage(body, url)
             end
             return body, url, { ["Content-Type"] = "text/html" }, nil
         end
@@ -278,10 +476,10 @@ return function(core, options)
         end
 
         if parsed and (parsed.scheme == "http" or parsed.scheme == "https") then
-            local body, headers, err = fetchRemote(url)
+            local body, headers, err = fetchRemote(url, request)
             if not body and allowHttpFallback and parsed.scheme == "https" then
                 local fallbackUrl = "http://" .. (parsed.authority or "") .. (parsed.path or "/") .. (parsed.suffix or "")
-                local fallbackBody, fallbackHeaders, fallbackErr = fetchRemote(fallbackUrl)
+                local fallbackBody, fallbackHeaders, fallbackErr = fetchRemote(fallbackUrl, request)
                 if fallbackBody then
                     return fallbackBody, fallbackUrl, fallbackHeaders, nil
                 end

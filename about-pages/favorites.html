@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Favorites</title>
+    <style>
+      body {
+        color: white;
+        background-color: black;
+      }
+
+      h1 {
+        color: yellow;
+        margin-top: 0;
+        margin-bottom: 1em;
+      }
+
+      h2 {
+        color: orange;
+        margin-top: 1em;
+        margin-bottom: 0;
+      }
+
+      p {
+        margin-top: 0;
+        margin-bottom: 1em;
+      }
+
+      code,
+      pre {
+        background-color: gray;
+        color: white;
+      }
+
+      a {
+        color: lightblue;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>{{APP_ICON}} Favorites</h1>
+    <p>App: <code>{{APP_TITLE}}</code> <code>{{APP_VERSION}}</code></p>
+    <p><code>{{CURRENT_URL}}</code></p>
+    <p>Total favorites: <code>{{FAVORITES_COUNT}}</code></p>
+
+    <h2>Favorite Pages</h2>
+    <ul>
+      {{FAVORITES_LIST}}
+    </ul>
+
+    <p><a href="about:home">Back to home</a> | <a href="about:help">Help</a></p>
+  </body>
+</html>

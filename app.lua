@@ -25,8 +25,9 @@ local createContent = loadModule("lib/content.lua")
 local createUi = loadModule("ui/view.lua")
 
 local browserSettings = {
-    home_page = "about:help",
+    home_page = "about:home",
 }
+local browserFavorites = {}
 
 local function normalizeSettingKey(key)
     local normalized = tostring(key or ""):lower()
@@ -63,6 +64,108 @@ local function setBrowserSetting(key, value)
     return true, nil
 end
 
+local function listBrowserFavorites()
+    local copied = {}
+    for i, item in ipairs(browserFavorites) do
+        copied[i] = {
+            url = tostring(item.url or ""),
+            title = tostring(item.title or ""),
+        }
+    end
+    return copied
+end
+
+local function addBrowserFavorite(url, title)
+    local rawUrl = core.trim(tostring(url or ""))
+    if rawUrl == "" then
+        return false, "Missing favorite URL"
+    end
+    if core.startsWith(rawUrl:lower(), "about:") then
+        return false, "Cannot favorite about pages"
+    end
+
+    local normalizedUrl = rawUrl
+    if type(core.normalizeInputUrl) == "function" then
+        local normalized = core.normalizeInputUrl(rawUrl)
+        if type(normalized) == "table" then
+            normalized = normalized[1]
+        end
+        if type(normalized) == "string" and normalized ~= "" then
+            normalizedUrl = core.trim(normalized)
+        end
+    end
+
+    for _, existing in ipairs(browserFavorites) do
+        if tostring(existing.url or "") == normalizedUrl then
+            return false, "Already in favorites"
+        end
+    end
+
+    local favoriteTitle = core.trim(tostring(title or ""))
+    if favoriteTitle == "" then
+        favoriteTitle = normalizedUrl
+    end
+
+    browserFavorites[#browserFavorites + 1] = {
+        url = normalizedUrl,
+        title = favoriteTitle,
+    }
+    return true, nil
+end
+
+local function normalizeFavoriteUrl(url)
+    local rawUrl = core.trim(tostring(url or ""))
+    if rawUrl == "" then
+        return ""
+    end
+    local normalizedUrl = rawUrl
+    if type(core.normalizeInputUrl) == "function" then
+        local normalized = core.normalizeInputUrl(rawUrl)
+        if type(normalized) == "table" then
+            normalized = normalized[1]
+        end
+        if type(normalized) == "string" and normalized ~= "" then
+            normalizedUrl = core.trim(normalized)
+        end
+    end
+    return normalizedUrl
+end
+
+local function findFavoriteIndex(url)
+    local normalizedUrl = normalizeFavoriteUrl(url)
+    if normalizedUrl == "" then
+        return nil, ""
+    end
+    for index, existing in ipairs(browserFavorites) do
+        if tostring(existing.url or "") == normalizedUrl then
+            return index, normalizedUrl
+        end
+    end
+    return nil, normalizedUrl
+end
+
+local function isFavoriteUrl(url)
+    local index = findFavoriteIndex(url)
+    return index ~= nil
+end
+
+local function canFavoriteUrl(url)
+    local normalizedUrl = normalizeFavoriteUrl(url)
+    if normalizedUrl == "" then
+        return false
+    end
+    return not core.startsWith(normalizedUrl:lower(), "about:")
+end
+
+local function removeBrowserFavorite(url)
+    local index = findFavoriteIndex(url)
+    if not index then
+        return false, "Not in favorites"
+    end
+    table.remove(browserFavorites, index)
+    return true, nil
+end
+
 local network = createNetwork(core, {
     aboutPagesDir = fs.combine(SCRIPT_DIR, "about-pages"),
     aboutApi = {
@@ -72,6 +175,7 @@ local network = createNetwork(core, {
         listSettings = listBrowserSettings,
         getSetting = getBrowserSetting,
         setSetting = setBrowserSetting,
+        listFavorites = listBrowserFavorites,
     },
 })
 local html = createHtml(core)
@@ -88,6 +192,14 @@ local escapeHtml = core.escapeHtml
 local normalizeInputUrl = core.normalizeInputUrl
 local getHeader = core.getHeader
 
+local function homePageUrl()
+    local homePage = trim(browserSettings.home_page or "about:home")
+    if homePage == "" then
+        homePage = "about:home"
+    end
+    return homePage
+end
+
 local fetchTextResource = network.fetchTextResource
 local makeErrorPage = network.makeErrorPage
 local looksLikeHtml = network.looksLikeHtml
@@ -101,7 +213,7 @@ local ANIMATION_TICK_SECONDS = 0.15
 local scheduleAnimationTick
 
 local function createTab(initialUrl)
-    local startingUrl = initialUrl or "about:blank"
+    local startingUrl = initialUrl or homePageUrl()
     return {
         currentUrl = startingUrl,
         urlInput = startingUrl,
@@ -118,13 +230,16 @@ local function createTab(initialUrl)
         viewportWidth = 1,
         showVerticalScrollbar = false,
         pageSelection = nil,
+        formState = {},
+        formMeta = nil,
+        focusedFormControl = nil,
         loading = false,
         status = "",
     }
 end
 
 local state = {
-    tabs = { createTab("about:help") },
+    tabs = { createTab(homePageUrl()) },
     activeTab = 1,
     menuOpen = false,
     expandedTabIndex = nil,
@@ -132,6 +247,7 @@ local state = {
     scrollbarDrag = nil,
     caretMode = false,
     clipboard = "",
+    localClipboardPendingPaste = false,
     skipNextPaste = false,
     lastTabClick = {
         index = nil,
@@ -159,7 +275,7 @@ local state = {
 
 local function activeTab()
     if #state.tabs < 1 then
-        state.tabs[1] = createTab("about:blank")
+        state.tabs[1] = createTab(homePageUrl())
         state.activeTab = 1
     end
     state.activeTab = clamp(state.activeTab, 1, #state.tabs)
@@ -425,7 +541,7 @@ local function moveTab(fromIndex, toIndex)
 end
 
 local function newTab(initialUrl)
-    local tab = createTab(initialUrl or "about:blank")
+    local tab = createTab(initialUrl or homePageUrl())
     table.insert(state.tabs, tab)
     collapseExpandedTab()
     activateTab(#state.tabs)
@@ -450,6 +566,9 @@ local function closeTab(index)
         tab.viewportWidth = 1
         tab.showVerticalScrollbar = false
         clearPageSelection(tab)
+        tab.formState = {}
+        tab.formMeta = nil
+        tab.focusedFormControl = nil
         tab.loading = false
         tab.status = ""
         state.tabDrag = nil
@@ -523,6 +642,8 @@ local ui = createUi({
     clamp = clamp,
     topBarRows = TOP_BAR_ROWS,
     activeTab = activeTab,
+    isFavoriteUrl = isFavoriteUrl,
+    canFavoriteUrl = canFavoriteUrl,
     canGoBack = canGoBack,
     canGoForward = canGoForward,
     tabTitle = tabTitle,
@@ -544,6 +665,14 @@ local function renderDocument(tab)
         local w, _ = term.getSize()
         target.viewportWidth = w
         target.showVerticalScrollbar = false
+        target.formMeta = {
+            formsById = {},
+            formOrder = {},
+            formsByHtmlId = {},
+            controlsByKey = {},
+            controlOrder = {},
+            formState = target.formState or {},
+        }
         setScroll(0, target)
         return
     end
@@ -556,14 +685,39 @@ local function renderDocument(tab)
     local reserveScrollbar = canShowScrollbarColumn and forceScrollbar
     local contentWidth = math.max(1, w - (reserveScrollbar and 1 or 0))
 
-    local lines = renderDocumentLines(target.document, contentWidth)
+    local lines, formMeta = renderDocumentLines(
+        target.document,
+        contentWidth,
+        target.formState,
+        target.focusedFormControl
+    )
     if (not reserveScrollbar) and canShowScrollbarColumn and allowVerticalScrolling and #lines > pageHeight() then
         reserveScrollbar = true
         contentWidth = math.max(1, w - 1)
-        lines = renderDocumentLines(target.document, contentWidth)
+        lines, formMeta = renderDocumentLines(
+            target.document,
+            contentWidth,
+            target.formState,
+            target.focusedFormControl
+        )
     end
 
     target.pageLines = lines
+    target.formMeta = formMeta or {
+        formsById = {},
+        formOrder = {},
+        formsByHtmlId = {},
+        controlsByKey = {},
+        controlOrder = {},
+        formState = target.formState or {},
+    }
+    target.formState = target.formMeta.formState or target.formState or {}
+    if target.focusedFormControl then
+        local controls = target.formMeta.controlsByKey or {}
+        if not controls[target.focusedFormControl] then
+            target.focusedFormControl = nil
+        end
+    end
     target.viewportWidth = contentWidth
     target.showVerticalScrollbar = reserveScrollbar and allowVerticalScrolling
     setScroll(target.scroll, target)
@@ -653,6 +807,30 @@ local function openHelpTab()
     navigate("about:help", true, false, tab)
 end
 
+local function openOrFocusFavoritesTab()
+    local existingIndex = findFirstTabByUrlPrefix("about:favorites")
+    if existingIndex then
+        activateTab(existingIndex)
+        return
+    end
+
+    local tab = newTab("about:favorites")
+    navigate("about:favorites", true, false, tab)
+end
+
+local function toggleCurrentPageFavorite()
+    local tab = activeTab()
+    local currentUrl = trim(tab.currentUrl or "")
+    if not canFavoriteUrl(currentUrl) then
+        return false, "Cannot favorite about pages"
+    end
+    if isFavoriteUrl(currentUrl) then
+        return removeBrowserFavorite(currentUrl)
+    end
+    local title = trim((tab.document and tab.document.title) or "")
+    return addBrowserFavorite(currentUrl, title)
+end
+
 local function hitMenuPanel(x, y)
     local menu = state.ui.menu
     local panel = menu and menu.panel or nil
@@ -678,6 +856,17 @@ local function handleMenuClick(x, y)
         openHelpTab()
         return true
     end
+    if hitRegion(x, y, menu.addFavorite) then
+        if menu.addFavoriteEnabled then
+            toggleCurrentPageFavorite()
+        end
+        return true
+    end
+    if hitRegion(x, y, menu.favorites) then
+        state.menuOpen = false
+        openOrFocusFavoritesTab()
+        return true
+    end
     if hitRegion(x, y, menu.exit) then
         state.menuOpen = false
         state.running = false
@@ -687,12 +876,646 @@ local function handleMenuClick(x, y)
         return true
     end
 
+    return true
+end
+
+local function urlEncode(value)
+    local source = tostring(value or "")
+    return (source:gsub("([^%w%-_%.~])", function(ch)
+        return ("%%%02X"):format(string.byte(ch))
+    end))
+end
+
+local function encodeFormFields(fields)
+    local parts = {}
+    for _, field in ipairs(fields or {}) do
+        local name = urlEncode(field.name or "")
+        local value = urlEncode(field.value or "")
+        parts[#parts + 1] = name .. "=" .. value
+    end
+    return table.concat(parts, "&")
+end
+
+local function appendQuery(url, query)
+    local base = tostring(url or "")
+    local extra = tostring(query or "")
+    if extra == "" then
+        return base
+    end
+
+    local fragment = ""
+    local hashAt = base:find("#", 1, true)
+    if hashAt then
+        fragment = base:sub(hashAt)
+        base = base:sub(1, hashAt - 1)
+    end
+
+    local sep = base:find("?", 1, true) and "&" or "?"
+    return base .. sep .. extra .. fragment
+end
+
+local function formControl(tab, key)
+    local target = tab or activeTab()
+    local meta = target.formMeta or {}
+    local controls = meta.controlsByKey or {}
+    local control = controls[key]
+    if not control then
+        return nil, nil
+    end
+    target.formState = target.formState or {}
+    local stateEntry = target.formState[key]
+    if not stateEntry then
+        stateEntry = {}
+        target.formState[key] = stateEntry
+    end
+    return control, stateEntry
+end
+
+local function isEditableFormControl(control)
+    if not control or control.disabled or control.readonly then
+        return false
+    end
+    if control.tag == "textarea" then
+        return true
+    end
+    if control.tag ~= "input" then
+        return false
+    end
+    local inputType = tostring(control.inputType or "text"):lower()
+    if inputType == "hidden"
+        or inputType == "checkbox"
+        or inputType == "radio"
+        or inputType == "submit"
+        or inputType == "reset"
+        or inputType == "button"
+        or inputType == "image" then
+        return false
+    end
+    return true
+end
+
+local function setFocusedFormControl(tab, key)
+    local target = tab or activeTab()
+    target.focusedFormControl = key
+    target.urlFocus = false
+    clearUrlSelection(target)
+end
+
+local function clampControlCursor(stateEntry)
+    local value = tostring(stateEntry.value or "")
+    local cursor = tonumber(stateEntry.cursor) or (#value + 1)
+    stateEntry.cursor = clamp(math.floor(cursor), 1, #value + 1)
+end
+
+local function insertIntoFormControl(stateEntry, control, text)
+    local value = tostring(stateEntry.value or "")
+    local cursor = tonumber(stateEntry.cursor) or (#value + 1)
+    cursor = clamp(math.floor(cursor), 1, #value + 1)
+
+    local insertion = tostring(text or "")
+    if insertion == "" then
+        return
+    end
+
+    local before = value:sub(1, cursor - 1)
+    local after = value:sub(cursor)
+    local merged = before .. insertion .. after
+    if control and control.maxLength and tonumber(control.maxLength) then
+        merged = merged:sub(1, math.max(0, tonumber(control.maxLength)))
+    end
+    stateEntry.value = merged
+    stateEntry.cursor = clamp(cursor + #insertion, 1, #merged + 1)
+end
+
+local function removeFromFormControl(stateEntry, backward)
+    local value = tostring(stateEntry.value or "")
+    local cursor = tonumber(stateEntry.cursor) or (#value + 1)
+    cursor = clamp(math.floor(cursor), 1, #value + 1)
+    if backward then
+        if cursor <= 1 then
+            return
+        end
+        local before = value:sub(1, cursor - 2)
+        local after = value:sub(cursor)
+        stateEntry.value = before .. after
+        stateEntry.cursor = cursor - 1
+    else
+        if cursor > #value then
+            return
+        end
+        local before = value:sub(1, cursor - 1)
+        local after = value:sub(cursor + 1)
+        stateEntry.value = before .. after
+        stateEntry.cursor = cursor
+    end
+    clampControlCursor(stateEntry)
+end
+
+local function resetForm(tab, formId)
+    local target = tab or activeTab()
+    local meta = target.formMeta or {}
+    local forms = meta.formsById or {}
+    local controls = meta.controlsByKey or {}
+    local form = forms[formId]
+    if not form then
+        return false
+    end
+
+    target.formState = target.formState or {}
+    for _, key in ipairs(form.controlKeys or {}) do
+        local control = controls[key]
+        if control then
+            local nextState = {}
+            for defaultKey, defaultValue in pairs(control.defaults or {}) do
+                if type(defaultValue) == "table" then
+                    local copied = {}
+                    for i, value in ipairs(defaultValue) do
+                        copied[i] = value
+                    end
+                    nextState[defaultKey] = copied
+                else
+                    nextState[defaultKey] = defaultValue
+                end
+            end
+            target.formState[key] = nextState
+        end
+    end
+    return true
+end
+
+local function collectFormFields(tab, formId, submitterKey)
+    local target = tab or activeTab()
+    local meta = target.formMeta or {}
+    local forms = meta.formsById or {}
+    local controls = meta.controlsByKey or {}
+    local form = forms[formId]
+    if not form then
+        return {}
+    end
+
+    local fields = {}
+    for _, key in ipairs(form.controlKeys or {}) do
+        local control = controls[key]
+        local stateEntry = target.formState and target.formState[key] or nil
+        if control and not control.disabled then
+            local name = trim(tostring(control.name or ""))
+            if control.tag == "input" then
+                local inputType = tostring(control.inputType or "text"):lower()
+                if inputType == "submit" or inputType == "image" then
+                    if key == submitterKey and name ~= "" then
+                        fields[#fields + 1] = {
+                            name = name,
+                            value = tostring((stateEntry and stateEntry.value) or control.defaultValue or ""),
+                        }
+                    end
+                elseif inputType == "reset" or inputType == "button" then
+                    -- Never included in payload.
+                elseif inputType == "checkbox" or inputType == "radio" then
+                    if stateEntry and stateEntry.checked and name ~= "" then
+                        fields[#fields + 1] = {
+                            name = name,
+                            value = tostring(stateEntry.value or control.defaultValue or "on"),
+                        }
+                    end
+                else
+                    if name ~= "" then
+                        fields[#fields + 1] = {
+                            name = name,
+                            value = tostring((stateEntry and stateEntry.value) or control.defaultValue or ""),
+                        }
+                    end
+                end
+            elseif control.tag == "textarea" then
+                if name ~= "" then
+                    fields[#fields + 1] = {
+                        name = name,
+                        value = tostring((stateEntry and stateEntry.value) or control.defaultValue or ""),
+                    }
+                end
+            elseif control.tag == "select" then
+                if name ~= "" then
+                    local options = control.options or {}
+                    if control.multiple then
+                        local selected = (stateEntry and stateEntry.selectedIndices) or {}
+                        for _, index in ipairs(selected) do
+                            local option = options[index]
+                            if option then
+                                fields[#fields + 1] = {
+                                    name = name,
+                                    value = tostring(option.value or option.label or ""),
+                                }
+                            end
+                        end
+                    else
+                        local index = stateEntry and tonumber(stateEntry.selectedIndex) or control.defaultSelectedIndex or 1
+                        index = clamp(math.floor(index or 1), 1, math.max(1, #options))
+                        local option = options[index]
+                        if option then
+                            fields[#fields + 1] = {
+                                name = name,
+                                value = tostring(option.value or option.label or ""),
+                            }
+                        end
+                    end
+                end
+            elseif control.tag == "button" then
+                local buttonType = tostring(control.buttonType or "submit"):lower()
+                if buttonType == "submit" and key == submitterKey and name ~= "" then
+                    fields[#fields + 1] = {
+                        name = name,
+                        value = tostring((stateEntry and stateEntry.value) or control.value or control.defaultValue or ""),
+                    }
+                end
+            end
+        end
+    end
+
+    return fields
+end
+
+local function refreshCurrentDocumentWithoutNavigation(tab)
+    local target = tab or activeTab()
+    local currentUrl = trim(target.currentUrl or "")
+    if currentUrl == "" then
+        return false
+    end
+    local previousScroll = target.scroll or 0
+
+    local body, finalUrl, headers, err = fetchTextResource(currentUrl, false)
+    if not body then
+        finalUrl = currentUrl
+        body = makeErrorPage(finalUrl, err or "Unknown error")
+        headers = { ["Content-Type"] = "text/html" }
+    end
+
+    local contentType = getHeader(headers, "Content-Type") or ""
+    if not looksLikeHtml(body, contentType) then
+        body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
+    end
+
+    target.document = buildDocument(body, finalUrl or currentUrl)
+    target.status = target.document.title or target.status
+    target.urlInput = currentUrl
+    target.urlCursor = #target.urlInput + 1
+    target.urlOffset = 0
+    target.urlFocus = false
+    clearUrlSelection(target)
+    clearPageSelection(target)
+    target.formState = {}
+    target.formMeta = nil
+    target.focusedFormControl = nil
+    target.scroll = previousScroll
+    renderDocument(target)
+    return true
+end
+
+local function submitForm(tab, formId, submitterKey)
+    local target = tab or activeTab()
+    local meta = target.formMeta or {}
+    local forms = meta.formsById or {}
+    local controls = meta.controlsByKey or {}
+    local form = forms[formId]
+    if not form then
+        return false
+    end
+
+    local submitter = submitterKey and controls[submitterKey] or nil
+    local rawMethod = submitter and trim(submitter.formMethod or "") or ""
+    if rawMethod == "" then
+        rawMethod = trim(form.method or "")
+    end
+    rawMethod = rawMethod:lower()
+    if rawMethod ~= "post" then
+        rawMethod = "get"
+    end
+
+    local action = submitter and trim(submitter.formAction or "") or ""
+    if action == "" then
+        action = trim(form.action or "")
+    end
+    if action == "" then
+        action = target.currentUrl or "about:blank"
+    end
+    action = core.resolveRelativeUrl(target.currentUrl or action, action)
+
+    local fields = collectFormFields(target, formId, submitterKey)
+    local encoded = encodeFormFields(fields)
+    local requestUrl = action
+    local requestOptions = {
+        method = rawMethod:upper(),
+    }
+
+    if rawMethod == "post" then
+        local enctype = submitter and trim(submitter.formEnctype or "") or ""
+        if enctype == "" then
+            enctype = trim(form.enctype or "")
+        end
+        if enctype == "" then
+            enctype = "application/x-www-form-urlencoded"
+        end
+
+        requestOptions.headers = {
+            ["Content-Type"] = enctype,
+        }
+        requestOptions.body = encoded
+    else
+        requestUrl = appendQuery(action, encoded)
+    end
+
+    local _, _, _, err = fetchTextResource(requestUrl, true, requestOptions)
+    if err then
+        target.status = "Form submit failed: " .. tostring(err)
+        return false
+    end
+
+    target.status = "Form submitted"
+    if startsWith(trim(target.currentUrl or ""):lower(), "about:") then
+        refreshCurrentDocumentWithoutNavigation(target)
+    end
+    return true
+end
+
+local function cycleSelect(tab, control, stateEntry, direction)
+    local options = control.options or {}
+    if #options == 0 then
+        return false
+    end
+    local nextIndex = tonumber(stateEntry.selectedIndex) or control.defaultSelectedIndex or 1
+    nextIndex = nextIndex + direction
+    if nextIndex < 1 then
+        nextIndex = #options
+    elseif nextIndex > #options then
+        nextIndex = 1
+    end
+    stateEntry.selectedIndex = nextIndex
+    stateEntry.selectedIndices = { nextIndex }
+    return true
+end
+
+local function activateFormControl(tab, key)
+    local target = tab or activeTab()
+    local control, stateEntry = formControl(target, key)
+    if not control or control.disabled then
+        return false
+    end
+
+    setFocusedFormControl(target, key)
+
+    if control.tag == "input" then
+        local inputType = tostring(control.inputType or "text"):lower()
+        if inputType == "checkbox" then
+            stateEntry.checked = not not stateEntry.checked
+            return true
+        end
+        if inputType == "radio" then
+            local formId = control.formId
+            local name = trim(tostring(control.name or ""))
+            if formId and name ~= "" then
+                local form = target.formMeta and target.formMeta.formsById and target.formMeta.formsById[formId] or nil
+                local controls = target.formMeta and target.formMeta.controlsByKey or {}
+                for _, candidateKey in ipairs(form and form.controlKeys or {}) do
+                    local candidate = controls[candidateKey]
+                    if candidate
+                        and candidate.tag == "input"
+                        and tostring(candidate.inputType or ""):lower() == "radio"
+                        and trim(tostring(candidate.name or "")) == name then
+                        local candidateState = target.formState[candidateKey] or {}
+                        candidateState.checked = candidateKey == key
+                        target.formState[candidateKey] = candidateState
+                    end
+                end
+            else
+                stateEntry.checked = true
+            end
+            return true
+        end
+        if inputType == "submit" or inputType == "image" then
+            if control.formId then
+                return submitForm(target, control.formId, key)
+            end
+            return true
+        end
+        if inputType == "reset" then
+            if control.formId then
+                return resetForm(target, control.formId)
+            end
+            return true
+        end
+        stateEntry.cursor = #tostring(stateEntry.value or "") + 1
+        return true
+    end
+
+    if control.tag == "textarea" then
+        stateEntry.cursor = #tostring(stateEntry.value or "") + 1
+        return true
+    end
+
+    if control.tag == "select" then
+        return cycleSelect(target, control, stateEntry, 1)
+    end
+
+    if control.tag == "button" then
+        local buttonType = tostring(control.buttonType or "submit"):lower()
+        if buttonType == "reset" then
+            if control.formId then
+                return resetForm(target, control.formId)
+            end
+            return true
+        end
+        if buttonType == "submit" and control.formId then
+            return submitForm(target, control.formId, key)
+        end
+        return true
+    end
+
     return false
 end
 
-local function loadDocumentWithAbort(tab, normalized, allowFallback)
+local function moveFocusedFormControl(tab, direction)
+    local target = tab or activeTab()
+    local meta = target.formMeta or {}
+    local order = meta.controlOrder or {}
+    if #order == 0 then
+        return false
+    end
+
+    local startIndex = 0
+    for index, key in ipairs(order) do
+        if key == target.focusedFormControl then
+            startIndex = index
+            break
+        end
+    end
+
+    local size = #order
+    for offset = 1, size do
+        local index = ((startIndex - 1 + (offset * direction)) % size) + 1
+        local key = order[index]
+        local control = meta.controlsByKey and meta.controlsByKey[key] or nil
+        if control and not control.disabled and tostring(control.inputType or ""):lower() ~= "hidden" then
+            setFocusedFormControl(target, key)
+            local stateEntry = target.formState[key] or {}
+            if isEditableFormControl(control) then
+                stateEntry.cursor = #tostring(stateEntry.value or "") + 1
+                target.formState[key] = stateEntry
+            end
+            return true
+        end
+    end
+
+    return false
+end
+
+local function handleFocusedFormControlKey(tab, key)
+    local target = tab or activeTab()
+    if not target.focusedFormControl then
+        return false
+    end
+
+    local control, stateEntry = formControl(target, target.focusedFormControl)
+    if not control then
+        target.focusedFormControl = nil
+        return false
+    end
+
+    if key == keys.escape then
+        target.focusedFormControl = nil
+        return true
+    end
+
+    if key == keys.tab then
+        local direction = state.shiftDown and -1 or 1
+        return moveFocusedFormControl(target, direction)
+    end
+
+    if key == keys.enter then
+        if control.tag == "textarea" and isEditableFormControl(control) then
+            insertIntoFormControl(stateEntry, control, "\n")
+            return true
+        end
+        if control.tag == "input" then
+            local inputType = tostring(control.inputType or "text"):lower()
+            if inputType == "reset" or inputType == "submit" or inputType == "image" then
+                return activateFormControl(target, control.key)
+            end
+            if inputType == "button" then
+                return true
+            end
+        elseif control.tag == "button" then
+            local buttonType = tostring(control.buttonType or "submit"):lower()
+            if buttonType == "reset" or buttonType == "submit" then
+                return activateFormControl(target, control.key)
+            end
+            if buttonType == "button" then
+                return true
+            end
+        end
+        if control.formId then
+            return submitForm(target, control.formId, control.key)
+        end
+        return true
+    end
+
+    if key == keys.space then
+        if control.tag == "input" then
+            local inputType = tostring(control.inputType or "text"):lower()
+            if inputType == "checkbox" or inputType == "radio" or inputType == "submit" or inputType == "reset" or inputType == "button" then
+                return activateFormControl(target, control.key)
+            end
+        elseif control.tag == "select" or control.tag == "button" then
+            return activateFormControl(target, control.key)
+        end
+    end
+
+    if control.tag == "input" then
+        local inputType = tostring(control.inputType or "text"):lower()
+        if (inputType == "number" or inputType == "range")
+            and (key == keys.up or key == keys.down)
+            and isEditableFormControl(control) then
+            local value = tonumber(stateEntry.value or control.defaultValue or "0") or 0
+            local step = tonumber(control.stepValue) or 1
+            if step == 0 then
+                step = 1
+            end
+            local direction = (key == keys.up) and 1 or -1
+            local nextValue = value + (step * direction)
+            if tonumber(control.minValue) then
+                nextValue = math.max(nextValue, tonumber(control.minValue))
+            end
+            if tonumber(control.maxValue) then
+                nextValue = math.min(nextValue, tonumber(control.maxValue))
+            end
+            stateEntry.value = tostring(nextValue)
+            stateEntry.cursor = #stateEntry.value + 1
+            return true
+        end
+    end
+
+    if control.tag == "select" then
+        if key == keys.left or key == keys.up then
+            return cycleSelect(target, control, stateEntry, -1)
+        elseif key == keys.right or key == keys.down then
+            return cycleSelect(target, control, stateEntry, 1)
+        end
+    end
+
+    if not isEditableFormControl(control) then
+        return true
+    end
+
+    clampControlCursor(stateEntry)
+    if key == keys.left then
+        stateEntry.cursor = clamp(stateEntry.cursor - 1, 1, #tostring(stateEntry.value or "") + 1)
+        return true
+    elseif key == keys.right then
+        stateEntry.cursor = clamp(stateEntry.cursor + 1, 1, #tostring(stateEntry.value or "") + 1)
+        return true
+    elseif key == keys.home then
+        stateEntry.cursor = 1
+        return true
+    elseif key == keys["end"] then
+        stateEntry.cursor = #tostring(stateEntry.value or "") + 1
+        return true
+    elseif key == keys.backspace then
+        removeFromFormControl(stateEntry, true)
+        return true
+    elseif key == keys.delete then
+        removeFromFormControl(stateEntry, false)
+        return true
+    end
+
+    return true
+end
+
+local function handleFocusedFormControlChar(tab, character)
+    local target = tab or activeTab()
+    if not target.focusedFormControl then
+        return false
+    end
+    local control, stateEntry = formControl(target, target.focusedFormControl)
+    if not control or not isEditableFormControl(control) then
+        return false
+    end
+    insertIntoFormControl(stateEntry, control, character)
+    return true
+end
+
+local function handleFocusedFormControlPaste(tab, text)
+    local target = tab or activeTab()
+    if not target.focusedFormControl then
+        return false
+    end
+    local control, stateEntry = formControl(target, target.focusedFormControl)
+    if not control or not isEditableFormControl(control) then
+        return false
+    end
+    insertIntoFormControl(stateEntry, control, text or "")
+    return true
+end
+
+local function loadDocumentWithAbort(tab, normalized, allowFallback, requestOptions)
     if not parallel or not parallel.waitForAny then
-        local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback)
+        local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback, requestOptions)
         if not body then
             finalUrl = normalized
             body = makeErrorPage(finalUrl, err or "Unknown error")
@@ -716,7 +1539,7 @@ local function loadDocumentWithAbort(tab, normalized, allowFallback)
 
     local function loadTask()
         local ok, errMsg = pcall(function()
-            local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback)
+            local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback, requestOptions)
             if not body then
                 finalUrl = normalized
                 body = makeErrorPage(finalUrl, err or "Unknown error")
@@ -785,7 +1608,7 @@ local function loadDocumentWithAbort(tab, normalized, allowFallback)
     return result, aborted
 end
 
-navigate = function(rawInput, addToHistory, allowFallback, tab)
+navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     local target = tab or activeTab()
     local normalized, inferred = normalizeInputUrl(rawInput)
 
@@ -797,7 +1620,7 @@ navigate = function(rawInput, addToHistory, allowFallback, tab)
     clearUrlSelection(target)
     draw()
 
-    local result, aborted = loadDocumentWithAbort(target, normalized, allowFallback or inferred)
+    local result, aborted = loadDocumentWithAbort(target, normalized, allowFallback or inferred, requestOptions)
     target.loading = false
     if aborted then
         target.status = "Load aborted"
@@ -826,6 +1649,9 @@ navigate = function(rawInput, addToHistory, allowFallback, tab)
     target.urlFocus = false
     clearUrlSelection(target)
     clearPageSelection(target)
+    target.formState = {}
+    target.formMeta = nil
+    target.focusedFormControl = nil
 
     if addToHistory then
         pushHistory(target, finalUrl)
@@ -917,8 +1743,9 @@ local function handleTabClick(button, x)
     end
 
     if hitRegion(x, 1, state.ui.newTab) then
-        local tab = newTab("about:blank")
-        navigate("about:blank", true, false, tab)
+        local newTabUrl = homePageUrl()
+        local tab = newTab(newTabUrl)
+        navigate(newTabUrl, true, false, tab)
         tab.urlFocus = true
         tab.urlCursor = #tab.urlInput + 1
         clearUrlSelection(tab)
@@ -938,6 +1765,7 @@ local function handleTabClick(button, x)
         local tab = activeTab()
         tab.urlFocus = false
         clearUrlSelection(tab)
+        tab.focusedFormControl = nil
         return
     end
 
@@ -994,6 +1822,7 @@ local function handleToolbarClick(x)
         if state.menuOpen then
             tab.urlFocus = false
             clearUrlSelection(tab)
+            tab.focusedFormControl = nil
         end
         state.tabDrag = nil
         state.scrollbarDrag = nil
@@ -1003,19 +1832,23 @@ local function handleToolbarClick(x)
     state.menuOpen = false
 
     if hitRegion(x, 2, state.ui.back) then
+        tab.focusedFormControl = nil
         goBack()
         return
     end
     if hitRegion(x, 2, state.ui.forward) then
+        tab.focusedFormControl = nil
         goForward()
         return
     end
     if hitRegion(x, 2, state.ui.reload) then
+        tab.focusedFormControl = nil
         reloadPage()
         return
     end
     if hitRegion(x, 2, state.ui.url) then
         tab.urlFocus = true
+        tab.focusedFormControl = nil
         local pos = tab.urlOffset + (x - state.ui.url.x1) + 1
         tab.urlCursor = clamp(pos, 1, #tab.urlInput + 1)
         clearUrlSelection(tab)
@@ -1023,6 +1856,7 @@ local function handleToolbarClick(x)
     end
     tab.urlFocus = false
     clearUrlSelection(tab)
+    tab.focusedFormControl = nil
 end
 
 local function handleMouseClick(button, x, y)
@@ -1089,6 +1923,13 @@ local function handleMouseClick(button, x, y)
 
     clearPageSelection(tab)
     local line = tab.pageLines[lineIndex]
+    local controlKey = line and line.controls and line.controls[column] or nil
+    if controlKey then
+        state.menuOpen = false
+        activateFormControl(tab, controlKey)
+        return
+    end
+    tab.focusedFormControl = nil
     local href = line and line.links and line.links[column] or nil
     if href then
         state.menuOpen = false
@@ -1327,6 +2168,15 @@ local function selectAllText()
         return true
     end
 
+    if tab.focusedFormControl then
+        local control, stateEntry = formControl(tab, tab.focusedFormControl)
+        if control and isEditableFormControl(control) then
+            local value = tostring(stateEntry.value or "")
+            stateEntry.cursor = #value + 1
+            return true
+        end
+    end
+
     if state.caretMode then
         selectAllPageText(tab)
         return true
@@ -1343,12 +2193,35 @@ local function copySelectedText()
         if text == "" then
             text = tab.urlInput or ""
         end
-    elseif state.caretMode then
+    elseif tab.focusedFormControl then
+        local control, stateEntry = formControl(tab, tab.focusedFormControl)
+        if control then
+            if control.tag == "input" then
+                local inputType = tostring(control.inputType or "text"):lower()
+                if inputType == "checkbox" or inputType == "radio" then
+                    text = stateEntry.checked and "true" or "false"
+                else
+                    text = tostring(stateEntry.value or control.defaultValue or "")
+                end
+            elseif control.tag == "select" then
+                local options = control.options or {}
+                local index = tonumber(stateEntry.selectedIndex) or control.defaultSelectedIndex or 1
+                index = clamp(math.floor(index or 1), 1, math.max(1, #options))
+                local option = options[index]
+                if option then
+                    text = tostring(option.value or option.label or "")
+                end
+            else
+                text = tostring(stateEntry.value or control.defaultValue or "")
+            end
+        end
+    elseif state.caretMode or tab.pageSelection then
         text = getSelectedPageText(tab)
     end
 
     if text ~= "" then
         state.clipboard = text
+        state.localClipboardPendingPaste = true
         return true
     end
     return false
@@ -1362,16 +2235,33 @@ local function cutSelectedText()
             return false
         end
         state.clipboard = text
+        state.localClipboardPendingPaste = true
         deleteUrlSelection(tab)
         return true
     end
 
-    if state.caretMode then
+    if tab.focusedFormControl then
+        local control, stateEntry = formControl(tab, tab.focusedFormControl)
+        if control and isEditableFormControl(control) then
+            local text = tostring(stateEntry.value or "")
+            if text == "" then
+                return false
+            end
+            state.clipboard = text
+            state.localClipboardPendingPaste = true
+            stateEntry.value = ""
+            stateEntry.cursor = 1
+            return true
+        end
+    end
+
+    if state.caretMode or tab.pageSelection then
         local text = getSelectedPageText(tab)
         if text == "" then
             return false
         end
         state.clipboard = text
+        state.localClipboardPendingPaste = true
         return true
     end
 
@@ -1380,16 +2270,28 @@ end
 
 local function pasteClipboardText()
     local tab = activeTab()
-    if not tab.urlFocus then
-        return false
-    end
     if state.clipboard == nil or state.clipboard == "" then
         return false
     end
 
-    insertUrlText(state.clipboard)
-    state.skipNextPaste = true
-    return true
+    if tab.urlFocus then
+        insertUrlText(state.clipboard)
+        state.localClipboardPendingPaste = false
+        state.skipNextPaste = true
+        return true
+    end
+
+    if tab.focusedFormControl then
+        local control, stateEntry = formControl(tab, tab.focusedFormControl)
+        if control and isEditableFormControl(control) then
+            insertIntoFormControl(stateEntry, control, state.clipboard)
+            state.localClipboardPendingPaste = false
+            state.skipNextPaste = true
+            return true
+        end
+    end
+
+    return false
 end
 
 local function handleKeyDown(key)
@@ -1417,6 +2319,9 @@ local function handleKeyDown(key)
     end
     if key == keys.f7 then
         state.caretMode = not state.caretMode
+        if state.caretMode then
+            activeTab().focusedFormControl = nil
+        end
         if not state.caretMode then
             for _, tabItem in ipairs(state.tabs) do
                 clearPageSelection(tabItem)
@@ -1427,6 +2332,7 @@ local function handleKeyDown(key)
 
     if state.ctrlDown then
         if key == keys.l then
+            activeTab().focusedFormControl = nil
             focusUrlBar()
             return
         end
@@ -1451,8 +2357,9 @@ local function handleKeyDown(key)
             return
         end
         if key == keys.t then
-            local tab = newTab("about:blank")
-            navigate("about:blank", true, false, tab)
+            local newTabUrl = homePageUrl()
+            local tab = newTab(newTabUrl)
+            navigate(newTabUrl, true, false, tab)
             tab.urlFocus = true
             tab.urlCursor = #tab.urlInput + 1
             clearUrlSelection(tab)
@@ -1481,9 +2388,16 @@ local function handleKeyDown(key)
     end
 
     local tab = activeTab()
+    if tab.focusedFormControl then
+        if handleFocusedFormControlKey(tab, key) then
+            return
+        end
+    end
+
     if key == keys.tab then
         tab.urlFocus = not tab.urlFocus
         if tab.urlFocus then
+            tab.focusedFormControl = nil
             tab.urlCursor = #tab.urlInput + 1
             clearUrlSelection(tab)
         else
@@ -1531,9 +2445,36 @@ local function handleTimer(timerId)
 end
 
 local function handleChar(character)
-    if activeTab().urlFocus then
-        insertUrlText(character)
+    local byte = character and string.byte(character, 1) or nil
+    if byte and byte >= 1 and byte <= 31 then
+        if byte == 1 then
+            selectAllText()
+        elseif byte == 3 then
+            copySelectedText()
+        elseif byte == 24 then
+            cutSelectedText()
+        elseif byte == 22 then
+            pasteClipboardText()
+        end
+        return
     end
+
+    local tab = activeTab()
+    if tab.urlFocus then
+        insertUrlText(character)
+        return
+    end
+
+    handleFocusedFormControlChar(tab, character)
+end
+
+local function resolvePasteText(text)
+    local pasteText = text
+    if state.localClipboardPendingPaste and state.clipboard ~= "" then
+        pasteText = state.clipboard
+        state.localClipboardPendingPaste = false
+    end
+    return pasteText
 end
 
 local function handlePaste(text)
@@ -1541,10 +2482,18 @@ local function handlePaste(text)
         state.skipNextPaste = false
         return
     end
-    if activeTab().urlFocus then
-        insertUrlText(text)
-        if text and text ~= "" then
-            state.clipboard = text
+    local tab = activeTab()
+    local pasteText = resolvePasteText(text)
+    if tab.urlFocus then
+        if pasteText and pasteText ~= "" then
+            insertUrlText(pasteText)
+            state.clipboard = pasteText
+        end
+        return
+    end
+    if handleFocusedFormControlPaste(tab, pasteText) then
+        if pasteText and pasteText ~= "" then
+            state.clipboard = pasteText
         end
     end
 end
@@ -1557,10 +2506,7 @@ local function bootstrap(initialUrls)
     scheduleAnimationTick()
 
     if not initialUrls or #initialUrls == 0 then
-        local homePage = trim(browserSettings.home_page or "about:help")
-        if homePage == "" then
-            homePage = "about:help"
-        end
+        local homePage = homePageUrl()
         navigate(homePage, true, true, activeTab())
         return
     end
@@ -1570,7 +2516,7 @@ local function bootstrap(initialUrls)
         if i == 1 then
             tab = activeTab()
         else
-            tab = newTab("about:blank")
+            tab = newTab(homePageUrl())
         end
         navigate(url, true, true, tab)
     end
@@ -1610,6 +2556,7 @@ local function run(...)
             rerenderAllTabs()
         end
 
+        renderDocument(activeTab())
         draw()
     end
 

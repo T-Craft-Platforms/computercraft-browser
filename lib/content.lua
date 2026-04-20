@@ -68,8 +68,21 @@ return function(deps)
             tag = nil,
             ids = {},
             classes = {},
+            attrs = {},
+            attrPresence = {},
         }
 
+        for attrName, attrValue in sanitized:gmatch("%[([%w_:%-]+)%s*=%s*['\"]?([^%]'\"]+)['\"]?%]") do
+            table.insert(parsed.attrs, {
+                name = attrName:lower(),
+                value = attrValue:lower(),
+            })
+        end
+        for attrName in sanitized:gmatch("%[([%w_:%-]+)%s*%]") do
+            table.insert(parsed.attrPresence, attrName:lower())
+        end
+
+        sanitized = sanitized:gsub("%[[^%]]+%]", "")
         parsed.tag = sanitized:match("^([%a][%w%-]*)")
         for id in sanitized:gmatch("#([%w%-_]+)") do
             table.insert(parsed.ids, id:lower())
@@ -81,6 +94,8 @@ return function(deps)
         local specificity = 0
         specificity = specificity + (#parsed.ids * 100)
         specificity = specificity + (#parsed.classes * 10)
+        specificity = specificity + (#parsed.attrs * 10)
+        specificity = specificity + (#parsed.attrPresence * 10)
         if parsed.tag and parsed.tag ~= "*" then
             specificity = specificity + 1
         end
@@ -153,6 +168,25 @@ return function(deps)
             end
         end
 
+        if #simple.attrPresence > 0 then
+            local attrs = node.attrs or {}
+            for _, attrName in ipairs(simple.attrPresence) do
+                if attrs[attrName] == nil then
+                    return false
+                end
+            end
+        end
+
+        if #simple.attrs > 0 then
+            local attrs = node.attrs or {}
+            for _, wanted in ipairs(simple.attrs) do
+                local nodeValue = attrs[wanted.name]
+                if nodeValue == nil or tostring(nodeValue):lower() ~= wanted.value then
+                    return false
+                end
+            end
+        end
+
         return true
     end
 
@@ -198,6 +232,14 @@ return function(deps)
             style.fg = colors.lightBlue
         elseif tag == "strong" or tag == "b" then
             style.bold = true
+        elseif tag == "toast" then
+            style.display = "block"
+            style.marginTop = math.max(style.marginTop, 1)
+            style.marginBottom = math.max(style.marginBottom, 1)
+            style.paddingLeft = math.max(style.paddingLeft, 1)
+            style.paddingRight = math.max(style.paddingRight, 1)
+            style.fg = colors.white
+            style.bg = colors.gray
         elseif tag == "pre" then
             style.display = "block"
             style.whiteSpace = "pre"
@@ -336,6 +378,22 @@ return function(deps)
     local function computeStyle(node, parentStyle, rules)
         local style = newComputedStyle(parentStyle)
         applyTagDefaults(style, node.tag)
+        if node.tag == "toast" then
+            local toastType = trim(node.attrs and node.attrs.type or ""):lower()
+            if toastType == "success" then
+                style.fg = colors.black
+                style.bg = colors.lime
+            elseif toastType == "error" then
+                style.fg = colors.white
+                style.bg = colors.red
+            elseif toastType == "warning" then
+                style.fg = colors.black
+                style.bg = colors.orange
+            elseif toastType == "info" then
+                style.fg = colors.white
+                style.bg = colors.blue
+            end
+        end
 
         local appliedMeta = {}
         for _, rule in ipairs(rules) do
@@ -382,6 +440,7 @@ return function(deps)
             fg = {},
             bg = {},
             links = {},
+            controls = {},
         }
     end
 
@@ -396,6 +455,7 @@ return function(deps)
             pendingSpace = false,
             pendingSpaceStyle = nil,
             pendingSpaceHref = nil,
+            pendingSpaceControl = nil,
         }
 
         function writer:getLine(index)
@@ -430,30 +490,36 @@ return function(deps)
             self.pendingSpace = false
             self.pendingSpaceStyle = nil
             self.pendingSpaceHref = nil
+            self.pendingSpaceControl = nil
         end
 
-        function writer:setPendingSpace(style, href)
+        function writer:setPendingSpace(style, href, controlKey)
             self.pendingSpace = true
             self.pendingSpaceStyle = style
             self.pendingSpaceHref = href
+            self.pendingSpaceControl = controlKey
         end
 
-        function writer:flushPendingSpace(fallbackStyle, fallbackHref)
+        function writer:flushPendingSpace(fallbackStyle, fallbackHref, fallbackControlKey)
             if not self.pendingSpace then
                 return
             end
             local style = self.pendingSpaceStyle or fallbackStyle
             local href = self.pendingSpaceHref
+            local controlKey = self.pendingSpaceControl
             if href == nil then
                 href = fallbackHref
             end
+            if controlKey == nil then
+                controlKey = fallbackControlKey
+            end
             if style then
-                self:writeSpace(style, href)
+                self:writeSpace(style, href, controlKey)
             end
             self:clearPendingSpace()
         end
 
-        function writer:putChar(ch, style, href)
+        function writer:putChar(ch, style, href, controlKey)
             if self.x > self.width then
                 self:newLine()
             end
@@ -462,10 +528,11 @@ return function(deps)
             line.fg[self.x] = style.fg or colors.white
             line.bg[self.x] = style.bg or self.pageBackground
             line.links[self.x] = href
+            line.controls[self.x] = controlKey
             self.x = self.x + 1
         end
 
-        function writer:writeSpace(style, href)
+        function writer:writeSpace(style, href, controlKey)
             if self:atLineStart() then
                 return
             end
@@ -473,10 +540,10 @@ return function(deps)
             if line.chars[self.x - 1] == " " then
                 return
             end
-            self:putChar(" ", style, href)
+            self:putChar(" ", style, href, controlKey)
         end
 
-        function writer:writeWord(word, style, href)
+        function writer:writeWord(word, style, href, controlKey)
             if word == "" then
                 return
             end
@@ -484,11 +551,11 @@ return function(deps)
                 self:newLine()
             end
             for i = 1, #word do
-                self:putChar(word:sub(i, i), style, href)
+                self:putChar(word:sub(i, i), style, href, controlKey)
             end
         end
 
-        function writer:writePreservedText(text, style, href)
+        function writer:writePreservedText(text, style, href, controlKey)
             self:clearPendingSpace()
             local transformed = transformText(text, style.textTransform)
             for i = 1, #transformed do
@@ -501,21 +568,21 @@ return function(deps)
                     local offset = (self.x - (self.indent + 1)) % 4
                     local spaces = 4 - offset
                     for _ = 1, spaces do
-                        self:putChar(" ", style, href)
+                        self:putChar(" ", style, href, controlKey)
                     end
                 else
-                    self:putChar(ch, style, href)
+                    self:putChar(ch, style, href, controlKey)
                 end
             end
         end
 
-        function writer:writeCollapsedText(text, style, href)
+        function writer:writeCollapsedText(text, style, href, controlKey)
             local i = 1
             local length = #text
             while i <= length do
                 local ch = text:sub(i, i)
                 if ch:match("%s") then
-                    self:setPendingSpace(style, href)
+                    self:setPendingSpace(style, href, controlKey)
                     i = i + 1
                 else
                     local j = i
@@ -525,25 +592,34 @@ return function(deps)
                     local word = text:sub(i, j - 1)
                     word = transformText(word, style.textTransform)
                     if self.pendingSpace then
-                        self:flushPendingSpace(style, href)
+                        self:flushPendingSpace(style, href, controlKey)
                     end
-                    self:writeWord(word, style, href)
+                    self:writeWord(word, style, href, controlKey)
                     i = j
                 end
             end
         end
 
-        function writer:writeText(text, style, href, preserveWhitespace)
+        function writer:writeText(text, style, href, preserveWhitespace, controlKey)
             local decoded = decodeEntities(text or "")
             if decoded == "" then
                 return
             end
             if preserveWhitespace then
-                self:flushPendingSpace(style, href)
-                self:writePreservedText(decoded, style, href)
+                self:flushPendingSpace(style, href, controlKey)
+                self:writePreservedText(decoded, style, href, controlKey)
             else
-                self:writeCollapsedText(decoded, style, href)
+                self:writeCollapsedText(decoded, style, href, controlKey)
             end
+        end
+
+        function writer:writeControlText(text, style, controlKey)
+            local raw = tostring(text or "")
+            if raw == "" then
+                return
+            end
+            self:flushPendingSpace(style, nil, controlKey)
+            self:writePreservedText(raw, style, nil, controlKey)
         end
 
         function writer:beginBlock(style)
@@ -596,6 +672,506 @@ return function(deps)
         end
     end
 
+    local TEXT_INPUT_TYPES = {
+        text = true,
+        password = true,
+        search = true,
+        url = true,
+        email = true,
+        tel = true,
+        number = true,
+        range = true,
+        color = true,
+        date = true,
+        ["datetime-local"] = true,
+        month = true,
+        week = true,
+        time = true,
+        file = true,
+    }
+
+    local function hasBooleanAttr(attrs, key)
+        if not attrs then
+            return false
+        end
+        local value = attrs[key]
+        if value == nil then
+            return false
+        end
+        local lowered = tostring(value):lower()
+        return lowered ~= "false" and lowered ~= "0" and lowered ~= "off"
+    end
+
+    local function parseInteger(value, fallback)
+        local number = tonumber(value)
+        if not number then
+            return fallback
+        end
+        return math.floor(number)
+    end
+
+    local function cloneControlStyle(baseStyle, focused, disabled)
+        local cloned = {
+            fg = baseStyle.fg,
+            bg = baseStyle.bg,
+            whiteSpace = "pre",
+            bold = baseStyle.bold,
+            textTransform = "none",
+        }
+        if disabled then
+            cloned.fg = colors.gray
+        end
+        if focused then
+            cloned.fg = colors.white
+            cloned.bg = colors.blue
+        end
+        return cloned
+    end
+
+    local function copyList(values)
+        local copied = {}
+        for i, value in ipairs(values or {}) do
+            copied[i] = value
+        end
+        return copied
+    end
+
+    local function registerForm(context, node, baseUrl)
+        local attrs = node.attrs or {}
+        local formId = "form:" .. tostring(node._nodeId or 0)
+        local actionRaw = trim(attrs.action or "")
+        local action = actionRaw ~= "" and resolveRelativeUrl(baseUrl, actionRaw) or baseUrl
+        local method = trim((attrs.method or "get"):lower())
+        if method == "" then
+            method = "get"
+        end
+        local enctype = trim((attrs.enctype or "application/x-www-form-urlencoded"):lower())
+        if enctype == "" then
+            enctype = "application/x-www-form-urlencoded"
+        end
+
+        local form = context.formsById[formId]
+        if not form then
+            form = {
+                id = formId,
+                nodeId = node._nodeId or 0,
+                action = action,
+                method = method,
+                enctype = enctype,
+                target = attrs.target or "",
+                controlKeys = {},
+                htmlId = attrs.id or "",
+                name = attrs.name or "",
+            }
+            context.formsById[formId] = form
+            context.formOrder[#context.formOrder + 1] = formId
+        else
+            form.action = action
+            form.method = method
+            form.enctype = enctype
+            form.target = attrs.target or ""
+            form.htmlId = attrs.id or ""
+            form.name = attrs.name or ""
+            form.controlKeys = {}
+        end
+
+        local htmlId = trim(attrs.id or "")
+        if htmlId ~= "" then
+            context.formsByHtmlId[htmlId:lower()] = formId
+        end
+
+        return formId
+    end
+
+    local function resolveControlFormId(context, node)
+        local attrs = node.attrs or {}
+        local explicitForm = trim(attrs.form or "")
+        if explicitForm ~= "" then
+            local mapped = context.formsByHtmlId[explicitForm:lower()]
+            if mapped then
+                return mapped
+            end
+        end
+        return context.formStack[#context.formStack]
+    end
+
+    local function makeControlKey(formId, node)
+        local parent = formId or "form:none"
+        return parent .. "|node:" .. tostring(node._nodeId or 0)
+    end
+
+    local function ensureControlState(context, control)
+        local key = control.key
+        local state = context.formState[key]
+        if not state then
+            state = {}
+        end
+        for defaultKey, defaultValue in pairs(control.defaults or {}) do
+            if state[defaultKey] == nil then
+                if type(defaultValue) == "table" then
+                    state[defaultKey] = copyList(defaultValue)
+                else
+                    state[defaultKey] = defaultValue
+                end
+            end
+        end
+        context.formState[key] = state
+        return state
+    end
+
+    local function registerControl(context, formId, control)
+        local key = control.key
+        context.controlsByKey[key] = control
+        context.controlOrder[#context.controlOrder + 1] = key
+        if formId then
+            local form = context.formsById[formId]
+            if form then
+                form.controlKeys[#form.controlKeys + 1] = key
+            end
+        end
+        return ensureControlState(context, control)
+    end
+
+    local function clampControlInnerWidth(writer, wanted)
+        local available = math.max(1, writer.width - writer.indent - 2)
+        return clamp(wanted, 1, available)
+    end
+
+    local function withCursorMarker(text, cursor)
+        local source = tostring(text or "")
+        local cursorPos = clamp(parseInteger(cursor, (#source + 1)), 1, #source + 1)
+        return source:sub(1, cursorPos - 1) .. "|" .. source:sub(cursorPos), cursorPos
+    end
+
+    local function renderInputControl(node, style, writer, context)
+        local attrs = node.attrs or {}
+        local inputType = trim((attrs.type or "text"):lower())
+        if inputType == "" then
+            inputType = "text"
+        end
+
+        local formId = resolveControlFormId(context, node)
+        local key = makeControlKey(formId, node)
+        local defaultValue = tostring(attrs.value or "")
+        if (inputType == "checkbox" or inputType == "radio") and defaultValue == "" then
+            defaultValue = "on"
+        end
+        local defaults = {
+            value = defaultValue,
+            checked = hasBooleanAttr(attrs, "checked"),
+            cursor = #defaultValue + 1,
+            selectedIndex = 1,
+            selectedIndices = {},
+        }
+
+        local control = {
+            key = key,
+            formId = formId,
+            nodeId = node._nodeId or 0,
+            tag = "input",
+            inputType = inputType,
+            name = attrs.name or "",
+            id = attrs.id or "",
+            className = attrs.class or "",
+            disabled = hasBooleanAttr(attrs, "disabled"),
+            readonly = hasBooleanAttr(attrs, "readonly"),
+            required = hasBooleanAttr(attrs, "required"),
+            placeholder = attrs.placeholder or "",
+            maxLength = parseInteger(attrs.maxlength, nil),
+            size = parseInteger(attrs.size, nil),
+            minValue = tonumber(attrs.min),
+            maxValue = tonumber(attrs.max),
+            stepValue = tonumber(attrs.step),
+            formAction = attrs.formaction or "",
+            formMethod = attrs.formmethod or "",
+            formEnctype = attrs.formenctype or "",
+            defaultValue = defaultValue,
+            defaultChecked = defaults.checked,
+            defaults = defaults,
+            options = nil,
+        }
+        local stateEntry = registerControl(context, formId, control)
+
+        if inputType == "hidden" then
+            return true
+        end
+
+        local focused = context.focusControlKey == key
+        local controlStyle = cloneControlStyle(style, focused, control.disabled)
+        local isBlock = style.display == "block"
+        local previousIndent = nil
+        if isBlock then
+            previousIndent = writer:beginBlock(style)
+        end
+
+        if inputType == "checkbox" then
+            local marker = stateEntry.checked and "[x]" or "[ ]"
+            writer:writeControlText(marker, controlStyle, key)
+        elseif inputType == "radio" then
+            local marker = stateEntry.checked and "(o)" or "( )"
+            writer:writeControlText(marker, controlStyle, key)
+        elseif inputType == "submit" or inputType == "reset" or inputType == "button" or inputType == "image" then
+            local label = trim(attrs.value or "")
+            if label == "" then
+                if inputType == "submit" then
+                    label = "Submit"
+                elseif inputType == "reset" then
+                    label = "Reset"
+                elseif inputType == "image" then
+                    label = "Image"
+                else
+                    label = "Button"
+                end
+            end
+            writer:writeControlText("[ " .. label .. " ]", controlStyle, key)
+        else
+            local value = tostring(stateEntry.value or "")
+            if control.maxLength and control.maxLength >= 0 and #value > control.maxLength then
+                value = value:sub(1, control.maxLength)
+                stateEntry.value = value
+            end
+            stateEntry.cursor = clamp(parseInteger(stateEntry.cursor, (#value + 1)), 1, #value + 1)
+
+            local shown = value
+            if inputType == "password" then
+                shown = string.rep("*", #value)
+            end
+            local placeholder = tostring(attrs.placeholder or "")
+            local width = clampControlInnerWidth(writer, control.size or 16)
+
+            if shown == "" and placeholder ~= "" and not focused then
+                local placeholderStyle = cloneControlStyle(style, false, control.disabled)
+                placeholderStyle.fg = colors.gray
+                local clippedPlaceholder = placeholder
+                if #clippedPlaceholder > width then
+                    clippedPlaceholder = clippedPlaceholder:sub(1, width)
+                end
+                writer:writeControlText("[" .. clippedPlaceholder .. "]", placeholderStyle, key)
+            else
+                local visible = shown
+                local cursorDisplay = stateEntry.cursor
+                if #visible > width then
+                    local start = 1
+                    if focused and cursorDisplay > width then
+                        start = cursorDisplay - width + 1
+                    elseif not focused then
+                        start = #visible - width + 1
+                    end
+                    visible = visible:sub(start, start + width - 1)
+                    cursorDisplay = clamp(cursorDisplay - start + 1, 1, #visible + 1)
+                end
+                if focused then
+                    visible = withCursorMarker(visible, cursorDisplay)
+                end
+                writer:writeControlText("[" .. visible .. "]", controlStyle, key)
+            end
+        end
+
+        if isBlock then
+            writer:endBlock(style, previousIndent)
+        end
+        return true
+    end
+
+    local function collectSelectOptions(node)
+        local options = {}
+        local function walkOptions(optionNode)
+            for _, child in ipairs(optionNode.children or {}) do
+                if child.type == "element" then
+                    if child.tag == "option" then
+                        local attrs = child.attrs or {}
+                        local label = trim(decodeEntities(nodeTextContent(child) or ""))
+                        local value = tostring(attrs.value or label)
+                        options[#options + 1] = {
+                            label = label,
+                            value = value,
+                            selected = hasBooleanAttr(attrs, "selected"),
+                            disabled = hasBooleanAttr(attrs, "disabled"),
+                        }
+                    else
+                        walkOptions(child)
+                    end
+                end
+            end
+        end
+        walkOptions(node)
+        if #options == 0 then
+            options[1] = { label = "", value = "", selected = true, disabled = false }
+        end
+        return options
+    end
+
+    local function renderSelectControl(node, style, writer, context)
+        local attrs = node.attrs or {}
+        local formId = resolveControlFormId(context, node)
+        local key = makeControlKey(formId, node)
+        local options = collectSelectOptions(node)
+        local defaultSelectedIndex = 1
+        for index, option in ipairs(options) do
+            if option.selected then
+                defaultSelectedIndex = index
+                break
+            end
+        end
+
+        local control = {
+            key = key,
+            formId = formId,
+            nodeId = node._nodeId or 0,
+            tag = "select",
+            inputType = "select",
+            name = attrs.name or "",
+            id = attrs.id or "",
+            className = attrs.class or "",
+            disabled = hasBooleanAttr(attrs, "disabled"),
+            readonly = false,
+            required = hasBooleanAttr(attrs, "required"),
+            multiple = hasBooleanAttr(attrs, "multiple"),
+            size = parseInteger(attrs.size, nil),
+            options = options,
+            defaultSelectedIndex = defaultSelectedIndex,
+            defaults = {
+                selectedIndex = defaultSelectedIndex,
+                selectedIndices = { defaultSelectedIndex },
+            },
+        }
+        local stateEntry = registerControl(context, formId, control)
+        stateEntry.selectedIndex = clamp(parseInteger(stateEntry.selectedIndex, defaultSelectedIndex), 1, #options)
+        if type(stateEntry.selectedIndices) ~= "table" then
+            stateEntry.selectedIndices = { stateEntry.selectedIndex }
+        end
+
+        local focused = context.focusControlKey == key
+        local controlStyle = cloneControlStyle(style, focused, control.disabled)
+        local selectedOption = options[stateEntry.selectedIndex] or options[1]
+        local label = tostring(selectedOption and selectedOption.label or "")
+        if label == "" then
+            label = tostring(selectedOption and selectedOption.value or "")
+        end
+        local width = clampControlInnerWidth(writer, control.size or math.max(12, #label))
+        if #label > width then
+            label = label:sub(1, width)
+        end
+
+        local isBlock = style.display == "block"
+        local previousIndent = nil
+        if isBlock then
+            previousIndent = writer:beginBlock(style)
+        end
+        writer:writeControlText("< " .. label .. " >", controlStyle, key)
+        if isBlock then
+            writer:endBlock(style, previousIndent)
+        end
+        return true
+    end
+
+    local function renderTextAreaControl(node, style, writer, context)
+        local attrs = node.attrs or {}
+        local formId = resolveControlFormId(context, node)
+        local key = makeControlKey(formId, node)
+        local defaultValue = decodeEntities(nodeTextContent(node) or "")
+        local control = {
+            key = key,
+            formId = formId,
+            nodeId = node._nodeId or 0,
+            tag = "textarea",
+            inputType = "textarea",
+            name = attrs.name or "",
+            id = attrs.id or "",
+            className = attrs.class or "",
+            disabled = hasBooleanAttr(attrs, "disabled"),
+            readonly = hasBooleanAttr(attrs, "readonly"),
+            required = hasBooleanAttr(attrs, "required"),
+            maxLength = parseInteger(attrs.maxlength, nil),
+            rows = parseInteger(attrs.rows, nil),
+            cols = parseInteger(attrs.cols, nil),
+            defaults = {
+                value = defaultValue,
+                cursor = #defaultValue + 1,
+            },
+            defaultValue = defaultValue,
+        }
+        local stateEntry = registerControl(context, formId, control)
+        local value = tostring(stateEntry.value or "")
+        if control.maxLength and control.maxLength >= 0 and #value > control.maxLength then
+            value = value:sub(1, control.maxLength)
+            stateEntry.value = value
+        end
+        stateEntry.cursor = clamp(parseInteger(stateEntry.cursor, (#value + 1)), 1, #value + 1)
+
+        local display = value:gsub("\r", ""):gsub("\n", " ")
+        local focused = context.focusControlKey == key
+        if focused then
+            display = withCursorMarker(display, stateEntry.cursor)
+        end
+
+        local width = clampControlInnerWidth(writer, control.cols or math.max(18, #display))
+        if #display > width then
+            display = display:sub(1, width)
+        end
+
+        local isBlock = style.display == "block"
+        local previousIndent = nil
+        if isBlock then
+            previousIndent = writer:beginBlock(style)
+        end
+        writer:writeControlText("[[" .. display .. "]]", cloneControlStyle(style, focused, control.disabled), key)
+        if isBlock then
+            writer:endBlock(style, previousIndent)
+        end
+        return true
+    end
+
+    local function renderButtonControl(node, style, writer, context)
+        local attrs = node.attrs or {}
+        local formId = resolveControlFormId(context, node)
+        local key = makeControlKey(formId, node)
+        local buttonType = trim((attrs.type or "submit"):lower())
+        if buttonType == "" then
+            buttonType = "submit"
+        end
+        local label = trim(decodeEntities(nodeTextContent(node) or ""))
+        if label == "" then
+            label = "Button"
+        end
+        local value = tostring(attrs.value or label)
+        local control = {
+            key = key,
+            formId = formId,
+            nodeId = node._nodeId or 0,
+            tag = "button",
+            inputType = buttonType,
+            buttonType = buttonType,
+            name = attrs.name or "",
+            id = attrs.id or "",
+            className = attrs.class or "",
+            disabled = hasBooleanAttr(attrs, "disabled"),
+            readonly = false,
+            required = false,
+            value = value,
+            formAction = attrs.formaction or "",
+            formMethod = attrs.formmethod or "",
+            formEnctype = attrs.formenctype or "",
+            defaults = {
+                value = value,
+            },
+            defaultValue = value,
+        }
+        registerControl(context, formId, control)
+
+        local focused = context.focusControlKey == key
+        local isBlock = style.display == "block"
+        local previousIndent = nil
+        if isBlock then
+            previousIndent = writer:beginBlock(style)
+        end
+        writer:writeControlText("[ " .. label .. " ]", cloneControlStyle(style, focused, control.disabled), key)
+        if isBlock then
+            writer:endBlock(style, previousIndent)
+        end
+        return true
+    end
+
     local function renderNode(node, parentStyle, rules, writer, context, baseUrl)
         if node.type == "text" then
             writer:writeText(node.text or "", parentStyle, context.currentHref, parentStyle.whiteSpace == "pre")
@@ -635,6 +1211,26 @@ return function(deps)
             return
         end
 
+        if tag == "input" then
+            renderInputControl(node, style, writer, context)
+            return
+        end
+
+        if tag == "select" then
+            renderSelectControl(node, style, writer, context)
+            return
+        end
+
+        if tag == "textarea" then
+            renderTextAreaControl(node, style, writer, context)
+            return
+        end
+
+        if tag == "button" then
+            renderButtonControl(node, style, writer, context)
+            return
+        end
+
         local isBlock = style.display == "block"
         local previousIndent = nil
         if isBlock then
@@ -650,6 +1246,13 @@ return function(deps)
         if tag == "ul" or tag == "ol" then
             table.insert(context.listStack, { kind = tag, index = 0 })
             pushedList = true
+        end
+
+        local pushedForm = false
+        if tag == "form" then
+            local formId = registerForm(context, node, baseUrl)
+            table.insert(context.formStack, formId)
+            pushedForm = true
         end
 
         local liIndent = nil
@@ -677,6 +1280,9 @@ return function(deps)
 
         if pushedList then
             table.remove(context.listStack)
+        end
+        if pushedForm then
+            table.remove(context.formStack)
         end
 
         context.currentHref = previousHref
@@ -728,6 +1334,13 @@ return function(deps)
 
     local function buildDocument(htmlText, baseUrl)
         local root = parseHTML(htmlText)
+        local nextNodeId = 0
+        walkNode(root, function(node)
+            if node.type == "element" then
+                nextNodeId = nextNodeId + 1
+                node._nodeId = nextNodeId
+            end
+        end)
         local cssBlocks, cssLinks, pageTitle = collectCssAndTitle(root)
 
         local rules = {}
@@ -746,6 +1359,8 @@ p { display: block; margin-top: 1; margin-bottom: 1; }
 ul, ol, li { display: block; }
 h1, h2, h3, h4, h5, h6 { display: block; font-weight: bold; margin-top: 1; margin-bottom: 1; }
 pre { display: block; white-space: pre; margin-top: 1; margin-bottom: 1; padding-left: 1; }
+form { display: block; margin-top: 1; margin-bottom: 1; }
+input, textarea, select, button, option { display: inline; }
 a { color: lightblue; }
 style, script, head, meta, link, title { display: none; }
 ]]
@@ -804,9 +1419,16 @@ style, script, head, meta, link, title { display: none; }
         }
     end
 
-    local function renderDocumentLines(document, width)
+    local function renderDocumentLines(document, width, formState, focusControlKey)
         if not document then
-            return { createEmptyLine() }
+            return { createEmptyLine() }, {
+                formsById = {},
+                formOrder = {},
+                formsByHtmlId = {},
+                controlsByKey = {},
+                controlOrder = {},
+                formState = formState or {},
+            }
         end
 
         local contentWidth = math.max(1, width or 1)
@@ -837,11 +1459,26 @@ style, script, head, meta, link, title { display: none; }
         local context = {
             currentHref = nil,
             listStack = {},
+            formStack = {},
+            formsById = {},
+            formOrder = {},
+            formsByHtmlId = {},
+            controlsByKey = {},
+            controlOrder = {},
+            formState = formState or {},
+            focusControlKey = focusControlKey,
         }
         local renderRoot = bodyNode or findFirstTag(document.root, "html") or document.root
         renderNode(renderRoot, baseStyle, document.rules, writer, context, document.baseUrl)
         trimTrailingBlankLines(writer.lines)
-        return writer.lines
+        return writer.lines, {
+            formsById = context.formsById,
+            formOrder = context.formOrder,
+            formsByHtmlId = context.formsByHtmlId,
+            controlsByKey = context.controlsByKey,
+            controlOrder = context.controlOrder,
+            formState = context.formState,
+        }
     end
 
     return {
