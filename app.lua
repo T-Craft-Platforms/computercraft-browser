@@ -2910,6 +2910,13 @@ local function executeLuaApplet(luaSource, sourceUrl, mode, tab)
     return ok, errMsg
 end
 
+local function buildLuaSourceHtml(url, body, heading, statusLine)
+    return "<html><body><h3>" .. escapeHtml(heading) .. "</h3>"
+        .. "<p><b>URL:</b> <code>" .. escapeHtml(url) .. "</code></p>"
+        .. (statusLine and ("<p><i>" .. escapeHtml(statusLine) .. "</i></p><hr>") or "")
+        .. "<pre>" .. escapeHtml(body) .. "</pre></body></html>"
+end
+
 navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     local target = tab or activeTab()
     local normalized, inferred = normalizeInputUrl(rawInput)
@@ -2983,17 +2990,15 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
             executeLuaApplet(body, resolvedUrl, mode, target)
 
             -- After applet finishes, show the source code in content area
-            local sourceHtml = "<html><body><h3>Lua Applet</h3>"
-                .. "<p><b>URL:</b> <code>" .. escapeHtml(resolvedUrl) .. "</code></p>"
-                .. "<p><i>Applet execution finished (" .. mode .. " mode).</i></p>"
-                .. "<hr><pre>" .. escapeHtml(body) .. "</pre></body></html>"
+            local sourceHtml = buildLuaSourceHtml(
+                resolvedUrl, body, "Lua Applet",
+                "Applet execution finished (" .. mode .. " mode)."
+            )
             target.document = buildDocument(sourceHtml, resolvedUrl)
             target.status = "Lua Applet: " .. resolvedUrl
         else
             -- User chose "No": display the source code as text
-            local sourceHtml = "<html><body><h3>Lua Source</h3>"
-                .. "<p><b>URL:</b> <code>" .. escapeHtml(resolvedUrl) .. "</code></p>"
-                .. "<pre>" .. escapeHtml(body) .. "</pre></body></html>"
+            local sourceHtml = buildLuaSourceHtml(resolvedUrl, body, "Lua Source", nil)
             target.document = buildDocument(sourceHtml, resolvedUrl)
             target.status = resolvedUrl
 

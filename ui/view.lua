@@ -23,12 +23,14 @@ return function(deps)
         -- In fullscreen mode, only the floating menu button is visible
         if state.fullscreen then
             local menuBtnWidth = 3
-            state.ui.closeBrowser = { x1 = w + 1, x2 = w, y = 0 }
-            state.ui.back = { x1 = w + 1, x2 = w, y = 0 }
-            state.ui.forward = { x1 = w + 1, x2 = w, y = 0 }
-            state.ui.reload = { x1 = w + 1, x2 = w, y = 0 }
-            state.ui.newTab = { x1 = w + 1, x2 = w, y = 0 }
-            state.ui.url = { x1 = w + 1, x2 = w, y = 0 }
+            -- Position off-screen elements consistently with x1 > x2 invalid but y = 0
+            local offscreen = { x1 = 0, x2 = 0, y = 0 }
+            state.ui.closeBrowser = offscreen
+            state.ui.back = offscreen
+            state.ui.forward = offscreen
+            state.ui.reload = offscreen
+            state.ui.newTab = offscreen
+            state.ui.url = offscreen
             state.ui.tabs = {}
             state.ui.tabClose = {}
             -- Floating menu button at top-right corner

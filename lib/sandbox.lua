@@ -19,12 +19,14 @@ return function(deps)
         local function resolve(path)
             local cleaned = tostring(path or "")
             cleaned = cleaned:gsub("\\", "/")
-            -- Prevent path traversal
-            cleaned = cleaned:gsub("%.%.", "")
-            if cleaned:sub(1, 1) ~= "/" then
-                cleaned = "/" .. cleaned
+            -- Use fs.combine to normalize the path, then verify it stays within VFS_ROOT
+            local combined = fs.combine(VFS_ROOT, cleaned)
+            -- Ensure the resolved path starts with VFS_ROOT to prevent traversal
+            local normalizedRoot = fs.combine(VFS_ROOT, "")
+            if combined:sub(1, #normalizedRoot) ~= normalizedRoot then
+                return fs.combine(VFS_ROOT, "blocked")
             end
-            return fs.combine(VFS_ROOT, cleaned)
+            return combined
         end
 
         function vfs.open(path, mode)
