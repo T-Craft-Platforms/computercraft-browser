@@ -604,6 +604,7 @@ local renderDocumentWindowLines = content.renderDocumentWindowLines or function(
 end
 
 local TOP_BAR_ROWS = 2
+local state
 
 local function effectiveTopBarRows()
     return state.fullscreen and 0 or TOP_BAR_ROWS
@@ -676,7 +677,7 @@ local function createTab(initialUrl)
     }
 end
 
-local state = {
+state = {
     tabs = { createTab(homePageUrl()) },
     activeTab = 1,
     menuOpen = false,
