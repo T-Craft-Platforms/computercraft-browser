@@ -25,18 +25,30 @@ local createContent = loadModule("lib/content.lua")
 local createUi = loadModule("ui/view.lua")
 local createSandbox = loadModule("lib/sandbox.lua")
 
+local DEFAULT_BROWSER_DATA_DIR = "/cc-browser"
+local DEFAULT_BROWSER_CONFIG_DIR = fs.combine(DEFAULT_BROWSER_DATA_DIR, "config")
+local DEFAULT_BROWSER_DOWNLOADS_DIR = fs.combine(DEFAULT_BROWSER_DATA_DIR, "downloads")
+local LEGACY_BROWSER_STATE_PATH = fs.combine(SCRIPT_DIR, "browser-state.tbl")
+local PATH_SETTINGS_PATH = fs.combine(DEFAULT_BROWSER_CONFIG_DIR, "paths.tbl")
+
 local browserSettings = {
     home_page = "about:home",
     turtle_mode = "false",
     history_enabled = "true",
     persistence_enabled = "true",
     usage_guard_enabled = "true",
+    pause_inactive_applets = "true",
+    browser_data_dir = DEFAULT_BROWSER_DATA_DIR,
+    downloads_dir = DEFAULT_BROWSER_DOWNLOADS_DIR,
+    fullscreen_mode = "normal",
 }
 local browserFavorites = {}
 local browserHistory = {}
 local nextBrowserHistoryId = 1
-local BROWSER_STATE_PATH = fs.combine(SCRIPT_DIR, "browser-state.tbl")
 local persistBrowserState
+local persistPathSettings
+local state
+local flushPausedAppletQueue
 
 local function settingEnabledRaw(name, defaultEnabled)
     local defaultText = defaultEnabled and "true" or "false"
@@ -50,8 +62,79 @@ local function normalizeSettingKey(key)
     normalized = normalized:gsub("_+", "_")
     if normalized == "virtual_views" then
         normalized = "turtle_mode"
+    elseif normalized == "download_path" or normalized == "default_download_path"
+        or normalized == "download_location" or normalized == "default_download_location" then
+        normalized = "downloads_dir"
+    elseif normalized == "config_dir" or normalized == "settings_path" or normalized == "settings_dir" then
+        normalized = "browser_data_dir"
+    elseif normalized == "fullscreen" then
+        normalized = "fullscreen_mode"
     end
     return normalized
+end
+
+local function normalizeDirSettingPath(rawPath, fallback)
+    local candidate = core.trim(tostring(rawPath or ""))
+    if candidate == "" then
+        return fallback
+    end
+    return candidate
+end
+
+local function normalizeFullscreenMode(value)
+    local lowered = core.trim(tostring(value or "")):lower()
+    if lowered == "seamless" or lowered == "seemless" then
+        return "seamless"
+    end
+    return "normal"
+end
+
+local function normalizeBrowserDataDir(rawPath)
+    local value = normalizeDirSettingPath(rawPath, DEFAULT_BROWSER_DATA_DIR)
+    if fs and fs.getName and fs.getDir then
+        local leaf = tostring(fs.getName(value) or ""):lower()
+        if leaf == "config" then
+            local parent = tostring(fs.getDir(value) or "")
+            if parent ~= "" then
+                value = parent
+            end
+        end
+    end
+    return value
+end
+
+local function currentBrowserDataDir()
+    return normalizeBrowserDataDir(browserSettings.browser_data_dir)
+end
+
+local function currentSettingsDir()
+    return fs.combine(currentBrowserDataDir(), "config")
+end
+
+local function currentDownloadsDir()
+    return normalizeDirSettingPath(browserSettings.downloads_dir, DEFAULT_BROWSER_DOWNLOADS_DIR)
+end
+
+local function currentVfsRoot()
+    return fs.combine(currentBrowserDataDir(), "vfs")
+end
+
+local function browserStatePath()
+    return fs.combine(currentSettingsDir(), "browser-state.tbl")
+end
+
+local function ensureDirExists(path)
+    if not path or path == "" then
+        return false
+    end
+    if fs.exists(path) then
+        return fs.isDir(path)
+    end
+    local okMake = pcall(fs.makeDir, path)
+    if not okMake then
+        return false
+    end
+    return fs.exists(path) and fs.isDir(path)
 end
 
 local function listBrowserSettings()
@@ -68,6 +151,70 @@ local function getBrowserSetting(key)
         return nil
     end
     return browserSettings[normalized]
+end
+
+local function loadPathSettings()
+    if not (fs and fs.exists and fs.open) then
+        return false, "Filesystem unavailable"
+    end
+    if not (textutils and type(textutils.unserialize) == "function") then
+        return false, "Serializer unavailable"
+    end
+    if not fs.exists(PATH_SETTINGS_PATH) then
+        return false, "No saved path settings"
+    end
+
+    local handle = fs.open(PATH_SETTINGS_PATH, "r")
+    if not handle then
+        return false, "Could not open path settings"
+    end
+    local payload = handle.readAll() or ""
+    handle.close()
+    if payload == "" then
+        return false, "Path settings are empty"
+    end
+
+    local okParse, decoded = pcall(textutils.unserialize, payload)
+    if not okParse or type(decoded) ~= "table" then
+        return false, "Path settings are invalid"
+    end
+
+    local storedDataDir = decoded.browser_data_dir
+    if storedDataDir == nil then
+        storedDataDir = decoded.settings_dir
+    end
+    browserSettings.browser_data_dir = normalizeBrowserDataDir(storedDataDir)
+    browserSettings.downloads_dir = normalizeDirSettingPath(decoded.downloads_dir, DEFAULT_BROWSER_DOWNLOADS_DIR)
+    return true, nil
+end
+
+persistPathSettings = function()
+    if not (fs and fs.open) then
+        return false, "Filesystem unavailable"
+    end
+    if not (textutils and type(textutils.serialize) == "function") then
+        return false, "Serializer unavailable"
+    end
+    if not ensureDirExists(DEFAULT_BROWSER_CONFIG_DIR) then
+        return false, "Could not prepare config directory"
+    end
+
+    local snapshot = {
+        browser_data_dir = currentBrowserDataDir(),
+        downloads_dir = currentDownloadsDir(),
+    }
+    local encoded = textutils.serialize(snapshot)
+    if not encoded then
+        return false, "Failed to encode path settings"
+    end
+
+    local handle = fs.open(PATH_SETTINGS_PATH, "w")
+    if not handle then
+        return false, "Could not open path settings for writing"
+    end
+    handle.write(encoded)
+    handle.close()
+    return true, nil
 end
 
 local function setBrowserSetting(key, value)
@@ -154,6 +301,91 @@ local function setBrowserSetting(key, value)
             return true, nil
         end
         return false, "Invalid usage_guard_enabled value (expected true/false)"
+    end
+    if normalized == "pause_inactive_applets" then
+        local lowered = core.trim(tostring(value)):lower()
+        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
+            browserSettings[normalized] = "true"
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
+            browserSettings[normalized] = "false"
+            if state and type(state.tabs) == "table" and flushPausedAppletQueue then
+                for i = 1, #state.tabs do
+                    flushPausedAppletQueue(state.tabs[i], 256)
+                end
+            end
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+        return false, "Invalid pause_inactive_applets value (expected true/false)"
+    end
+    if normalized == "browser_data_dir" then
+        local oldDataDir = currentBrowserDataDir()
+        local path = normalizeBrowserDataDir(value)
+        if path == "" then
+            return false, "Invalid browser_data_dir value (path cannot be empty)"
+        end
+        browserSettings[normalized] = path
+        local oldVfsRoot = fs.combine(oldDataDir, "vfs")
+        local newVfsRoot = fs.combine(path, "vfs")
+        if oldVfsRoot ~= newVfsRoot and fs.exists(oldVfsRoot) and not fs.exists(newVfsRoot) then
+            local newVfsParent = fs.getDir(newVfsRoot)
+            if newVfsParent and newVfsParent ~= "" then
+                pcall(fs.makeDir, newVfsParent)
+            end
+            pcall(fs.move, oldVfsRoot, newVfsRoot)
+        end
+        if fs.exists("/.vfs") then
+            local newVfsParent = fs.getDir(newVfsRoot)
+            if newVfsParent and newVfsParent ~= "" then
+                pcall(fs.makeDir, newVfsParent)
+            end
+            if not fs.exists(newVfsRoot) then
+                pcall(fs.makeDir, newVfsRoot)
+            end
+            local importPath = fs.combine(newVfsRoot, "_legacy_root")
+            if not fs.exists(importPath) then
+                pcall(fs.move, "/.vfs", importPath)
+            end
+        end
+        if persistPathSettings then
+            persistPathSettings()
+        end
+        if persistBrowserState then
+            persistBrowserState(true)
+        end
+        return true, nil
+    end
+    if normalized == "downloads_dir" then
+        local path = core.trim(tostring(value or ""))
+        if path == "" then
+            return false, "Invalid downloads_dir value (path cannot be empty)"
+        end
+        browserSettings[normalized] = path
+        if persistPathSettings then
+            persistPathSettings()
+        end
+        if persistBrowserState then
+            persistBrowserState()
+        end
+        return true, nil
+    end
+    if normalized == "fullscreen_mode" then
+        local lowered = core.trim(tostring(value or "")):lower()
+        if lowered ~= "normal" and lowered ~= "seamless" and lowered ~= "seemless" then
+            return false, "Invalid fullscreen_mode value (expected normal/seamless)"
+        end
+        browserSettings[normalized] = normalizeFullscreenMode(lowered)
+        if persistBrowserState then
+            persistBrowserState()
+        end
+        return true, nil
     end
     browserSettings[normalized] = tostring(value)
     if persistBrowserState then
@@ -407,11 +639,15 @@ local function loadBrowserState()
     if not (textutils and type(textutils.unserialize) == "function") then
         return false, "Serializer unavailable"
     end
-    if not fs.exists(BROWSER_STATE_PATH) then
+    local statePath = browserStatePath()
+    if not fs.exists(statePath) and fs.exists(LEGACY_BROWSER_STATE_PATH) then
+        statePath = LEGACY_BROWSER_STATE_PATH
+    end
+    if not fs.exists(statePath) then
         return false, "No saved state"
     end
 
-    local handle = fs.open(BROWSER_STATE_PATH, "r")
+    local handle = fs.open(statePath, "r")
     if not handle then
         return false, "Could not open saved state"
     end
@@ -430,10 +666,21 @@ local function loadBrowserState()
         for key, rawValue in pairs(decoded.settings) do
             local normalized = normalizeSettingKey(key)
             if normalized ~= "" then
-                browserSettings[normalized] = tostring(rawValue)
+                if normalized == "fullscreen_mode" then
+                    browserSettings[normalized] = normalizeFullscreenMode(rawValue)
+                elseif normalized == "browser_data_dir" then
+                    browserSettings[normalized] = normalizeBrowserDataDir(rawValue)
+                elseif normalized == "downloads_dir" then
+                    browserSettings[normalized] = normalizeDirSettingPath(rawValue, DEFAULT_BROWSER_DOWNLOADS_DIR)
+                else
+                    browserSettings[normalized] = tostring(rawValue)
+                end
             end
         end
     end
+    browserSettings.browser_data_dir = currentBrowserDataDir()
+    browserSettings.downloads_dir = currentDownloadsDir()
+    browserSettings.fullscreen_mode = normalizeFullscreenMode(browserSettings.fullscreen_mode)
 
     browserFavorites = {}
     if type(decoded.favorites) == "table" then
@@ -494,6 +741,9 @@ local function loadBrowserState()
     if settingEnabledRaw("turtle_mode", false) then
         browserSettings.usage_guard_enabled = "false"
     end
+    if persistPathSettings then
+        persistPathSettings()
+    end
     return true, nil
 end
 
@@ -507,6 +757,13 @@ persistBrowserState = function(forceWrite)
     if not (textutils and type(textutils.serialize) == "function") then
         return false, "Serializer unavailable"
     end
+    if persistPathSettings then
+        persistPathSettings()
+    end
+    local settingsDir = currentSettingsDir()
+    if not ensureDirExists(settingsDir) then
+        return false, "Could not prepare settings directory"
+    end
 
     local snapshot = {
         version = 1,
@@ -519,7 +776,7 @@ persistBrowserState = function(forceWrite)
         return false, "Failed to encode state"
     end
 
-    local handle = fs.open(BROWSER_STATE_PATH, "w")
+    local handle = fs.open(browserStatePath(), "w")
     if not handle then
         return false, "Could not open state file for writing"
     end
@@ -528,7 +785,22 @@ persistBrowserState = function(forceWrite)
     return true, nil
 end
 
+loadPathSettings()
 loadBrowserState()
+if fs.exists("/.vfs") then
+    local targetVfsRoot = currentVfsRoot()
+    local vfsParent = fs.getDir(targetVfsRoot)
+    if vfsParent and vfsParent ~= "" then
+        pcall(fs.makeDir, vfsParent)
+    end
+    if not fs.exists(targetVfsRoot) then
+        pcall(fs.makeDir, targetVfsRoot)
+    end
+    local importPath = fs.combine(targetVfsRoot, "_legacy_root")
+    if not fs.exists(importPath) then
+        pcall(fs.move, "/.vfs", importPath)
+    end
+end
 
 local network = createNetwork(core, {
     aboutPagesDir = fs.combine(SCRIPT_DIR, "about-pages"),
@@ -554,7 +826,7 @@ local content = createContent({
 })
 local sandbox = createSandbox({
     core = core,
-    scriptDir = SCRIPT_DIR,
+    getVfsRoot = currentVfsRoot,
 })
 
 local clamp = core.clamp
@@ -583,6 +855,19 @@ local function usageGuardEnabled()
     return settingEnabledRaw("usage_guard_enabled", true)
 end
 
+local function pauseInactiveAppletsEnabled()
+    return settingEnabledRaw("pause_inactive_applets", true)
+end
+
+local function seamlessFullscreenSettingEnabled()
+    return normalizeFullscreenMode(browserSettings.fullscreen_mode) == "seamless"
+end
+
+function seamlessAppletFullscreenActive()
+    return state.fullscreen
+        and state.seamlessAppletFullscreen
+end
+
 local fetchTextResource = network.fetchTextResource
 local makeErrorPage = network.makeErrorPage
 local looksLikeHtml = network.looksLikeHtml
@@ -604,12 +889,13 @@ local renderDocumentWindowLines = content.renderDocumentWindowLines or function(
 end
 
 local TOP_BAR_ROWS = 2
-local state
 
 local function effectiveTopBarRows()
     return state.fullscreen and 0 or TOP_BAR_ROWS
 end
 local ANIMATION_TICK_SECONDS = 0.15
+local PAUSED_APPLET_EVENT_MAX = 256
+local PAUSED_APPLET_FLUSH_PER_FRAME = 48
 local HIGH_USAGE_FRAME_THRESHOLD_MS = 750
 local HIGH_USAGE_FRAME_THRESHOLD_LOADING_MS = 10000
 local HIGH_USAGE_STRIKE_LIMIT = 1
@@ -617,6 +903,9 @@ local HIGH_USAGE_COOLDOWN_SECONDS = 2.0
 local ABOUT_UPDATE_INTERVAL_HEADER = "X-CC-About-Update-Ms"
 local SETTINGS_STATUS_HEADER = "X-CC-Settings-Status"
 local scheduleAnimationTick
+local stopAppletForTab
+local activeAppletRunning
+local dispatchEventToActiveApplet
 
 local function parseAboutUpdateIntervalMs(headers)
     local raw = getHeader(headers, ABOUT_UPDATE_INTERVAL_HEADER)
@@ -674,6 +963,8 @@ local function createTab(initialUrl)
         status = "",
         aboutUpdateIntervalMs = nil,
         settingsStickyStatus = nil,
+        pendingApplet = nil,
+        applet = nil,
     }
 end
 
@@ -682,6 +973,7 @@ state = {
     activeTab = 1,
     menuOpen = false,
     fullscreen = false,
+    seamlessAppletFullscreen = false,
     expandedTabIndex = nil,
     tabDrag = nil,
     scrollbarDrag = nil,
@@ -737,6 +1029,26 @@ local function activeTab()
     end
     state.activeTab = clamp(state.activeTab, 1, #state.tabs)
     return state.tabs[state.activeTab]
+end
+
+function syncAppletWindowVisibility()
+    local tabCount = #state.tabs
+    if tabCount < 1 then
+        return
+    end
+
+    local activeIndex = clamp(state.activeTab, 1, tabCount)
+    local showActive = not state.menuOpen and not state.modal.open
+
+    for index = 1, tabCount do
+        local tab = state.tabs[index]
+        local applet = tab and tab.applet or nil
+        local windowHandle = applet and applet.window or nil
+        if windowHandle and windowHandle.setVisible then
+            local shouldShow = showActive and index == activeIndex and applet.running == true
+            pcall(windowHandle.setVisible, shouldShow and true or false)
+        end
+    end
 end
 
 local function clearUrlSelection(tab)
@@ -1002,6 +1314,10 @@ local function activateTab(index)
     if state.expandedTabIndex and state.expandedTabIndex ~= state.activeTab then
         collapseExpandedTab()
     end
+    syncAppletWindowVisibility()
+    if flushPausedAppletQueue then
+        flushPausedAppletQueue(activeTab(), PAUSED_APPLET_EVENT_MAX)
+    end
 end
 
 local function moveTab(fromIndex, toIndex)
@@ -1050,6 +1366,9 @@ local function closeTab(index)
     local targetIndex = clamp(index or state.activeTab, 1, #state.tabs)
     if #state.tabs <= 1 then
         local tab = activeTab()
+        if stopAppletForTab then
+            stopAppletForTab(tab, true)
+        end
         tab.currentUrl = "about:blank"
         tab.urlInput = "about:blank"
         tab.urlCursor = #tab.urlInput + 1
@@ -1075,6 +1394,9 @@ local function closeTab(index)
         tab.loading = false
         tab.status = ""
         tab.aboutUpdateIntervalMs = nil
+        tab.settingsStickyStatus = nil
+        tab.pendingApplet = nil
+        tab.applet = nil
         state.tabDrag = nil
         state.scrollbarDrag = nil
         state.menuOpen = false
@@ -1082,6 +1404,10 @@ local function closeTab(index)
         return
     end
 
+    local removedTab = state.tabs[targetIndex]
+    if removedTab and stopAppletForTab then
+        stopAppletForTab(removedTab, true)
+    end
     table.remove(state.tabs, targetIndex)
     if targetIndex < state.activeTab then
         state.activeTab = state.activeTab - 1
@@ -1120,12 +1446,42 @@ local function cycleTabs(direction)
     activateTab(index)
 end
 
+function runningAppletTitle(tab)
+    local applet = tab and tab.applet or nil
+    if not applet or not applet.running then
+        return nil
+    end
+
+    local sourceUrl = trim(tostring(applet.sourceUrl or tab.currentUrl or tab.urlInput or ""))
+    if sourceUrl == "" then
+        return "Lua Applet"
+    end
+
+    local stripped = sourceUrl:gsub("[?#].*$", "")
+    local parsed = core.parseUrl and core.parseUrl(stripped) or nil
+    local path = parsed and parsed.path or stripped
+    local name = trim(tostring((path and path:match("([^/\\]+)$")) or ""))
+
+    if name == "" then
+        name = trim(stripped)
+    end
+    if name == "" then
+        return "Lua Applet"
+    end
+    return name
+end
+
 local function tabTitle(tab)
     local currentUrl = trim(tab.currentUrl or "")
     local inputUrl = trim(tab.urlInput or "")
 
     if tab.loading then
         return "Loading..."
+    end
+
+    local appletTitle = runningAppletTitle(tab)
+    if appletTitle and appletTitle ~= "" then
+        return appletTitle
     end
 
     local title = trim(tab.document and tab.document.title or "")
@@ -1412,6 +1768,56 @@ local function modalButtons(spec)
     return buttons
 end
 
+function ensureModalInput(spec)
+    if type(spec) ~= "table" then
+        return nil
+    end
+    if type(spec.input) ~= "table" then
+        return nil
+    end
+    spec.input.value = tostring(spec.input.value or "")
+    if spec.input.maxLen ~= nil then
+        spec.input.maxLen = math.max(1, math.floor(tonumber(spec.input.maxLen) or 256))
+    end
+    return spec.input
+end
+
+function appendModalInput(spec, text)
+    local input = ensureModalInput(spec)
+    if not input then
+        return false
+    end
+    local chunk = tostring(text or "")
+    if chunk == "" then
+        return false
+    end
+    local value = tostring(input.value or "")
+    if input.maxLen then
+        local remaining = input.maxLen - #value
+        if remaining <= 0 then
+            return false
+        end
+        if #chunk > remaining then
+            chunk = chunk:sub(1, remaining)
+        end
+    end
+    input.value = value .. chunk
+    return true
+end
+
+function deleteModalInputBack(spec)
+    local input = ensureModalInput(spec)
+    if not input then
+        return false
+    end
+    local value = tostring(input.value or "")
+    if #value <= 0 then
+        return false
+    end
+    input.value = value:sub(1, #value - 1)
+    return true
+end
+
 local function drawModal()
     local modal = state.modal
     if not modal.open then
@@ -1438,9 +1844,11 @@ local function drawModal()
     end
 
     local buttons = modalButtons(spec)
+    local input = ensureModalInput(spec)
+    local hasInput = input ~= nil
     local hasTitle = trim(tostring(spec.title or "")) ~= ""
     local bodyCount = math.max(1, #bodyLines)
-    local panelHeight = math.max(7, bodyCount + (hasTitle and 4 or 3))
+    local panelHeight = math.max(7, bodyCount + (hasTitle and 4 or 3) + (hasInput and 2 or 0))
     panelHeight = math.min(h, panelHeight)
 
     local panelWidth = math.min(w, math.max(20, math.min(spec.maxWidth or 58, w - 2)))
@@ -1488,13 +1896,37 @@ local function drawModal()
     end
 
     local buttonY = math.max(contentY, y2 - 1)
-    local maxBodyY = buttonY - 1
+    local inputY = nil
+    if hasInput then
+        inputY = buttonY - 1
+    end
+    local maxBodyY = buttonY - (hasInput and 2 or 1)
     for _, line in ipairs(bodyLines) do
         if contentY > maxBodyY then
             break
         end
         writeLine(contentY, line, background, foreground)
         contentY = contentY + 1
+    end
+
+    if hasInput and inputY and inputY >= y1 and inputY <= y2 then
+        local inputValue = tostring(input.value or "")
+        local placeholder = tostring(input.placeholder or "")
+        local shown = inputValue
+        if shown == "" then
+            shown = placeholder
+        end
+        local maxChars = math.max(0, panelWidth - 4)
+        if #shown > maxChars then
+            shown = shown:sub(#shown - maxChars + 1)
+        end
+        local inputBg = colors.white
+        local inputFg = (inputValue == "" and placeholder ~= "") and colors.gray or colors.black
+        writeLine(inputY, string.rep(" ", math.max(0, panelWidth - 2)), inputBg, inputFg)
+        term.setCursorPos(x1 + 1, inputY)
+        term.setBackgroundColor(inputBg)
+        term.setTextColor(inputFg)
+        term.write(shown)
     end
 
     local labels = {}
@@ -1552,16 +1984,40 @@ local function drawModal()
         cursorX = cursorX + #label + buttonGap
     end
 
-    term.setCursorBlink(false)
+    term.setCursorBlink(hasInput)
     modal.layout = {
         panel = { x1 = x1, x2 = x2, y1 = y1, y2 = y2 },
         buttons = layoutButtons,
+        input = hasInput and inputY and {
+            x1 = x1 + 1,
+            x2 = x2 - 1,
+            y = inputY,
+        } or nil,
     }
     return true
 end
 
+local function drawActiveAppletOverlay()
+    local tab = activeTab()
+    local applet = tab and tab.applet or nil
+    if not applet or not applet.running or not applet.window then
+        return
+    end
+    syncAppletWindowVisibility()
+    if state.menuOpen or state.modal.open then
+        return
+    end
+    if applet.window.setVisible then
+        pcall(applet.window.setVisible, true)
+    end
+    if applet.window.redraw then
+        pcall(applet.window.redraw)
+    end
+end
+
 draw = function()
     drawBase()
+    drawActiveAppletOverlay()
     drawModal()
 end
 
@@ -1704,6 +2160,11 @@ local function handleModalEvent(event)
 
     if name == "key" then
         local key = event[2]
+        if (key == keys.backspace or key == keys.delete) and ensureModalInput(spec) then
+            deleteModalInputBack(spec)
+            draw()
+            return true
+        end
         local action = nil
         if type(spec.keyActions) == "table" then
             action = spec.keyActions[key]
@@ -1742,6 +2203,22 @@ local function handleModalEvent(event)
                 end
             end
         end
+        if layout and layout.input and y == layout.input.y and x >= layout.input.x1 and x <= layout.input.x2 then
+            draw()
+            return true
+        end
+        draw()
+        return true
+    end
+
+    if name == "char" and ensureModalInput(spec) then
+        appendModalInput(spec, event[2] or "")
+        draw()
+        return true
+    end
+
+    if name == "paste" and ensureModalInput(spec) then
+        appendModalInput(spec, event[2] or "")
         draw()
         return true
     end
@@ -1865,36 +2342,224 @@ local function printablePageLines(tab)
     return output
 end
 
-local function printCurrentPage(tab)
-    local target = tab or activeTab()
-    local lines = printablePageLines(target)
-    local outputDir = fs.combine(SCRIPT_DIR, "prints")
-    if not fs.exists(outputDir) then
-        fs.makeDir(outputDir)
+function listPrinterNames()
+    local names = {}
+    if not peripheral or type(peripheral.getNames) ~= "function" or type(peripheral.getType) ~= "function" then
+        return names
     end
-
-    local stamp = nil
-    if os and type(os.date) == "function" then
-        local okDate, dateText = pcall(os.date, "%Y%m%d-%H%M%S")
-        if okDate and dateText and dateText ~= "" then
-            stamp = tostring(dateText)
+    for _, name in ipairs(peripheral.getNames() or {}) do
+        local typeName = tostring(peripheral.getType(name) or ""):lower()
+        if typeName == "printer" then
+            names[#names + 1] = tostring(name)
         end
     end
-    if not stamp then
-        stamp = tostring(math.floor(((os and type(os.clock) == "function") and os.clock() or 0) * 1000))
+    table.sort(names)
+    return names
+end
+
+function wrapPrintLine(line, width)
+    local source = tostring(line or "")
+    local chunks = {}
+    local chunkWidth = math.max(1, tonumber(width) or 1)
+    if source == "" then
+        chunks[1] = ""
+        return chunks
+    end
+    local startIndex = 1
+    while startIndex <= #source do
+        chunks[#chunks + 1] = source:sub(startIndex, startIndex + chunkWidth - 1)
+        startIndex = startIndex + chunkWidth
+    end
+    return chunks
+end
+
+function printLinesToPeripheral(printerDevice, lines, pageTitle)
+    if type(printerDevice) ~= "table" then
+        return false, "Printer peripheral unavailable"
+    end
+    if type(printerDevice.newPage) ~= "function"
+        or type(printerDevice.endPage) ~= "function"
+        or type(printerDevice.setCursorPos) ~= "function"
+        or type(printerDevice.write) ~= "function" then
+        return false, "Selected peripheral does not support printer API"
     end
 
-    local baseName = "page-" .. stamp
-    local candidate = fs.combine(outputDir, baseName .. ".txt")
-    local nextSuffix = 1
-    while fs.exists(candidate) do
-        candidate = fs.combine(outputDir, ("%s-%d.txt"):format(baseName, nextSuffix))
-        nextSuffix = nextSuffix + 1
+    local pageWidth = 25
+    local pageHeight = 21
+    if type(printerDevice.getPageSize) == "function" then
+        local okSize, width, height = pcall(printerDevice.getPageSize)
+        if okSize and tonumber(width) and tonumber(height) then
+            pageWidth = math.max(1, math.floor(tonumber(width)))
+            pageHeight = math.max(1, math.floor(tonumber(height)))
+        end
     end
 
-    local handle = fs.open(candidate, "w")
-    if not handle then
-        target.status = "Print failed: could not open output file"
+    local pagesPrinted = 0
+
+    local function beginPage()
+        local okNewPage, opened = pcall(printerDevice.newPage)
+        if not okNewPage or opened == false then
+            return false, "Printer is out of paper/ink or busy", pagesPrinted
+        end
+        pagesPrinted = pagesPrinted + 1
+        if type(printerDevice.setPageTitle) == "function" and tostring(pageTitle or "") ~= "" then
+            pcall(printerDevice.setPageTitle, tostring(pageTitle))
+        end
+        return true, nil, pagesPrinted
+    end
+
+    local okBegin, beginErr = beginPage()
+    if not okBegin then
+        return false, beginErr, pagesPrinted
+    end
+
+    local row = 1
+    for _, line in ipairs(lines or {}) do
+        local wrapped = wrapPrintLine(line, pageWidth)
+        for _, chunk in ipairs(wrapped) do
+            if row > pageHeight then
+                local okEndPage, ended = pcall(printerDevice.endPage)
+                if not okEndPage or ended == false then
+                    return false, "Could not finish printer page", pagesPrinted
+                end
+                local okNext, nextErr = beginPage()
+                if not okNext then
+                    return false, nextErr, pagesPrinted
+                end
+                row = 1
+            end
+
+            local okCursor = pcall(printerDevice.setCursorPos, 1, row)
+            if not okCursor then
+                return false, "Printer cursor positioning failed", pagesPrinted
+            end
+            local okWrite, writeErr = pcall(printerDevice.write, tostring(chunk or ""))
+            if not okWrite then
+                return false, "Printer write failed: " .. tostring(writeErr), pagesPrinted
+            end
+            row = row + 1
+        end
+    end
+
+    local okEndPage, ended = pcall(printerDevice.endPage)
+    if not okEndPage or ended == false then
+        return false, "Could not finalize printer job", pagesPrinted
+    end
+
+    return true, nil, pagesPrinted
+end
+
+function promptPrinterSelection(printerNames)
+    if #printerNames == 0 then
+        return nil
+    end
+    if #printerNames == 1 then
+        return printerNames[1]
+    end
+
+    local choice = nil
+    local buttons = {}
+    local keyActions = {}
+    local maxShown = math.min(#printerNames, 9)
+    local digitKeyNames = {
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+    }
+    for index = 1, maxShown do
+        local id = "select_" .. tostring(index)
+        local short = "[" .. tostring(index) .. "]"
+        local label = short .. " " .. tostring(printerNames[index])
+        buttons[#buttons + 1] = {
+            id = id,
+            label = label,
+            shortLabel = short,
+            background = colors.gray,
+            foreground = colors.white,
+        }
+        local keyName = digitKeyNames[index]
+        local keyConstant = keyName and keys and keys[keyName] or nil
+        if keyConstant then
+            keyActions[keyConstant] = id
+        end
+    end
+    buttons[#buttons + 1] = {
+        id = "cancel",
+        label = "[Cancel]",
+        shortLabel = "[X]",
+        background = colors.red,
+        foreground = colors.white,
+    }
+    if keys and keys.escape then
+        keyActions[keys.escape] = "cancel"
+    end
+
+    local infoLines = {
+        "Multiple printers detected.",
+        "Choose where to print this page:",
+    }
+    for index = 1, maxShown do
+        infoLines[#infoLines + 1] = ("%d) %s"):format(index, tostring(printerNames[index]))
+    end
+    if #printerNames > maxShown then
+        infoLines[#infoLines + 1] = ("Showing first %d printers only."):format(maxShown)
+    end
+
+    openModal({
+        id = "printer_select",
+        title = "Select Printer",
+        titleBackground = colors.blue,
+        titleForeground = colors.white,
+        lines = infoLines,
+        buttons = buttons,
+        keyActions = keyActions,
+        autoClose = false,
+        onButton = function(buttonId)
+            choice = buttonId
+            clearModal()
+            return false
+        end,
+    })
+    draw()
+
+    while choice == nil and state.modal.open do
+        local event = { os.pullEvent() }
+        handleModalEvent(event)
+        if state.running then
+            draw()
+        end
+    end
+
+    local selectedIndex = tonumber(tostring(choice or ""):match("^select_(%d+)$"))
+    if selectedIndex and printerNames[selectedIndex] then
+        return printerNames[selectedIndex]
+    end
+    return nil
+end
+
+local function printCurrentPage(tab)
+    local target = tab or activeTab()
+    local printers = listPrinterNames()
+    if #printers == 0 then
+        target.status = "Print failed: no printer peripheral found"
+        return false
+    end
+
+    local selectedPrinter = promptPrinterSelection(printers)
+    if not selectedPrinter then
+        target.status = "Print canceled"
+        return false
+    end
+
+    local printerDevice = peripheral.wrap(selectedPrinter)
+    if not printerDevice then
+        target.status = "Print failed: could not access printer '" .. tostring(selectedPrinter) .. "'"
         return false
     end
 
@@ -1902,21 +2567,245 @@ local function printCurrentPage(tab)
     if pageTitle == "" then
         pageTitle = trim(target.currentUrl or "")
     end
-    handle.writeLine("Title: " .. pageTitle)
-    handle.writeLine("URL: " .. trim(target.currentUrl or ""))
+    local lines = printablePageLines(target)
+    local payload = {
+        "Title: " .. pageTitle,
+        "URL: " .. trim(target.currentUrl or ""),
+    }
     if os and type(os.date) == "function" then
         local okDate, dateText = pcall(os.date, "%Y-%m-%d %H:%M:%S")
         if okDate and dateText then
-            handle.writeLine("Printed: " .. tostring(dateText))
+            payload[#payload + 1] = "Printed: " .. tostring(dateText)
         end
     end
-    handle.writeLine("")
+    payload[#payload + 1] = ""
     for _, line in ipairs(lines) do
-        handle.writeLine(line)
+        payload[#payload + 1] = line
     end
+
+    local okPrint, printErr, printedPages = printLinesToPeripheral(printerDevice, payload, pageTitle)
+    if not okPrint then
+        local prefix = "Print failed: "
+        if tonumber(printedPages) and printedPages > 0 then
+            prefix = ("Print failed after %d pages: "):format(math.floor(printedPages))
+        end
+        target.status = prefix .. tostring(printErr or "unknown error")
+        return false
+    end
+
+    local pageCount = math.max(1, math.floor(tonumber(printedPages) or 0))
+    target.status = ("Printed %d pages on %s"):format(pageCount, tostring(selectedPrinter))
+    return true
+end
+
+function suggestedDownloadPath(url, body, headers)
+    local sourceUrl = trim(tostring(url or ""))
+    local name = sourceUrl:gsub("[?#].*$", ""):match("([^/\\]+)$") or ""
+    local contentType = trim(tostring(getHeader(headers, "Content-Type") or "")):lower()
+    if name == "" then
+        if contentType:find("html", 1, true) or looksLikeHtml(body or "", contentType) then
+            name = "index.html"
+        elseif contentType:find("lua", 1, true) then
+            name = "download.lua"
+        else
+            name = "download.txt"
+        end
+    elseif not name:match("%.[%w]+$") then
+        if contentType:find("html", 1, true) or looksLikeHtml(body or "", contentType) then
+            name = name .. ".html"
+        elseif contentType:find("lua", 1, true) then
+            name = name .. ".lua"
+        else
+            name = name .. ".txt"
+        end
+    end
+    return fs.combine(currentDownloadsDir(), name)
+end
+
+function promptSaveFilePath(defaultPath)
+    local choice = nil
+    local keyActions = {}
+    if keys.enter then
+        keyActions[keys.enter] = "save"
+    end
+    if keys.escape then
+        keyActions[keys.escape] = "cancel"
+    end
+
+    openModal({
+        id = "save_file_dialog",
+        title = "Save File",
+        titleBackground = colors.blue,
+        titleForeground = colors.white,
+        lines = {
+            "Choose save path:",
+            "Use absolute path or relative path.",
+        },
+        input = {
+            value = tostring(defaultPath or fs.combine(currentDownloadsDir(), "download.txt")),
+            placeholder = fs.combine(currentDownloadsDir(), "file.txt"),
+            maxLen = 255,
+        },
+        buttons = {
+            {
+                id = "save",
+                label = "[Save]",
+                shortLabel = "[OK]",
+                background = colors.lime,
+                foreground = colors.black,
+            },
+            {
+                id = "cancel",
+                label = "[Cancel]",
+                shortLabel = "[X]",
+                background = colors.red,
+                foreground = colors.white,
+            },
+        },
+        keyActions = keyActions,
+        autoClose = false,
+        onButton = function(buttonId, source, spec)
+            if buttonId == "save" then
+                local path = trim(tostring(spec and spec.input and spec.input.value or ""))
+                if path == "" then
+                    if spec and type(spec.lines) == "table" then
+                        spec.lines[1] = "Path cannot be empty."
+                    end
+                    draw()
+                    return false
+                end
+                choice = path
+                clearModal()
+                return false
+            end
+            choice = false
+            clearModal()
+            return false
+        end,
+    })
+    draw()
+
+    while choice == nil and state.modal.open do
+        local event = { os.pullEvent() }
+        handleModalEvent(event)
+        if state.running then
+            draw()
+        end
+    end
+
+    if type(choice) == "string" and choice ~= "" then
+        return choice
+    end
+    return nil
+end
+
+function promptOverwriteFile(path)
+    if not fs.exists(path) or fs.isDir(path) then
+        return true
+    end
+
+    local choice = nil
+    local keyActions = {}
+    if keys.enter then
+        keyActions[keys.enter] = "overwrite"
+    end
+    if keys.escape then
+        keyActions[keys.escape] = "cancel"
+    end
+
+    openModal({
+        id = "overwrite_file_dialog",
+        title = "Overwrite File?",
+        titleBackground = colors.red,
+        titleForeground = colors.white,
+        lines = {
+            "File already exists:",
+            tostring(path),
+        },
+        buttons = {
+            {
+                id = "overwrite",
+                label = "[Overwrite]",
+                shortLabel = "[Yes]",
+                background = colors.red,
+                foreground = colors.white,
+            },
+            {
+                id = "cancel",
+                label = "[Cancel]",
+                shortLabel = "[No]",
+                background = colors.gray,
+                foreground = colors.white,
+            },
+        },
+        keyActions = keyActions,
+        autoClose = false,
+        onButton = function(buttonId)
+            choice = (buttonId == "overwrite")
+            clearModal()
+            return false
+        end,
+    })
+    draw()
+
+    while choice == nil and state.modal.open do
+        local event = { os.pullEvent() }
+        handleModalEvent(event)
+        if state.running then
+            draw()
+        end
+    end
+
+    return choice == true
+end
+
+function downloadCurrentPage(tab)
+    local target = tab or activeTab()
+    local currentUrl = trim(tostring(target.currentUrl or target.urlInput or ""))
+    if currentUrl == "" then
+        target.status = "Download failed: no active URL"
+        return false
+    end
+
+    local body, finalUrl, headers, err = fetchTextResource(currentUrl, false)
+    if not body then
+        target.status = "Download failed: " .. tostring(err or "unknown error")
+        return false
+    end
+
+    local savePath = promptSaveFilePath(suggestedDownloadPath(finalUrl or currentUrl, body, headers))
+    if not savePath then
+        target.status = "Download canceled"
+        return false
+    end
+
+    if fs.exists(savePath) and fs.isDir(savePath) then
+        target.status = "Download failed: path is a directory"
+        return false
+    end
+    if not promptOverwriteFile(savePath) then
+        target.status = "Download canceled"
+        return false
+    end
+
+    local dir = fs.getDir(savePath)
+    if dir and dir ~= "" and not fs.exists(dir) then
+        local okMake, makeErr = pcall(fs.makeDir, dir)
+        if not okMake then
+            target.status = "Download failed: could not create directory (" .. tostring(makeErr or dir) .. ")"
+            return false
+        end
+    end
+
+    local handle = fs.open(savePath, "w")
+    if not handle then
+        target.status = "Download failed: cannot write file"
+        return false
+    end
+    handle.write(body)
     handle.close()
 
-    target.status = "Printed to " .. candidate
+    target.status = ("Downloaded %d bytes to %s"):format(#tostring(body or ""), tostring(savePath))
     return true
 end
 
@@ -1933,10 +2822,25 @@ local function toggleCurrentPageFavorite()
     return addBrowserFavorite(currentUrl, title)
 end
 
-local function toggleFullscreen()
-    state.fullscreen = not state.fullscreen
+local function toggleFullscreen(forceExitSeamless)
+    if state.fullscreen then
+        if state.seamlessAppletFullscreen and not forceExitSeamless then
+            activeTab().status = "Seamless fullscreen active (press Ctrl+K to exit)"
+            return false
+        end
+        state.fullscreen = false
+        state.seamlessAppletFullscreen = false
+        state.menuOpen = false
+        rerenderAllTabs()
+        return true
+    end
+
+    state.menuOpen = false
+    state.seamlessAppletFullscreen = seamlessFullscreenSettingEnabled()
+    state.fullscreen = true
     state.menuOpen = false
     rerenderAllTabs()
+    return true
 end
 
 local function hitMenuPanel(x, y)
@@ -1978,6 +2882,11 @@ local function handleMenuClick(x, y)
     if hitRegion(x, y, menu.history) then
         state.menuOpen = false
         openOrFocusHistoryTab()
+        return true
+    end
+    if hitRegion(x, y, menu.download) then
+        state.menuOpen = false
+        downloadCurrentPage()
         return true
     end
     if hitRegion(x, y, menu.print) then
@@ -2781,136 +3690,6 @@ local function isLuaUrl(url)
     return stripped:match("%.lua$") ~= nil
 end
 
-local function promptLuaExecution(url, luaSource, tab)
-    local target = tab or activeTab()
-    local choice = nil
-
-    local keyActions = {}
-    if keys.s then
-        keyActions[keys.s] = "sandboxed"
-    end
-    if keys.y then
-        keyActions[keys.y] = "full"
-    end
-    if keys.n then
-        keyActions[keys.n] = "no"
-    end
-    if keys.escape then
-        keyActions[keys.escape] = "no"
-    end
-
-    openModal({
-        id = "lua_applet_prompt",
-        title = "Executable Content",
-        titleBackground = colors.orange,
-        titleForeground = colors.white,
-        lines = {
-            "This URL contains a Lua applet.",
-            "Run it?",
-            "",
-            "(S)andboxed / (Y)es / (N)o",
-        },
-        buttons = {
-            {
-                id = "sandboxed",
-                label = "[Sandboxed]",
-                shortLabel = "[S]",
-                background = colors.cyan,
-                foreground = colors.white,
-            },
-            {
-                id = "full",
-                label = "[Yes]",
-                shortLabel = "[Y]",
-                background = colors.lime,
-                foreground = colors.black,
-            },
-            {
-                id = "no",
-                label = "[No]",
-                shortLabel = "[N]",
-                background = colors.red,
-                foreground = colors.white,
-            },
-        },
-        keyActions = keyActions,
-        autoClose = false,
-        onButton = function(buttonId)
-            choice = buttonId
-            clearModal()
-            return false
-        end,
-    })
-    draw()
-
-    -- Wait for user choice
-    while choice == nil and state.modal.open do
-        local event = { os.pullEvent() }
-        handleModalEvent(event)
-        if state.running then
-            draw()
-        end
-    end
-
-    if not choice or choice == "no" then
-        return "no"
-    end
-    return choice
-end
-
-local function executeLuaApplet(luaSource, sourceUrl, mode, tab)
-    local target = tab or activeTab()
-    local w, h = term.getSize()
-    local topRows = effectiveTopBarRows()
-    local contentHeight = math.max(1, h - topRows)
-
-    -- Create a content-area window for the applet
-    local contentWindow
-    if window and window.create then
-        contentWindow = window.create(term.current(), 1, topRows + 1, w, contentHeight, true)
-    else
-        contentWindow = term.current()
-    end
-
-    contentWindow.setBackgroundColor(colors.black)
-    contentWindow.setTextColor(colors.white)
-    contentWindow.clear()
-    contentWindow.setCursorPos(1, 1)
-
-    local ok, errMsg = sandbox.executeApplet(luaSource, sourceUrl, mode, contentWindow)
-
-    if not ok then
-        contentWindow.setBackgroundColor(colors.black)
-        contentWindow.setTextColor(colors.red)
-        local cx, cy = contentWindow.getCursorPos()
-        contentWindow.setCursorPos(1, cy + 1)
-        contentWindow.write("Error: " .. tostring(errMsg or "Unknown error"))
-    end
-
-    -- After applet finishes, show a status line
-    local cx, cy = contentWindow.getCursorPos()
-    local cw, ch = contentWindow.getSize()
-    if cy < ch then
-        contentWindow.setCursorPos(1, cy + 1)
-    end
-    contentWindow.setTextColor(colors.yellow)
-    contentWindow.write("[Applet finished - press any key]")
-
-    -- Wait for a key press before returning to browser
-    while true do
-        local event = { os.pullEvent() }
-        if event[1] == "key" or event[1] == "mouse_click" then
-            break
-        end
-        if event[1] == "term_resize" then
-            -- Redraw in case of resize
-            break
-        end
-    end
-
-    return ok, errMsg
-end
-
 local function buildLuaSourceHtml(url, body, heading, statusLine)
     return "<html><body><h3>" .. escapeHtml(heading) .. "</h3>"
         .. "<p><b>URL:</b> <code>" .. escapeHtml(url) .. "</code></p>"
@@ -2918,10 +3697,526 @@ local function buildLuaSourceHtml(url, body, heading, statusLine)
         .. "<pre>" .. escapeHtml(body) .. "</pre></body></html>"
 end
 
+local APPLET_ACTION_PREFIX = "ccbrowser:applet"
+
+function makeAppletActionUrl(action, params)
+    local parts = { "action=" .. urlEncode(tostring(action or "")) }
+    for key, value in pairs(params or {}) do
+        parts[#parts + 1] = urlEncode(tostring(key or "")) .. "=" .. urlEncode(tostring(value or ""))
+    end
+    return APPLET_ACTION_PREFIX .. "?" .. table.concat(parts, "&")
+end
+
+function decodeQueryComponent(value)
+    local text = tostring(value or "")
+    text = text:gsub("+", " ")
+    return core.decodeUrlPath(text)
+end
+
+function parseAppletActionUrl(url)
+    local raw = tostring(url or "")
+    if not startsWith(raw:lower(), APPLET_ACTION_PREFIX) then
+        return nil, {}
+    end
+    local query = raw:match("%?(.*)$") or ""
+    local params = {}
+    for token in query:gmatch("([^&]+)") do
+        local key, value = token:match("^([^=]+)=(.*)$")
+        if not key then
+            key = token
+            value = ""
+        end
+        key = decodeQueryComponent(key):lower()
+        value = decodeQueryComponent(value)
+        if key ~= "" then
+            params[key] = value
+        end
+    end
+    local action = trim(tostring(params.action or "")):lower()
+    return action, params
+end
+
+function buildLuaAppletPromptHtml(url)
+    local sandboxedUrl = makeAppletActionUrl("run", { mode = "sandboxed" })
+    local fullUrl = makeAppletActionUrl("run", { mode = "full" })
+    local noUrl = makeAppletActionUrl("no", {})
+    return "<html><body>"
+        .. "<p>This file is a Lua executable.</p>"
+        .. "<p><a href=\"" .. escapeHtml(sandboxedUrl) .. "\">[Run Sandboxed]</a></p>"
+        .. "<p><a href=\"" .. escapeHtml(fullUrl) .. "\">[Run Full Access]</a></p>"
+        .. "<p><a href=\"" .. escapeHtml(noUrl) .. "\">[Do Not Execute]</a></p>"
+        .. "</body></html>"
+end
+
+function buildLuaAppletDeclinedHtml(url)
+    local viewUrl = makeAppletActionUrl("view_source", {})
+    return "<html><body>"
+        .. "<p>This file is an executable.</p>"
+        .. "<p>Do you want to see its contents?</p>"
+        .. "<p><a href=\"" .. escapeHtml(viewUrl) .. "\">[View Contents]</a></p>"
+        .. "</body></html>"
+end
+
+function normalizeAppletMode(mode)
+    local lowered = trim(tostring(mode or "")):lower()
+    if lowered == "full" or lowered == "yes" then
+        return "full"
+    end
+    return "sandboxed"
+end
+
+function packEvent(...)
+    return {
+        n = select("#", ...),
+        ...,
+    }
+end
+
+function cloneEvent(event)
+    local count = tonumber(event and event.n) or #(event or {})
+    local copied = { n = count }
+    for i = 1, count do
+        copied[i] = event[i]
+    end
+    return copied
+end
+
+function ensureAppletWindowForTab(tab, clearContent)
+    local target = tab or activeTab()
+    local applet = target and target.applet or nil
+    if not applet then
+        return nil
+    end
+
+    local w, h = term.getSize()
+    local topRows = effectiveTopBarRows()
+    local contentHeight = math.max(1, h - topRows)
+    local created = false
+
+    if not applet.window then
+        if window and window.create then
+            applet.window = window.create(term.current(), 1, topRows + 1, w, contentHeight, true)
+        else
+            applet.window = term.current()
+        end
+        created = true
+    elseif applet.window.reposition then
+        pcall(applet.window.reposition, 1, topRows + 1, w, contentHeight)
+    end
+
+    applet.topRows = topRows
+    applet.width = w
+    applet.height = contentHeight
+
+    if applet.window then
+        if applet.window.setVisible then
+            local shouldShow = (target == activeTab()) and not state.menuOpen and not state.modal.open
+            pcall(applet.window.setVisible, shouldShow and true or false)
+        end
+        if (created or clearContent) and applet.window.setBackgroundColor and applet.window.clear then
+            pcall(applet.window.setBackgroundColor, colors.black)
+            pcall(applet.window.setTextColor, colors.white)
+            pcall(applet.window.clear)
+            pcall(applet.window.setCursorPos, 1, 1)
+        end
+    end
+
+    return applet.window
+end
+
+stopAppletForTab = function(tab, silent)
+    local target = tab or activeTab()
+    if not target or not target.applet then
+        return false
+    end
+    local applet = target.applet
+    if applet.session and not applet.session.done and type(applet.session.terminate) == "function" then
+        pcall(applet.session.terminate)
+    end
+    if applet.window and applet.window.setVisible then
+        pcall(applet.window.setVisible, false)
+    end
+    target.applet = nil
+    if not silent then
+        target.status = "Applet stopped"
+    end
+    return true
+end
+
+activeAppletRunning = function()
+    local tab = activeTab()
+    local applet = tab and tab.applet or nil
+    return not not (applet and applet.running and applet.session and not applet.session.done)
+end
+
+function finalizeAppletForTab(tab)
+    local target = tab or activeTab()
+    local applet = target and target.applet or nil
+    if not applet or not applet.session or not applet.session.done then
+        return false
+    end
+
+    local sourceUrl = tostring(applet.sourceUrl or target.currentUrl or "")
+    local sourceCode = tostring(applet.sourceCode or "")
+    local mode = tostring(applet.mode or "sandboxed")
+    local runOk = not (applet.session.ok == false)
+    local runErr = tostring(applet.session.error or "")
+
+    if applet.window and applet.window.setVisible then
+        pcall(applet.window.setVisible, false)
+    end
+    target.applet = nil
+    target.pendingApplet = nil
+
+    local statusLine = "Applet execution finished (" .. mode .. " mode)."
+    if not runOk then
+        statusLine = "Applet execution failed: " .. runErr
+    end
+
+    target.document = buildDocument(buildLuaSourceHtml(sourceUrl, sourceCode, "Lua Applet", statusLine), sourceUrl)
+    target.currentUrl = sourceUrl
+    target.urlInput = sourceUrl
+    target.urlCursor = #target.urlInput + 1
+    target.urlOffset = 0
+    target.urlFocus = false
+    clearUrlSelection(target)
+    clearPageSelection(target)
+    target.formState = {}
+    target.formMeta = nil
+    target.focusedFormControl = nil
+    target.renderRevision = 0
+    target.lastRenderSignature = nil
+    target.aboutUpdateIntervalMs = nil
+    target.settingsStickyStatus = nil
+    target.scroll = 0
+    target.status = runOk and ("Lua Applet: " .. sourceUrl) or ("Lua Applet error: " .. runErr)
+    renderDocument(target)
+    return true
+end
+
+function startLuaAppletSession(luaSource, sourceUrl, mode, tab)
+    local target = tab or activeTab()
+    stopAppletForTab(target, true)
+
+    target.applet = {
+        running = true,
+        mode = mode,
+        sourceUrl = sourceUrl,
+        sourceCode = luaSource,
+        session = nil,
+        window = nil,
+        pausedEvents = {},
+        topRows = effectiveTopBarRows(),
+    }
+
+    local contentWindow = ensureAppletWindowForTab(target, true)
+    if not contentWindow then
+        target.applet = nil
+        return false, "Could not initialize applet window"
+    end
+
+    local session, sessionErr = sandbox.createAppletSession(luaSource, sourceUrl, mode, contentWindow)
+    if not session then
+        target.applet = nil
+        return false, tostring(sessionErr or "Unknown applet startup error")
+    end
+
+    target.applet.session = session
+    if session.done then
+        finalizeAppletForTab(target)
+        return true, nil
+    end
+    target.status = "Lua applet running (" .. mode .. "): " .. sourceUrl
+    return true, nil
+end
+
+function commitPendingAppletHistory(tab, label)
+    local target = tab or activeTab()
+    local pending = target and target.pendingApplet or nil
+    if not pending then
+        return
+    end
+
+    if not pending.tabHistoryCommitted then
+        if pending.addToHistory then
+            pushHistory(target, pending.sourceUrl)
+        elseif target.historyIndex > 0 then
+            target.history[target.historyIndex] = pending.sourceUrl
+        else
+            pushHistory(target, pending.sourceUrl)
+        end
+        pending.tabHistoryCommitted = true
+    end
+
+    if pending.trackHistory and not pending.browserHistoryCommitted then
+        addBrowserHistory(pending.sourceUrl, label or ("Lua Applet: " .. pending.sourceUrl))
+        pending.browserHistoryCommitted = true
+    end
+
+    if pending.tabHistoryCommitted and ((not pending.trackHistory) or pending.browserHistoryCommitted) then
+        pending.historyCommitted = true
+    end
+end
+
+function handleAppletActionNavigation(url, tab)
+    local target = tab or activeTab()
+    local action, params = parseAppletActionUrl(url)
+    local pending = target.pendingApplet
+    if not pending then
+        local message = "No pending applet action in this tab."
+        target.loading = false
+        target.document = buildDocument(makeErrorPage(url, message), url)
+        target.currentUrl = url
+        target.urlInput = url
+        target.urlCursor = #target.urlInput + 1
+        target.urlOffset = 0
+        target.status = message
+        target.renderRevision = 0
+        target.lastRenderSignature = nil
+        target.scroll = 0
+        renderDocument(target)
+        draw()
+        return false
+    end
+
+    local sourceUrl = pending.sourceUrl
+    local sourceCode = pending.sourceCode
+    local selectedAction = action ~= "" and action or "no"
+
+    if selectedAction == "run" then
+        local mode = normalizeAppletMode(params.mode)
+        commitPendingAppletHistory(target, "Lua Applet: " .. sourceUrl)
+        target.pendingApplet = nil
+
+        local started, startErr = startLuaAppletSession(sourceCode, sourceUrl, mode, target)
+        if started then
+            target.document = buildDocument("<html><body></body></html>", sourceUrl)
+            target.status = "Lua applet running (" .. mode .. "): " .. sourceUrl
+        else
+            target.document = buildDocument(
+                buildLuaSourceHtml(sourceUrl, sourceCode, "Lua Applet", "Execution failed: " .. tostring(startErr)),
+                sourceUrl
+            )
+            target.status = "Lua applet failed: " .. tostring(startErr)
+        end
+    elseif selectedAction == "view_source" then
+        commitPendingAppletHistory(target, "Lua Source: " .. sourceUrl)
+        target.pendingApplet = nil
+        target.document = buildDocument(buildLuaSourceHtml(sourceUrl, sourceCode, "Lua Source", nil), sourceUrl)
+        target.status = sourceUrl
+    else
+        commitPendingAppletHistory(target, "Lua Source: " .. sourceUrl)
+        target.document = buildDocument(buildLuaAppletDeclinedHtml(sourceUrl), sourceUrl)
+        target.status = "Executable blocked: " .. sourceUrl
+    end
+
+    target.loading = false
+    target.currentUrl = sourceUrl
+    target.urlInput = sourceUrl
+    target.urlCursor = #target.urlInput + 1
+    target.urlOffset = 0
+    target.urlFocus = false
+    clearUrlSelection(target)
+    clearPageSelection(target)
+    target.formState = {}
+    target.formMeta = nil
+    target.focusedFormControl = nil
+    target.renderRevision = 0
+    target.lastRenderSignature = nil
+    target.aboutUpdateIntervalMs = nil
+    target.settingsStickyStatus = nil
+    target.scroll = 0
+    renderDocument(target)
+    draw()
+    if scheduleAboutUpdateTimer then
+        scheduleAboutUpdateTimer()
+    end
+    return true
+end
+
+function mapEventForApplet(target, event)
+    local eventName = event[1]
+    if eventName == "term_resize" then
+        ensureAppletWindowForTab(target, false)
+        return cloneEvent(event)
+    end
+
+    if eventName == "mouse_click" or eventName == "mouse_drag" or eventName == "mouse_up" or eventName == "mouse_scroll" then
+        local x = tonumber(event[3]) or 1
+        local y = tonumber(event[4]) or 1
+        local topRows = effectiveTopBarRows()
+        local _, h = term.getSize()
+        local contentHeight = math.max(1, h - topRows)
+        if y <= topRows then
+            return nil
+        end
+        local mappedY = y - topRows
+        if mappedY < 1 or mappedY > contentHeight then
+            return nil
+        end
+        return packEvent(eventName, event[2], x, mappedY)
+    end
+
+    return cloneEvent(event)
+end
+
+function appletHandlesBackgroundEvent(name)
+    if name == "mouse_click"
+        or name == "mouse_drag"
+        or name == "mouse_up"
+        or name == "mouse_scroll"
+        or name == "key"
+        or name == "key_up"
+        or name == "char"
+        or name == "paste" then
+        return false
+    end
+    return true
+end
+
+function appletRunningInTab(tab)
+    local applet = tab and tab.applet or nil
+    return not not (applet and applet.running and applet.session and not applet.session.done)
+end
+
+local function isBrowserManagedTimerId(timerId)
+    if state.animationTimer and timerId == state.animationTimer then
+        return true
+    end
+    local aboutUpdate = state.aboutUpdate
+    if aboutUpdate and aboutUpdate.timer and timerId == aboutUpdate.timer then
+        return true
+    end
+    return false
+end
+
+function deliverEventToAppletTab(tab, event)
+    if not appletRunningInTab(tab) then
+        return false
+    end
+
+    local applet = tab.applet
+    local mapped = mapEventForApplet(tab, event)
+    if not mapped then
+        return false
+    end
+
+    applet.session.deliverEvent(mapped)
+    if applet.session.done then
+        finalizeAppletForTab(tab)
+    end
+    return true
+end
+
+function enqueuePausedAppletEvent(tab, event)
+    if not appletRunningInTab(tab) then
+        return false
+    end
+
+    local eventName = event and event[1] or nil
+    if eventName == "timer" and isBrowserManagedTimerId(event[2]) then
+        return false
+    end
+
+    local applet = tab.applet
+    local queue = applet.pausedEvents
+    if type(queue) ~= "table" then
+        queue = {}
+        applet.pausedEvents = queue
+    end
+
+    if #queue >= PAUSED_APPLET_EVENT_MAX then
+        return true
+    end
+
+    queue[#queue + 1] = cloneEvent(event)
+    return true
+end
+
+flushPausedAppletQueue = function(tab, maxEvents)
+    local target = tab or activeTab()
+    if not appletRunningInTab(target) then
+        return 0
+    end
+
+    local applet = target.applet
+    local queue = applet.pausedEvents
+    if type(queue) ~= "table" or #queue == 0 then
+        return 0
+    end
+
+    local remaining = tonumber(maxEvents) or #queue
+    remaining = math.max(0, math.floor(remaining))
+    local processed = 0
+
+    while remaining > 0 do
+        if not appletRunningInTab(target) then
+            break
+        end
+
+        local currentQueue = target.applet and target.applet.pausedEvents or nil
+        if type(currentQueue) ~= "table" or #currentQueue == 0 then
+            break
+        end
+
+        local queuedEvent = table.remove(currentQueue, 1)
+        if not queuedEvent then
+            break
+        end
+
+        deliverEventToAppletTab(target, queuedEvent)
+        processed = processed + 1
+        remaining = remaining - 1
+    end
+
+    return processed
+end
+
+dispatchEventToActiveApplet = function(event)
+    return deliverEventToAppletTab(activeTab(), event)
+end
+
+function dispatchEventToBackgroundApplets(event)
+    local name = event and event[1] or nil
+    if not appletHandlesBackgroundEvent(name) then
+        return false
+    end
+
+    local delivered = false
+    local activeIndex = state.activeTab
+    local pauseInactive = pauseInactiveAppletsEnabled()
+    for index = 1, #state.tabs do
+        if index ~= activeIndex then
+            local tab = state.tabs[index]
+            if appletRunningInTab(tab) then
+                if pauseInactive then
+                    if enqueuePausedAppletEvent(tab, event) then
+                        delivered = true
+                    end
+                else
+                    flushPausedAppletQueue(tab, PAUSED_APPLET_EVENT_MAX)
+                    if deliverEventToAppletTab(tab, event) then
+                        delivered = true
+                    end
+                end
+            end
+        end
+    end
+    return delivered
+end
+
 navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     local target = tab or activeTab()
     local normalized, inferred = normalizeInputUrl(rawInput)
+    local normalizedLower = trim(tostring(normalized or "")):lower()
     state.highUsage.loadingFrame = true
+
+    if startsWith(normalizedLower, APPLET_ACTION_PREFIX) then
+        target.loading = false
+        return handleAppletActionNavigation(normalized, target)
+    end
+
+    stopAppletForTab(target, true)
 
     target.loading = true
     target.status = "Loading " .. normalized
@@ -2956,6 +4251,7 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
             target.lastRenderSignature = nil
             target.aboutUpdateIntervalMs = nil
             target.settingsStickyStatus = nil
+            target.pendingApplet = nil
             if addToHistory then
                 pushHistory(target, errUrl)
             end
@@ -2969,47 +4265,29 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
         end
 
         local resolvedUrl = finalUrl or normalized
+        target.pendingApplet = {
+            sourceUrl = resolvedUrl,
+            sourceCode = body,
+            addToHistory = addToHistory == true,
+            trackHistory = shouldTrackNavigationInHistory(normalized),
+            tabHistoryCommitted = false,
+            browserHistoryCommitted = false,
+            historyCommitted = false,
+        }
+        if addToHistory then
+            pushHistory(target, resolvedUrl)
+        elseif target.historyIndex > 0 then
+            target.history[target.historyIndex] = resolvedUrl
+        else
+            pushHistory(target, resolvedUrl)
+        end
+        target.pendingApplet.tabHistoryCommitted = true
+        target.document = buildDocument(buildLuaAppletPromptHtml(resolvedUrl), resolvedUrl)
         target.currentUrl = resolvedUrl
         target.urlInput = resolvedUrl
         target.urlCursor = #target.urlInput + 1
         target.urlOffset = 0
-
-        -- Prompt the user
-        local userChoice = promptLuaExecution(resolvedUrl, body, target)
-
-        if userChoice == "sandboxed" or userChoice == "full" then
-            -- Execute the Lua applet
-            local mode = (userChoice == "sandboxed") and "sandboxed" or "full"
-
-            if addToHistory then
-                pushHistory(target, resolvedUrl)
-            end
-            if shouldTrackNavigationInHistory(normalized) then
-                addBrowserHistory(resolvedUrl, "Lua Applet: " .. resolvedUrl)
-            end
-
-            executeLuaApplet(body, resolvedUrl, mode, target)
-
-            -- After applet finishes, show the source code in content area
-            local sourceHtml = buildLuaSourceHtml(
-                resolvedUrl, body, "Lua Applet",
-                "Applet execution finished (" .. mode .. " mode)."
-            )
-            target.document = buildDocument(sourceHtml, resolvedUrl)
-            target.status = "Lua Applet: " .. resolvedUrl
-        else
-            -- User chose "No": display the source code as text
-            local sourceHtml = buildLuaSourceHtml(resolvedUrl, body, "Lua Source", nil)
-            target.document = buildDocument(sourceHtml, resolvedUrl)
-            target.status = resolvedUrl
-
-            if addToHistory then
-                pushHistory(target, resolvedUrl)
-            end
-            if shouldTrackNavigationInHistory(normalized) then
-                addBrowserHistory(resolvedUrl, "Lua Source: " .. resolvedUrl)
-            end
-        end
+        target.status = "Executable detected: " .. resolvedUrl
 
         target.urlFocus = false
         clearUrlSelection(target)
@@ -3069,6 +4347,7 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     target.lastRenderSignature = nil
     target.aboutUpdateIntervalMs = result and result.aboutUpdateIntervalMs or nil
     target.settingsStickyStatus = result and result.settingsStickyStatus or nil
+    target.pendingApplet = nil
 
     if addToHistory then
         pushHistory(target, finalUrl)
@@ -3090,7 +4369,7 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     return true
 end
 
-local function goBack()
+function goBack()
     local tab = activeTab()
     if not canGoBack(tab) then
         return
@@ -3099,7 +4378,7 @@ local function goBack()
     navigate(tab.history[tab.historyIndex], false, false, tab)
 end
 
-local function goForward()
+function goForward()
     local tab = activeTab()
     if not canGoForward(tab) then
         return
@@ -3108,7 +4387,7 @@ local function goForward()
     navigate(tab.history[tab.historyIndex], false, false, tab)
 end
 
-local function reloadPage()
+function reloadPage()
     local tab = activeTab()
     if tab.loading then
         return
@@ -3119,7 +4398,7 @@ local function reloadPage()
     navigate(tab.currentUrl, false, false, tab)
 end
 
-local function insertUrlText(text)
+function insertUrlText(text)
     local tab = activeTab()
     if not tab.urlFocus then
         return
@@ -3132,7 +4411,7 @@ local function insertUrlText(text)
     clearUrlSelection(tab)
 end
 
-local function deleteUrlBack()
+function deleteUrlBack()
     local tab = activeTab()
     if deleteUrlSelection(tab) then
         return
@@ -3146,7 +4425,7 @@ local function deleteUrlBack()
     tab.urlCursor = tab.urlCursor - 1
 end
 
-local function deleteUrlForward()
+function deleteUrlForward()
     local tab = activeTab()
     if deleteUrlSelection(tab) then
         return
@@ -3159,7 +4438,7 @@ local function deleteUrlForward()
     tab.urlInput = before .. after
 end
 
-local function handleTabClick(button, x)
+function handleTabClick(button, x)
     if hitRegion(x, 1, state.ui.closeBrowser) then
         state.running = false
         return
@@ -3238,7 +4517,7 @@ local function handleTabClick(button, x)
     end
 end
 
-local function handleToolbarClick(x)
+function handleToolbarClick(x)
     local tab = activeTab()
     if hitRegion(x, 2, state.ui.menuButton) then
         state.menuOpen = not state.menuOpen
@@ -3282,7 +4561,89 @@ local function handleToolbarClick(x)
     tab.focusedFormControl = nil
 end
 
-local function handleMouseClick(button, x, y)
+function handleFullscreenMenuButtonClick(x, y)
+    if not state.fullscreen then
+        return false
+    end
+    if seamlessAppletFullscreenActive and seamlessAppletFullscreenActive() then
+        return false
+    end
+    if not hitRegion(x, y, state.ui.menuButton) then
+        return false
+    end
+
+    state.menuOpen = not state.menuOpen
+    if state.menuOpen then
+        local tab = activeTab()
+        tab.urlFocus = false
+        clearUrlSelection(tab)
+        tab.focusedFormControl = nil
+    end
+    state.tabDrag = nil
+    state.scrollbarDrag = nil
+    return true
+end
+
+function handleScrollbarClick(button, x, y, tab, topRows)
+    local scrollbar = verticalScrollbarMetrics(tab)
+    if not scrollbar or x ~= scrollbar.x then
+        return false
+    end
+    if button ~= 1 then
+        return true
+    end
+    if scrollbar.maxScroll <= 0 then
+        return true
+    end
+
+    local clickRow = clamp(y - topRows, 1, scrollbar.viewportHeight)
+    local thumbBottom = scrollbar.thumbTop + scrollbar.thumbHeight - 1
+    if clickRow >= scrollbar.thumbTop and clickRow <= thumbBottom then
+        state.scrollbarDrag = {
+            button = button,
+            tab = tab,
+            grabOffset = clickRow - scrollbar.thumbTop,
+        }
+    elseif clickRow < scrollbar.thumbTop then
+        setScroll(tab.scroll - scrollbar.viewportHeight, tab)
+    else
+        setScroll(tab.scroll + scrollbar.viewportHeight, tab)
+    end
+    return true
+end
+
+function handlePageContentClick(button, x, y, tab, topRows)
+    local viewportWidth = pageContentWidth(tab)
+    local lineIndex = clamp(tab.scroll + (y - topRows), 1, pageLineCount(tab))
+    local column = clamp(x, 1, viewportWidth)
+
+    if state.caretMode then
+        if button == 1 then
+            setPageSelection(tab, lineIndex, column, lineIndex, column)
+        end
+        return true
+    end
+
+    clearPageSelection(tab)
+    local line = tab.pageLines[lineIndex]
+    local controlKey = line and line.controls and line.controls[column] or nil
+    if controlKey then
+        state.menuOpen = false
+        activateFormControl(tab, controlKey)
+        return true
+    end
+
+    tab.focusedFormControl = nil
+    local href = line and line.links and line.links[column] or nil
+    if href then
+        state.menuOpen = false
+        navigate(href, true, false, tab)
+        return true
+    end
+    return false
+end
+
+function handleMouseClick(button, x, y)
     layoutUi()
     local topRows = effectiveTopBarRows()
 
@@ -3296,20 +4657,8 @@ local function handleMouseClick(button, x, y)
         end
     end
 
-    -- Floating menu button in fullscreen mode (top-right corner)
-    if state.fullscreen then
-        if hitRegion(x, y, state.ui.menuButton) then
-            state.menuOpen = not state.menuOpen
-            if state.menuOpen then
-                local tab = activeTab()
-                tab.urlFocus = false
-                clearUrlSelection(tab)
-                tab.focusedFormControl = nil
-            end
-            state.tabDrag = nil
-            state.scrollbarDrag = nil
-            return
-        end
+    if handleFullscreenMenuButtonClick(x, y) then
+        return
     end
 
     if not state.fullscreen then
@@ -3328,58 +4677,14 @@ local function handleMouseClick(button, x, y)
     tab.urlFocus = false
     clearUrlSelection(tab)
 
-    local scrollbar = verticalScrollbarMetrics(tab)
-    if scrollbar and x == scrollbar.x then
-        if button ~= 1 then
-            return
-        end
-        if scrollbar.maxScroll <= 0 then
-            return
-        end
-
-        local clickRow = clamp(y - topRows, 1, scrollbar.viewportHeight)
-        local thumbBottom = scrollbar.thumbTop + scrollbar.thumbHeight - 1
-        if clickRow >= scrollbar.thumbTop and clickRow <= thumbBottom then
-            state.scrollbarDrag = {
-                button = button,
-                tab = tab,
-                grabOffset = clickRow - scrollbar.thumbTop,
-            }
-        elseif clickRow < scrollbar.thumbTop then
-            setScroll(tab.scroll - scrollbar.viewportHeight, tab)
-        elseif clickRow > thumbBottom then
-            setScroll(tab.scroll + scrollbar.viewportHeight, tab)
-        end
+    if handleScrollbarClick(button, x, y, tab, topRows) then
         return
     end
 
-    local viewportWidth = pageContentWidth(tab)
-    local lineIndex = clamp(tab.scroll + (y - topRows), 1, pageLineCount(tab))
-    local column = clamp(x, 1, viewportWidth)
-    if state.caretMode then
-        if button == 1 then
-            setPageSelection(tab, lineIndex, column, lineIndex, column)
-        end
-        return
-    end
-
-    clearPageSelection(tab)
-    local line = tab.pageLines[lineIndex]
-    local controlKey = line and line.controls and line.controls[column] or nil
-    if controlKey then
-        state.menuOpen = false
-        activateFormControl(tab, controlKey)
-        return
-    end
-    tab.focusedFormControl = nil
-    local href = line and line.links and line.links[column] or nil
-    if href then
-        state.menuOpen = false
-        navigate(href, true, false, tab)
-    end
+    handlePageContentClick(button, x, y, tab, topRows)
 end
 
-local function handleMouseDrag(button, x, y)
+function handleMouseDrag(button, x, y)
     if state.scrollbarDrag and state.scrollbarDrag.button == button then
         local drag = state.scrollbarDrag
         local tab = drag.tab or activeTab()
@@ -3452,7 +4757,7 @@ local function handleMouseDrag(button, x, y)
     tab.pageSelection.endCol = column
 end
 
-local function handleMouseUp(button, _, _)
+function handleMouseUp(button, _, _)
     if state.tabDrag and state.tabDrag.button == button then
         state.tabDrag = nil
     end
@@ -3461,7 +4766,7 @@ local function handleMouseUp(button, _, _)
     end
 end
 
-local function handleMouseScroll(direction, _, y)
+function handleMouseScroll(direction, _, y)
     if y <= effectiveTopBarRows() then
         return
     end
@@ -3469,14 +4774,14 @@ local function handleMouseScroll(direction, _, y)
     setScroll(tab.scroll + direction, tab)
 end
 
-local function focusUrlBar()
+function focusUrlBar()
     local tab = activeTab()
     tab.urlFocus = true
     tab.urlCursor = #tab.urlInput + 1
     clearUrlSelection(tab)
 end
 
-local function handleUrlKey(key)
+function handleUrlKey(key)
     local tab = activeTab()
     if key == keys.enter then
         navigate(tab.urlInput, true, true, tab)
@@ -3514,7 +4819,7 @@ local function handleUrlKey(key)
     end
 end
 
-local function handleNavigationKey(key)
+function handleNavigationKey(key)
     local tab = activeTab()
     if state.caretMode then
         local w = pageContentWidth(tab)
@@ -3601,7 +4906,7 @@ local function handleNavigationKey(key)
     end
 end
 
-local function selectAllText()
+function selectAllText()
     local tab = activeTab()
     if tab.urlFocus then
         tab.urlSelStart = 1
@@ -3628,7 +4933,7 @@ local function selectAllText()
     return false
 end
 
-local function copySelectedText()
+function copySelectedText()
     local tab = activeTab()
     local text = ""
     if tab.urlFocus then
@@ -3662,6 +4967,10 @@ local function copySelectedText()
         text = getSelectedPageText(tab)
     end
 
+    if text == "" then
+        text = trim(tostring(tab.currentUrl or tab.urlInput or ""))
+    end
+
     if text ~= "" then
         state.clipboard = text
         state.localClipboardPendingPaste = true
@@ -3670,7 +4979,7 @@ local function copySelectedText()
     return false
 end
 
-local function cutSelectedText()
+function cutSelectedText()
     local tab = activeTab()
     if tab.urlFocus then
         local text = getSelectedUrlText(tab)
@@ -3712,7 +5021,7 @@ local function cutSelectedText()
     return false
 end
 
-local function pasteClipboardText()
+function pasteClipboardText()
     local tab = activeTab()
     if state.clipboard == nil or state.clipboard == "" then
         return false
@@ -3736,10 +5045,17 @@ local function pasteClipboardText()
         end
     end
 
-    return false
+    tab.urlFocus = true
+    tab.focusedFormControl = nil
+    tab.urlCursor = #tab.urlInput + 1
+    clearUrlSelection(tab)
+    insertUrlText(state.clipboard)
+    state.localClipboardPendingPaste = false
+    state.skipNextPaste = true
+    return true
 end
 
-local function handleKeyDown(key)
+function handleKeyDown(key, appletContext)
     if key ~= keys.v then
         state.skipNextPaste = false
     end
@@ -3827,7 +5143,7 @@ local function handleKeyDown(key)
             return
         end
         if key == keys.k then
-            toggleFullscreen()
+            toggleFullscreen(true)
             return
         end
         if key == keys.left then
@@ -3838,6 +5154,19 @@ local function handleKeyDown(key)
             goForward()
             return
         end
+    end
+
+    if appletContext then
+        if key == keys.escape then
+            if state.fullscreen then
+                if not state.seamlessAppletFullscreen then
+                    toggleFullscreen()
+                end
+            else
+                state.running = false
+            end
+        end
+        return
     end
 
     local tab = activeTab()
@@ -3877,7 +5206,7 @@ local function handleKeyDown(key)
     handleNavigationKey(key)
 end
 
-local function handleKeyUp(key)
+function handleKeyUp(key)
     if key == keys.leftCtrl or key == keys.rightCtrl then
         state.ctrlDown = false
     elseif key == keys.leftShift or key == keys.rightShift then
@@ -3934,7 +5263,7 @@ scheduleAnimationTick = function()
     state.animationTimer = os.startTimer(ANIMATION_TICK_SECONDS)
 end
 
-local function handleTimer(timerId)
+function handleTimer(timerId)
     if state.animationTimer and timerId == state.animationTimer then
         state.animationTimer = nil
         scheduleAnimationTick()
@@ -3958,7 +5287,7 @@ local function handleTimer(timerId)
     end
 end
 
-local function handleChar(character)
+function handleChar(character)
     local byte = character and string.byte(character, 1) or nil
     if byte and byte >= 1 and byte <= 31 then
         if byte == 1 then
@@ -3984,7 +5313,7 @@ local function handleChar(character)
     end
 end
 
-local function resolvePasteText(text)
+function resolvePasteText(text)
     local pasteText = text
     if state.localClipboardPendingPaste and state.clipboard ~= "" then
         pasteText = state.clipboard
@@ -3993,7 +5322,7 @@ local function resolvePasteText(text)
     return pasteText
 end
 
-local function handlePaste(text)
+function handlePaste(text)
     if state.skipNextPaste then
         state.skipNextPaste = false
         return
@@ -4012,10 +5341,20 @@ local function handlePaste(text)
         if pasteText and pasteText ~= "" then
             state.clipboard = pasteText
         end
+        return
+    end
+
+    if pasteText and pasteText ~= "" then
+        tab.urlFocus = true
+        tab.focusedFormControl = nil
+        tab.urlCursor = #tab.urlInput + 1
+        clearUrlSelection(tab)
+        insertUrlText(pasteText)
+        state.clipboard = pasteText
     end
 end
 
-local function bootstrap(initialUrls)
+function bootstrap(initialUrls)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.clear()
@@ -4047,94 +5386,262 @@ local function bootstrap(initialUrls)
     end
 end
 
-local function run(...)
-    local initialUrls = { ... }
-    bootstrap(initialUrls)
-    while state.running do
-        local event = { os.pullEvent() }
-        local name = event[1]
-        local frameStart = os.clock()
-        state.highUsage.loadingFrame = false
-        if state.skipNextPaste and name ~= "paste" and name ~= "key_up" then
-            state.skipNextPaste = false
+function appletMouseHandledByBrowser(eventName, x, y)
+    if seamlessAppletFullscreenActive and seamlessAppletFullscreenActive() then
+        return false
+    end
+    if state.menuOpen then
+        return true
+    end
+    if state.tabDrag or state.scrollbarDrag then
+        return true
+    end
+    if state.fullscreen then
+        layoutUi()
+        if hitRegion(x, y, state.ui.menuButton) then
+            return true
         end
+        return false
+    end
+    return y <= effectiveTopBarRows()
+end
 
-        if state.highUsage.frozen and not state.modal.open then
-            state.highUsage.frozen = false
-            activateUsageGuard(state.highUsage.lastFrameMs or 0)
-        end
+function handleEventWithoutApplet(event)
+    if event[1] == "mouse_click" then
+        handleMouseClick(event[2], event[3], event[4])
+    elseif event[1] == "mouse_drag" then
+        handleMouseDrag(event[2], event[3], event[4])
+    elseif event[1] == "mouse_up" then
+        handleMouseUp(event[2], event[3], event[4])
+    elseif event[1] == "mouse_scroll" then
+        handleMouseScroll(event[2], event[3], event[4])
+    elseif event[1] == "key" then
+        handleKeyDown(event[2])
+    elseif event[1] == "key_up" then
+        handleKeyUp(event[2])
+    elseif event[1] == "char" then
+        handleChar(event[2])
+    elseif event[1] == "paste" then
+        handlePaste(event[2])
+    elseif event[1] == "timer" then
+        handleTimer(event[2])
+    elseif event[1] == "term_resize" then
+        rerenderAllTabs()
+    end
+end
 
-        if state.modal.open then
-            local hadModal = state.modal.open
-            handleModalEvent(event)
-            if state.running and (hadModal or state.modal.open) then
-                draw()
-            end
+function handleAppletMouseEvent(name, event)
+    if appletMouseHandledByBrowser(name, event[3], event[4]) then
+        if name == "mouse_click" then
+            handleMouseClick(event[2], event[3], event[4])
+        elseif name == "mouse_drag" then
+            handleMouseDrag(event[2], event[3], event[4])
+        elseif name == "mouse_up" then
+            handleMouseUp(event[2], event[3], event[4])
         else
-            if name == "mouse_click" then
-                handleMouseClick(event[2], event[3], event[4])
-            elseif name == "mouse_drag" then
-                handleMouseDrag(event[2], event[3], event[4])
-            elseif name == "mouse_up" then
-                handleMouseUp(event[2], event[3], event[4])
-            elseif name == "mouse_scroll" then
-                handleMouseScroll(event[2], event[3], event[4])
-            elseif name == "key" then
-                handleKeyDown(event[2])
-            elseif name == "key_up" then
-                handleKeyUp(event[2])
-            elseif name == "char" then
-                handleChar(event[2])
-            elseif name == "paste" then
-                handlePaste(event[2])
-            elseif name == "timer" then
-                handleTimer(event[2])
-            elseif name == "term_resize" then
-                rerenderAllTabs()
-            end
-
-            renderDocument(activeTab())
-            draw()
-
-            local guard = state.highUsage
-            local frameMs = (os.clock() - frameStart) * 1000
-            guard.lastFrameMs = frameMs
-
-            if usageGuardEnabled() then
-                local now = os.clock()
-                local frameThreshold = HIGH_USAGE_FRAME_THRESHOLD_MS
-                if guard.loadingFrame then
-                    frameThreshold = HIGH_USAGE_FRAME_THRESHOLD_LOADING_MS
-                end
-                if now < (guard.cooldownUntil or 0) then
-                    guard.overCount = 0
-                elseif frameMs >= frameThreshold then
-                    guard.overCount = (guard.overCount or 0) + 1
-                    if guard.overCount >= HIGH_USAGE_STRIKE_LIMIT then
-                        activateUsageGuard(frameMs)
-                    end
-                else
-                    guard.overCount = 0
-                end
-            else
-                guard.overCount = 0
-                guard.frozen = false
-                if state.modal.open and state.modal.spec and state.modal.spec.id == "high_usage_guard" then
-                    clearModal()
-                end
-            end
+            handleMouseScroll(event[2], event[3], event[4])
         end
-        if scheduleAboutUpdateTimer then
-            scheduleAboutUpdateTimer()
+    else
+        dispatchEventToActiveApplet(event)
+    end
+end
+
+function handleEventWithApplet(event)
+    if seamlessAppletFullscreenActive and seamlessAppletFullscreenActive() then
+        if event[1] == "mouse_click" or event[1] == "mouse_drag" or event[1] == "mouse_up" or event[1] == "mouse_scroll" then
+            dispatchEventToActiveApplet(event)
+            return
         end
+        if event[1] == "key" then
+            if event[2] == keys.leftCtrl or event[2] == keys.rightCtrl then
+                state.ctrlDown = true
+                dispatchEventToActiveApplet(event)
+                return
+            end
+            if state.ctrlDown and event[2] == keys.k then
+                toggleFullscreen(true)
+                return
+            end
+            dispatchEventToActiveApplet(event)
+            return
+        end
+        if event[1] == "key_up" then
+            handleKeyUp(event[2])
+            dispatchEventToActiveApplet(event)
+            return
+        end
+        if event[1] == "paste" then
+            dispatchEventToActiveApplet(event)
+            return
+        end
+        if event[1] == "timer" then
+            handleTimer(event[2])
+            dispatchEventToActiveApplet(event)
+            return
+        end
+        if event[1] == "term_resize" then
+            rerenderAllTabs()
+            dispatchEventToActiveApplet(event)
+            return
+        end
+        dispatchEventToActiveApplet(event)
+        return
     end
 
+    if event[1] == "mouse_click" or event[1] == "mouse_drag" or event[1] == "mouse_up" or event[1] == "mouse_scroll" then
+        handleAppletMouseEvent(event[1], event)
+        return
+    end
+
+    if event[1] == "key" then
+        handleKeyDown(event[2], true)
+        if event[2] ~= keys.f5
+            and event[2] ~= keys.f7
+            and event[2] ~= keys.escape
+            and not (state.ctrlDown and event[2] ~= keys.leftCtrl and event[2] ~= keys.rightCtrl) then
+            dispatchEventToActiveApplet(event)
+        end
+        return
+    end
+
+    if event[1] == "key_up" then
+        handleKeyUp(event[2])
+        dispatchEventToActiveApplet(event)
+        return
+    end
+
+    if event[1] == "char" then
+        if event[2]
+            and string.byte(event[2], 1)
+            and string.byte(event[2], 1) >= 1
+            and string.byte(event[2], 1) <= 31 then
+            handleChar(event[2])
+        else
+            dispatchEventToActiveApplet(event)
+        end
+        return
+    end
+
+    if event[1] == "paste" then
+        if state.skipNextPaste then
+            state.skipNextPaste = false
+        else
+            dispatchEventToActiveApplet(event)
+        end
+        return
+    end
+
+    if event[1] == "timer" then
+        handleTimer(event[2])
+        dispatchEventToActiveApplet(event)
+        return
+    end
+
+    if event[1] == "term_resize" then
+        rerenderAllTabs()
+        dispatchEventToActiveApplet(event)
+        return
+    end
+
+    dispatchEventToActiveApplet(event)
+end
+
+function processFrameAfterEvent(frameStart)
+    if activeAppletRunning() then
+        if flushPausedAppletQueue then
+            flushPausedAppletQueue(activeTab(), PAUSED_APPLET_FLUSH_PER_FRAME)
+        end
+        ensureAppletWindowForTab(activeTab(), false)
+    else
+        renderDocument(activeTab())
+    end
+    draw()
+
+    state.highUsage.lastFrameMs = (os.clock() - frameStart) * 1000
+
+    if usageGuardEnabled() then
+        if os.clock() < (state.highUsage.cooldownUntil or 0) then
+            state.highUsage.overCount = 0
+        elseif state.highUsage.lastFrameMs >= (
+                state.highUsage.loadingFrame and HIGH_USAGE_FRAME_THRESHOLD_LOADING_MS or HIGH_USAGE_FRAME_THRESHOLD_MS
+            ) then
+            state.highUsage.overCount = (state.highUsage.overCount or 0) + 1
+            if state.highUsage.overCount >= HIGH_USAGE_STRIKE_LIMIT then
+                activateUsageGuard(state.highUsage.lastFrameMs)
+            end
+        else
+            state.highUsage.overCount = 0
+        end
+    else
+        state.highUsage.overCount = 0
+        state.highUsage.frozen = false
+        if state.modal.open and state.modal.spec and state.modal.spec.id == "high_usage_guard" then
+            clearModal()
+        end
+    end
+end
+
+function processBrowserEvent(event, frameStart)
+    if state.modal.open then
+        handleModalEvent(event)
+        dispatchEventToBackgroundApplets(event)
+        if (not pauseInactiveAppletsEnabled())
+            and activeAppletRunning()
+            and appletHandlesBackgroundEvent(event and event[1] or nil) then
+            dispatchEventToActiveApplet(event)
+        end
+        if state.running then
+            draw()
+        end
+        return
+    end
+
+    if activeAppletRunning() then
+        handleEventWithApplet(event)
+    else
+        handleEventWithoutApplet(event)
+    end
+    dispatchEventToBackgroundApplets(event)
+
+    processFrameAfterEvent(frameStart)
+end
+
+function processNextBrowserEvent()
+    state.lastPulledEvent = { os.pullEvent() }
+    state.highUsage.loadingFrame = false
+
+    if state.skipNextPaste and state.lastPulledEvent[1] ~= "paste" and state.lastPulledEvent[1] ~= "key_up" then
+        state.skipNextPaste = false
+    end
+
+    if state.highUsage.frozen and not state.modal.open then
+        state.highUsage.frozen = false
+        activateUsageGuard(state.highUsage.lastFrameMs or 0)
+    end
+
+    processBrowserEvent(state.lastPulledEvent, os.clock())
+    state.lastPulledEvent = nil
+    if scheduleAboutUpdateTimer then
+        scheduleAboutUpdateTimer()
+    end
+end
+
+function shutdownBrowserUi()
     term.setCursorBlink(false)
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
     term.clear()
     term.setCursorPos(1, 1)
     print(APP_TITLE .. " closed")
+end
+
+function run(...)
+    local initialUrls = { ... }
+    bootstrap(initialUrls)
+    while state.running do
+        processNextBrowserEvent()
+    end
+    shutdownBrowserUi()
 end
 
 return run

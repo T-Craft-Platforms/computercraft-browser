@@ -410,6 +410,13 @@ return function(core, options)
                 entries = listed
             end
         end
+        if #entries > 1 then
+            local newestFirst = {}
+            for i = #entries, 1, -1 do
+                newestFirst[#newestFirst + 1] = entries[i]
+            end
+            entries = newestFirst
+        end
 
         local groupsMarkup = {}
         if #entries == 0 then
@@ -515,11 +522,25 @@ return function(core, options)
                 elseif choice == "disabled" then
                     value = "false"
                 end
+            elseif key == "downloads_dir" then
+                value = tostring(params.downloads_dir_value or value or "")
+            elseif key == "browser_data_dir" or key == "settings_dir" then
+                key = "browser_data_dir"
+                value = tostring(params.browser_data_dir_value or params.settings_dir_value or value or "")
+            elseif key == "fullscreen_mode" then
+                local choice = tostring(params.fullscreen_mode_choice or ""):lower()
+                if choice == "seamless" or choice == "seemless" then
+                    value = "seamless"
+                elseif choice == "normal" then
+                    value = "normal"
+                end
             end
             if key == "" then
                 statusMessage = "Missing setting key."
             elseif key == "home_page" and trim(tostring(value or "")) == "" then
                 statusMessage = "Missing home page value."
+            elseif (key == "downloads_dir" or key == "browser_data_dir") and trim(tostring(value or "")) == "" then
+                statusMessage = ("Missing %s value."):format(key)
             elseif type(aboutApi.setSetting) ~= "function" then
                 statusMessage = "Settings API is unavailable."
             else
@@ -654,6 +675,27 @@ return function(core, options)
             end
         end
 
+        local fullscreenModeValue = tostring(settings.fullscreen_mode or "normal"):lower()
+        local fullscreenModeChoice = tostring(params.fullscreen_mode_choice or ""):lower()
+        if fullscreenModeChoice ~= "normal" and fullscreenModeChoice ~= "seamless" and fullscreenModeChoice ~= "seemless" then
+            if fullscreenModeValue == "seamless" or fullscreenModeValue == "seemless" then
+                fullscreenModeChoice = "seamless"
+            else
+                fullscreenModeChoice = "normal"
+            end
+        elseif fullscreenModeChoice == "seemless" then
+            fullscreenModeChoice = "seamless"
+        end
+
+        local browserDataDirValue = trim(tostring(params.browser_data_dir_value or params.settings_dir_value or ""))
+        if browserDataDirValue == "" then
+            browserDataDirValue = trim(tostring(settings.browser_data_dir or "/cc-browser"))
+        end
+        local downloadsDirValue = trim(tostring(params.downloads_dir_value or ""))
+        if downloadsDirValue == "" then
+            downloadsDirValue = trim(tostring(settings.downloads_dir or "/cc-browser/downloads"))
+        end
+
         local tokenValues = {
             APP_TITLE = escapeHtml(tostring(aboutApi.appTitle or "CC Browser")),
             APP_VERSION = escapeHtml(tostring(aboutApi.appVersion or "0.0.0")),
@@ -672,7 +714,11 @@ return function(core, options)
             HISTORY_RADIO_DISABLED_CHECKED = historyChoice == "disabled" and "checked" or "",
             PERSISTENCE_RADIO_ENABLED_CHECKED = persistenceChoice == "enabled" and "checked" or "",
             PERSISTENCE_RADIO_DISABLED_CHECKED = persistenceChoice == "disabled" and "checked" or "",
+            FULLSCREEN_MODE_RADIO_NORMAL_CHECKED = fullscreenModeChoice == "normal" and "checked" or "",
+            FULLSCREEN_MODE_RADIO_SEAMLESS_CHECKED = fullscreenModeChoice == "seamless" and "checked" or "",
             HOME_PAGE_CUSTOM_VALUE = escapeHtml(customValue),
+            BROWSER_DATA_DIR_VALUE = escapeHtml(browserDataDirValue),
+            DOWNLOADS_DIR_VALUE = escapeHtml(downloadsDirValue),
             SETTINGS_LIST = table.concat(settingsItems),
             PARAMS_LIST = table.concat(paramItems),
         }
@@ -731,10 +777,15 @@ return function(core, options)
         end
 
         if parsed and parsed.scheme == "file" then
-            local path = decodeUrlPath(url:sub(8))
-            if startsWith(path, "//") then
-                path = path:sub(2)
+            local path = parsed.path or ""
+            if parsed.authority ~= nil and parsed.authority ~= "" then
+                if parsed.path == nil or parsed.path == "" or parsed.path == "/" then
+                    path = parsed.authority
+                else
+                    path = parsed.authority .. parsed.path
+                end
             end
+            path = decodeUrlPath(path)
             if path == "" then
                 path = "/"
             end

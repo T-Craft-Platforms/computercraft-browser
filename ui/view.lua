@@ -33,8 +33,12 @@ return function(deps)
             state.ui.url = offscreen
             state.ui.tabs = {}
             state.ui.tabClose = {}
-            -- Floating menu button at top-right corner
-            state.ui.menuButton = { x1 = math.max(1, w - menuBtnWidth + 1), x2 = w, y = 1 }
+            if state.seamlessAppletFullscreen then
+                state.ui.menuButton = offscreen
+            else
+                -- Floating menu button at top-right corner
+                state.ui.menuButton = { x1 = math.max(1, w - menuBtnWidth + 1), x2 = w, y = 1 }
+            end
             return
         end
 
@@ -255,6 +259,10 @@ return function(deps)
         -- In fullscreen mode, skip the full top bar. Only draw a floating "=" button.
         if state.fullscreen then
             state.tabTitleCarousel = nil
+            if state.seamlessAppletFullscreen then
+                term.setCursorBlink(false)
+                return
+            end
             -- Draw the floating "=" menu button
             local menuWidth = state.ui.menuButton.x2 - state.ui.menuButton.x1 + 1
             if menuWidth > 0 then
@@ -551,6 +559,10 @@ return function(deps)
 
     local function drawMenuPopover()
         state.ui.menu = nil
+        if state.seamlessAppletFullscreen then
+            state.menuOpen = false
+            return
+        end
         if not state.menuOpen then
             return
         end
@@ -562,7 +574,7 @@ return function(deps)
         end
         local topRows = effectiveTopBarRows()
         local panelWidth = math.min(24, math.max(14, w))
-        local panelHeight = 7
+        local panelHeight = 8
         local panelX2 = clamp(state.ui.menuButton.x2, 1, w)
         local panelX1 = math.max(1, panelX2 - panelWidth + 1)
         local panelY1 = topRows + 1
@@ -587,9 +599,10 @@ return function(deps)
         local helpY = math.min(panelY2, panelY1 + 1)
         local favoritesY = math.min(panelY2, panelY1 + 2)
         local historyY = math.min(panelY2, panelY1 + 3)
-        local printY = math.min(panelY2, panelY1 + 4)
-        local fullscreenY = math.min(panelY2, panelY1 + 5)
-        local exitY = math.min(panelY2, panelY1 + 6)
+        local downloadY = math.min(panelY2, panelY1 + 4)
+        local printY = math.min(panelY2, panelY1 + 5)
+        local fullscreenY = math.min(panelY2, panelY1 + 6)
+        local exitY = math.min(panelY2, panelY1 + 7)
 
         writeClipped(innerX1, settingsY, "Settings", textFg, textBg)
         writeClipped(innerX1, helpY, "Help", textFg, textBg)
@@ -614,6 +627,7 @@ return function(deps)
         writeClipped(favTextX1, favoritesY, string.rep(" ", favTextX2 - favTextX1 + 1), textFg, textBg)
         writeClipped(favTextX1 + 1, favoritesY, "Favorites", textFg, textBg)
         writeClipped(innerX1, historyY, "History", textFg, textBg)
+        writeClipped(innerX1, downloadY, "Download", textFg, textBg)
         writeClipped(innerX1, printY, "Print", textFg, textBg)
         local fullscreenLabel = state.fullscreen and "Exit Fullscreen" or "Fullscreen"
         writeClipped(innerX1, fullscreenY, fullscreenLabel, textFg, textBg)
@@ -629,6 +643,7 @@ return function(deps)
         state.ui.menu.addFavoriteEnabled = addFavoriteEnabled
         state.ui.menu.favorites = { x1 = panelX1, x2 = favTextX2, y = favoritesY }
         state.ui.menu.history = { x1 = panelX1, x2 = panelX2, y = historyY }
+        state.ui.menu.download = { x1 = panelX1, x2 = panelX2, y = downloadY }
         state.ui.menu.print = { x1 = panelX1, x2 = panelX2, y = printY }
         state.ui.menu.fullscreen = { x1 = panelX1, x2 = panelX2, y = fullscreenY }
         state.ui.menu.exit = { x1 = panelX1, x2 = panelX2, y = exitY }

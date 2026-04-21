@@ -469,9 +469,31 @@ local function normalizeInputUrl(input)
         return "about:blank", false
     end
     if value:match("^[%a][%w+%-%.]*:") then
+        local parsed = parseUrl(value)
+        if parsed and parsed.scheme == "file" then
+            local localPath = parsed.path or ""
+            if parsed.authority ~= nil and parsed.authority ~= "" then
+                if parsed.path == nil or parsed.path == "" or parsed.path == "/" then
+                    localPath = parsed.authority
+                else
+                    localPath = parsed.authority .. parsed.path
+                end
+            end
+            if localPath == "" then
+                localPath = "/"
+            end
+            return "file://" .. localPath, false
+        end
         return value, false
     end
-    if startsWith(value, "/") or fs.exists(value) then
+    if startsWith(value, "/")
+        or startsWith(value, "\\")
+        or startsWith(value, "./")
+        or startsWith(value, "../")
+        or startsWith(value, ".\\")
+        or startsWith(value, "..\\")
+        or (value:find("[/\\]") ~= nil and value:match("%.[%w]+$") ~= nil)
+        or fs.exists(value) then
         return "file://" .. value, false
     end
     return "https://" .. value, true

@@ -143,5 +143,39 @@
 
       <button id="set-persistence-submit" name="submit_set_persistence" type="submit" value="1">Save</button>
     </form>
+
+    <form id="set-fullscreen-mode-form" class="settings-form" name="set_fullscreen_mode" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="fullscreen_mode">
+
+      <label for="fullscreen-mode-normal">Fullscreen mode</label><br>
+      <input id="fullscreen-mode-normal" name="fullscreen_mode_choice" type="radio" value="normal" {{FULLSCREEN_MODE_RADIO_NORMAL_CHECKED}}>
+      <label for="fullscreen-mode-normal">Normal (browser menu available)</label><br>
+
+      <input id="fullscreen-mode-seamless" name="fullscreen_mode_choice" type="radio" value="seamless" {{FULLSCREEN_MODE_RADIO_SEAMLESS_CHECKED}}>
+      <label for="fullscreen-mode-seamless">Seamless (no "=" button, exit with Ctrl+K only)</label><br>
+
+      <button id="set-fullscreen-mode-submit" name="submit_set_fullscreen_mode" type="submit" value="1">Save</button>
+    </form>
+
+    <form id="set-browser-data-dir-form" class="settings-form" name="set_browser_data_dir" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="browser_data_dir">
+
+      <label for="browser-data-dir-value">Browser data directory (config/vfs subfolders are built-in)</label><br>
+      <input id="browser-data-dir-value" class="setting-value" name="browser_data_dir_value" type="text" value="{{BROWSER_DATA_DIR_VALUE}}" size="32" maxlength="255"><br>
+
+      <button id="set-browser-data-dir-submit" name="submit_set_browser_data_dir" type="submit" value="1">Save</button>
+    </form>
+
+    <form id="set-downloads-dir-form" class="settings-form" name="set_downloads_dir" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="downloads_dir">
+
+      <label for="downloads-dir-value">Default downloads directory</label><br>
+      <input id="downloads-dir-value" class="setting-value" name="downloads_dir_value" type="text" value="{{DOWNLOADS_DIR_VALUE}}" size="32" maxlength="255"><br>
+
+      <button id="set-downloads-dir-submit" name="submit_set_downloads_dir" type="submit" value="1">Save</button>
+    </form>
   </body>
 </html>

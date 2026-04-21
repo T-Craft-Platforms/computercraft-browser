@@ -21,7 +21,20 @@ if not fs.exists(appPath) then
     return
 end
 
-local runApp = dofile(appPath)
+local loadOk, runOrErr = pcall(dofile, appPath)
+if not loadOk then
+    term.setCursorBlink(false)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.red)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("Failed loading browser app:")
+    print(appPath)
+    print(tostring(runOrErr))
+    return
+end
+
+local runApp = runOrErr
 if type(runApp) ~= "function" then
     term.setCursorBlink(false)
     term.setBackgroundColor(colors.black)
