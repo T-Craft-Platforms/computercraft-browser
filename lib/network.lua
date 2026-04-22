@@ -481,7 +481,42 @@ return function(core, options)
         local statusMessage = activeSettingsStatus() or "Ready."
         local action = (params.action or ""):lower()
 
-        if action == "set" then
+        if action == "set_colors" then
+            if type(aboutApi.setSetting) ~= "function" then
+                statusMessage = "Settings API is unavailable."
+            else
+                local bgColor = trim(tostring(params.default_bg_color or ""))
+                local textColor = trim(tostring(params.default_text_color or ""))
+                local savedCount = 0
+                local errors = {}
+
+                if bgColor ~= "" then
+                    local okBg, errBg = aboutApi.setSetting("default_bg_color", bgColor)
+                    if okBg then
+                        savedCount = savedCount + 1
+                    else
+                        errors[#errors + 1] = tostring(errBg or "Could not save default_bg_color")
+                    end
+                end
+                if textColor ~= "" then
+                    local okText, errText = aboutApi.setSetting("default_text_color", textColor)
+                    if okText then
+                        savedCount = savedCount + 1
+                    else
+                        errors[#errors + 1] = tostring(errText or "Could not save default_text_color")
+                    end
+                end
+
+                if #errors > 0 then
+                    statusMessage = table.concat(errors, "; ")
+                elseif savedCount > 0 then
+                    statusMessage = "Colors saved."
+                else
+                    statusMessage = "Missing color values."
+                end
+            end
+            setSettingsStatus(statusMessage, 3)
+        elseif action == "set" then
             local key = params.key or ""
             local value = params.value or ""
             if key == "home_page" then
@@ -534,6 +569,15 @@ return function(core, options)
                 elseif choice == "normal" then
                     value = "normal"
                 end
+            elseif key == "browser_engine_level" then
+                local choice = tostring(params.browser_engine_level_choice or ""):lower()
+                if choice == "text_only" or choice == "lite" or choice == "advanced" then
+                    value = choice
+                end
+            elseif key == "default_bg_color" then
+                value = tostring(params.default_bg_color or value or "")
+            elseif key == "default_text_color" then
+                value = tostring(params.default_text_color or value or "")
             end
             if key == "" then
                 statusMessage = "Missing setting key."
@@ -696,6 +740,21 @@ return function(core, options)
             downloadsDirValue = trim(tostring(settings.downloads_dir or "/cc-browser/downloads"))
         end
 
+        local browserEngineLevelValue = tostring(settings.browser_engine_level or "advanced"):lower()
+        local browserEngineLevelChoice = tostring(params.browser_engine_level_choice or ""):lower()
+        if browserEngineLevelChoice ~= "text_only" and browserEngineLevelChoice ~= "lite" and browserEngineLevelChoice ~= "advanced" then
+            browserEngineLevelChoice = browserEngineLevelValue
+        end
+
+        local defaultBgColorValue = trim(tostring(params.default_bg_color or "")):lower()
+        if defaultBgColorValue == "" then
+            defaultBgColorValue = trim(tostring(settings.default_bg_color or "black")):lower()
+        end
+        local defaultTextColorValue = trim(tostring(params.default_text_color or "")):lower()
+        if defaultTextColorValue == "" then
+            defaultTextColorValue = trim(tostring(settings.default_text_color or "white")):lower()
+        end
+
         local tokenValues = {
             APP_TITLE = escapeHtml(tostring(aboutApi.appTitle or "CC Browser")),
             APP_VERSION = escapeHtml(tostring(aboutApi.appVersion or "0.0.0")),
@@ -716,9 +775,14 @@ return function(core, options)
             PERSISTENCE_RADIO_DISABLED_CHECKED = persistenceChoice == "disabled" and "checked" or "",
             FULLSCREEN_MODE_RADIO_NORMAL_CHECKED = fullscreenModeChoice == "normal" and "checked" or "",
             FULLSCREEN_MODE_RADIO_SEAMLESS_CHECKED = fullscreenModeChoice == "seamless" and "checked" or "",
+            BROWSER_ENGINE_LEVEL_RADIO_TEXT_ONLY_CHECKED = browserEngineLevelChoice == "text_only" and "checked" or "",
+            BROWSER_ENGINE_LEVEL_RADIO_LITE_CHECKED = browserEngineLevelChoice == "lite" and "checked" or "",
+            BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED = browserEngineLevelChoice == "advanced" and "checked" or "",
             HOME_PAGE_CUSTOM_VALUE = escapeHtml(customValue),
             BROWSER_DATA_DIR_VALUE = escapeHtml(browserDataDirValue),
             DOWNLOADS_DIR_VALUE = escapeHtml(downloadsDirValue),
+            DEFAULT_BG_COLOR_VALUE = escapeHtml(defaultBgColorValue),
+            DEFAULT_TEXT_COLOR_VALUE = escapeHtml(defaultTextColorValue),
             SETTINGS_LIST = table.concat(settingsItems),
             PARAMS_LIST = table.concat(paramItems),
         }

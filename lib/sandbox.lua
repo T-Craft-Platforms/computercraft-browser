@@ -122,7 +122,37 @@ return function(deps)
             if not fs.exists(resolved) then
                 return {}
             end
-            return fs.list(resolved)
+            local items = fs.list(resolved)
+            -- Return enhanced list with full paths and file type information
+            local result = {}
+            for i, name in ipairs(items) do
+                local itemPath = fs.combine(path or "", name)
+                local fullPath = fs.combine(resolved, name)
+                local isDir = fs.isDir(fullPath)
+                local size = isDir and "-" or tostring(fs.getSize(fullPath))
+                -- Escape special characters in path for safe display
+                local escapedPath = itemPath:gsub("[\\\"'%c]", function(c)
+                    return string.format("\\x%02X", string.byte(c))
+                end)
+                local escapedName = name:gsub("[\\\"'%c]", function(c)
+                    return string.format("\\x%02X", string.byte(c))
+                end)
+                result[i] = {
+                    name = name,
+                    path = itemPath,
+                    fullPath = fullPath,
+                    isDir = isDir,
+                    size = size,
+                    displayName = (isDir and "[DIR] " or "[FILE] ") .. escapedName,
+                    displayPath = escapedPath,
+                }
+            end
+            -- Also return the simple list for backward compatibility
+            local simpleList = {}
+            for i, item in ipairs(result) do
+                simpleList[i] = item.name
+            end
+            return simpleList, result
         end
         function vfs.makeDir(path)
             return fs.makeDir(resolve(path))

@@ -177,5 +177,36 @@
 
       <button id="set-downloads-dir-submit" name="submit_set_downloads_dir" type="submit" value="1">Save</button>
     </form>
+
+    <form id="set-browser-engine-level-form" class="settings-form" name="set_browser_engine_level" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="browser_engine_level">
+
+      <label for="browser-engine-level">Browser rendering engine level</label><br>
+      <input id="browser-engine-level-text-only" name="browser_engine_level_choice" type="radio" value="text_only" {{BROWSER_ENGINE_LEVEL_RADIO_TEXT_ONLY_CHECKED}}>
+      <label for="browser-engine-level-text-only">Text only (no CSS, no interactive elements)</label><br>
+
+      <input id="browser-engine-level-lite" name="browser_engine_level_choice" type="radio" value="lite" {{BROWSER_ENGINE_LEVEL_RADIO_LITE_CHECKED}}>
+      <label for="browser-engine-level-lite">Lite (no CSS, interactive elements enabled)</label><br>
+
+      <input id="browser-engine-level-advanced" name="browser_engine_level_choice" type="radio" value="advanced" {{BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED}}>
+      <label for="browser-engine-level-advanced">Advanced (full features, default)</label><br>
+
+      <button id="set-browser-engine-level-submit" name="submit_set_browser_engine_level" type="submit" value="1">Save</button>
+    </form>
+
+    <form id="set-default-colors-form" class="settings-form" name="set_default_colors" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set_colors">
+
+      <label for="default-bg-color">Default background color (when not specified by page)</label><br>
+      <input id="default-bg-color" class="setting-value" name="default_bg_color" type="color" value="{{DEFAULT_BG_COLOR_VALUE}}" size="16"><br>
+
+      <label for="default-text-color">Default text color (when not specified by page)</label><br>
+      <input id="default-text-color" class="setting-value" name="default_text_color" type="color" value="{{DEFAULT_TEXT_COLOR_VALUE}}" size="16"><br>
+
+      <p><code>Color values:</code> white, orange, magenta, lightblue, yellow, lime, pink, gray, lightgray, cyan, purple, blue, brown, green, red, black</p>
+
+      <button id="set-default-colors-submit" name="submit_set_default_colors" type="submit" value="1">Save Colors</button>
+    </form>
   </body>
 </html>

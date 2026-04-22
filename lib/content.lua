@@ -19,9 +19,76 @@ return function(deps)
     local nodeTextContent = html.nodeTextContent
 
     local fetchTextResource = network.fetchTextResource
+    local getEngineLevel = deps.getEngineLevel
+    local getDefaultBackgroundColor = deps.getDefaultBackgroundColor
+    local getDefaultTextColor = deps.getDefaultTextColor
     local YIELD_EVENT = "__cc_browser_content_yield"
     local YIELD_STEP_BUDGET = 1400
     local yieldSteps = 0
+
+    local SUPPORTED_COLOR_NAMES = {
+        "white",
+        "orange",
+        "magenta",
+        "lightblue",
+        "yellow",
+        "lime",
+        "pink",
+        "gray",
+        "lightgray",
+        "cyan",
+        "purple",
+        "blue",
+        "brown",
+        "green",
+        "red",
+        "black",
+    }
+    local COLOR_NAME_TO_VALUE = {
+        white = colors.white,
+        orange = colors.orange,
+        magenta = colors.magenta,
+        lightblue = colors.lightBlue,
+        yellow = colors.yellow,
+        lime = colors.lime,
+        pink = colors.pink,
+        gray = colors.gray,
+        lightgray = colors.lightGray,
+        cyan = colors.cyan,
+        purple = colors.purple,
+        blue = colors.blue,
+        brown = colors.brown,
+        green = colors.green,
+        red = colors.red,
+        black = colors.black,
+    }
+    local COLOR_NAME_ALIASES = {
+        white = "white",
+        orange = "orange",
+        magenta = "magenta",
+        lightblue = "lightblue",
+        light_blue = "lightblue",
+        yellow = "yellow",
+        lime = "lime",
+        pink = "pink",
+        gray = "gray",
+        grey = "gray",
+        lightgray = "lightgray",
+        lightgrey = "lightgray",
+        light_gray = "lightgray",
+        light_grey = "lightgray",
+        cyan = "cyan",
+        purple = "purple",
+        blue = "blue",
+        brown = "brown",
+        green = "green",
+        red = "red",
+        black = "black",
+    }
+    local COLOR_VALUE_TO_NAME = {}
+    for name, colorValue in pairs(COLOR_NAME_TO_VALUE) do
+        COLOR_VALUE_TO_NAME[colorValue] = name
+    end
 
     local COLOR_LUMA = {
         [colors.white] = 240,
@@ -83,6 +150,74 @@ return function(deps)
             return colors.white
         end
         return fg
+    end
+
+    local function normalizeEngineLevel(value)
+        local lowered = trim(tostring(value or "")):lower()
+        lowered = lowered:gsub("%-", "_")
+        if lowered == "text" or lowered == "textonly" then
+            lowered = "text_only"
+        end
+        if lowered ~= "text_only" and lowered ~= "lite" and lowered ~= "advanced" then
+            return "advanced"
+        end
+        return lowered
+    end
+
+    local function parseConfiguredColorValue(rawColor, fallbackColor)
+        local raw = trim(tostring(rawColor or "")):lower()
+        if raw ~= "" then
+            local compact = raw:gsub("%s+", ""):gsub("%-", "_")
+            local alias = COLOR_NAME_ALIASES[compact]
+            if alias and COLOR_NAME_TO_VALUE[alias] then
+                return COLOR_NAME_TO_VALUE[alias]
+            end
+            local parsed = parseCssColor(raw, nil)
+            if parsed ~= nil then
+                return parsed
+            end
+        end
+        return fallbackColor
+    end
+
+    local function normalizePaletteColorName(rawColor, fallbackName)
+        local fallback = fallbackName or "white"
+        local raw = trim(tostring(rawColor or "")):lower()
+        if raw == "" then
+            return fallback
+        end
+        local compact = raw:gsub("%s+", ""):gsub("%-", "_")
+        local alias = COLOR_NAME_ALIASES[compact]
+        if alias then
+            return alias
+        end
+        local parsed = parseCssColor(raw, nil)
+        if parsed and COLOR_VALUE_TO_NAME[parsed] then
+            return COLOR_VALUE_TO_NAME[parsed]
+        end
+        return fallback
+    end
+
+    local function resolveRenderOptions()
+        local engineLevel = normalizeEngineLevel(type(getEngineLevel) == "function" and getEngineLevel() or "advanced")
+        local defaultBg = parseConfiguredColorValue(
+            type(getDefaultBackgroundColor) == "function" and getDefaultBackgroundColor() or "black",
+            colors.black
+        )
+        local defaultFg = parseConfiguredColorValue(
+            type(getDefaultTextColor) == "function" and getDefaultTextColor() or "white",
+            colors.white
+        )
+        defaultFg = ensureContrastingForeground(defaultFg, defaultBg)
+
+        return {
+            engineLevel = engineLevel,
+            allowDocumentCss = engineLevel == "advanced",
+            interactiveEnabled = engineLevel ~= "text_only",
+            linksEnabled = engineLevel ~= "text_only",
+            defaultBackground = defaultBg,
+            defaultForeground = defaultFg,
+        }
     end
 
     local function parseDeclarations(source)
@@ -448,7 +583,7 @@ return function(deps)
         }
     end
 
-    local function computeStyle(node, parentStyle, rules)
+    local function computeStyle(node, parentStyle, rules, renderOptions)
         local style = newComputedStyle(parentStyle)
         applyTagDefaults(style, node.tag)
         local appliedMeta = {}
@@ -474,7 +609,7 @@ return function(deps)
         end
 
         if node.attrs then
-            if node.attrs.style then
+            if node.attrs.style and (renderOptions == nil or renderOptions.allowDocumentCss ~= false) then
                 local inlineStyle = parseDeclarations(node.attrs.style .. ";")
                 for prop, value in pairs(inlineStyle) do
                     applyDeclaration(style, prop, value)
@@ -969,49 +1104,76 @@ return function(deps)
         local defaultValue = tostring(attrs.value or "")
         if (inputType == "checkbox" or inputType == "radio") and defaultValue == "" then
             defaultValue = "on"
+        elseif inputType == "color" then
+            defaultValue = normalizePaletteColorName(defaultValue, "white")
         end
+        local interactiveEnabled = context.interactiveEnabled ~= false
+        local colorOptions = inputType == "color" and SUPPORTED_COLOR_NAMES or nil
         local defaults = {
             value = defaultValue,
             checked = hasBooleanAttr(attrs, "checked"),
             cursor = #defaultValue + 1,
             selectedIndex = 1,
             selectedIndices = {},
+            colorIndex = 1,
         }
+        if colorOptions then
+            for index, optionName in ipairs(colorOptions) do
+                if optionName == defaultValue then
+                    defaults.colorIndex = index
+                    break
+                end
+            end
+        end
 
-        local control = {
-            key = key,
-            formId = formId,
-            nodeId = node._nodeId or 0,
-            tag = "input",
-            inputType = inputType,
-            name = attrs.name or "",
-            id = attrs.id or "",
-            className = attrs.class or "",
-            disabled = hasBooleanAttr(attrs, "disabled"),
-            readonly = hasBooleanAttr(attrs, "readonly"),
-            required = hasBooleanAttr(attrs, "required"),
-            placeholder = attrs.placeholder or "",
-            maxLength = parseInteger(attrs.maxlength, nil),
-            size = parseInteger(attrs.size, nil),
-            minValue = tonumber(attrs.min),
-            maxValue = tonumber(attrs.max),
-            stepValue = tonumber(attrs.step),
-            formAction = attrs.formaction or "",
-            formMethod = attrs.formmethod or "",
-            formEnctype = attrs.formenctype or "",
-            defaultValue = defaultValue,
-            defaultChecked = defaults.checked,
-            defaults = defaults,
-            options = nil,
-        }
-        local stateEntry = registerControl(context, formId, control)
+        local control = nil
+        local stateEntry = nil
+        if interactiveEnabled then
+            control = {
+                key = key,
+                formId = formId,
+                nodeId = node._nodeId or 0,
+                tag = "input",
+                inputType = inputType,
+                name = attrs.name or "",
+                id = attrs.id or "",
+                className = attrs.class or "",
+                disabled = hasBooleanAttr(attrs, "disabled"),
+                readonly = hasBooleanAttr(attrs, "readonly"),
+                required = hasBooleanAttr(attrs, "required"),
+                placeholder = attrs.placeholder or "",
+                maxLength = parseInteger(attrs.maxlength, nil),
+                size = parseInteger(attrs.size, nil),
+                minValue = tonumber(attrs.min),
+                maxValue = tonumber(attrs.max),
+                stepValue = tonumber(attrs.step),
+                formAction = attrs.formaction or "",
+                formMethod = attrs.formmethod or "",
+                formEnctype = attrs.formenctype or "",
+                defaultValue = defaultValue,
+                defaultChecked = defaults.checked,
+                defaults = defaults,
+                options = nil,
+                colorOptions = colorOptions,
+            }
+            stateEntry = registerControl(context, formId, control)
+        else
+            stateEntry = {
+                value = defaultValue,
+                checked = defaults.checked,
+                cursor = #defaultValue + 1,
+                colorIndex = defaults.colorIndex,
+            }
+        end
 
         if inputType == "hidden" then
             return true
         end
 
-        local focused = context.focusControlKey == key
-        local controlStyle = cloneControlStyle(style, focused, control.disabled)
+        local focused = interactiveEnabled and context.focusControlKey == key
+        local disabled = interactiveEnabled and control.disabled or hasBooleanAttr(attrs, "disabled")
+        local controlStyle = cloneControlStyle(style, focused, disabled)
+        local controlKey = interactiveEnabled and key or nil
         local isBlock = style.display == "block"
         local previousIndent = nil
         if isBlock then
@@ -1020,10 +1182,10 @@ return function(deps)
 
         if inputType == "checkbox" then
             local marker = stateEntry.checked and "[x]" or "[ ]"
-            writer:writeControlText(marker, controlStyle, key)
+            writer:writeControlText(marker, controlStyle, controlKey)
         elseif inputType == "radio" then
             local marker = stateEntry.checked and "(o)" or "( )"
-            writer:writeControlText(marker, controlStyle, key)
+            writer:writeControlText(marker, controlStyle, controlKey)
         elseif inputType == "submit" or inputType == "reset" or inputType == "button" or inputType == "image" then
             local label = trim(attrs.value or "")
             if label == "" then
@@ -1037,11 +1199,34 @@ return function(deps)
                     label = "Button"
                 end
             end
-            writer:writeControlText("[ " .. label .. " ]", controlStyle, key)
+            writer:writeControlText("[ " .. label .. " ]", controlStyle, controlKey)
+        elseif inputType == "color" then
+            local selectedName = normalizePaletteColorName(stateEntry.value, "white")
+            local selectedIndex = tonumber(stateEntry.colorIndex)
+            if colorOptions and #colorOptions > 0 then
+                if not selectedIndex then
+                    selectedIndex = 1
+                    for i, optionName in ipairs(colorOptions) do
+                        if optionName == selectedName then
+                            selectedIndex = i
+                            break
+                        end
+                    end
+                end
+                selectedIndex = clamp(math.floor(selectedIndex or 1), 1, #colorOptions)
+                selectedName = normalizePaletteColorName(colorOptions[selectedIndex], selectedName)
+                stateEntry.colorIndex = selectedIndex
+            end
+            stateEntry.value = selectedName
+            writer:writeControlText("< " .. selectedName .. " >", controlStyle, controlKey)
         else
             local value = tostring(stateEntry.value or "")
-            if control.maxLength and control.maxLength >= 0 and #value > control.maxLength then
-                value = value:sub(1, control.maxLength)
+            local maxLength = parseInteger(attrs.maxlength, nil)
+            if interactiveEnabled and control and control.maxLength then
+                maxLength = control.maxLength
+            end
+            if maxLength and maxLength >= 0 and #value > maxLength then
+                value = value:sub(1, maxLength)
                 stateEntry.value = value
             end
             stateEntry.cursor = clamp(parseInteger(stateEntry.cursor, (#value + 1)), 1, #value + 1)
@@ -1051,16 +1236,19 @@ return function(deps)
                 shown = string.rep("*", #value)
             end
             local placeholder = tostring(attrs.placeholder or "")
-            local width = clampControlInnerWidth(writer, control.size or 16)
+            local width = clampControlInnerWidth(writer, parseInteger(attrs.size, nil) or 16)
+            if interactiveEnabled and control and control.size then
+                width = clampControlInnerWidth(writer, control.size or 16)
+            end
 
             if shown == "" and placeholder ~= "" and not focused then
-                local placeholderStyle = cloneControlStyle(style, false, control.disabled)
+                local placeholderStyle = cloneControlStyle(style, false, disabled)
                 placeholderStyle.fg = colors.gray
                 local clippedPlaceholder = placeholder
                 if #clippedPlaceholder > width then
                     clippedPlaceholder = clippedPlaceholder:sub(1, width)
                 end
-                writer:writeControlText("[" .. clippedPlaceholder .. "]", placeholderStyle, key)
+                writer:writeControlText("[" .. clippedPlaceholder .. "]", placeholderStyle, controlKey)
             else
                 local visible = shown
                 local cursorDisplay = stateEntry.cursor
@@ -1077,7 +1265,7 @@ return function(deps)
                 if focused then
                     visible = withCursorMarker(visible, cursorDisplay)
                 end
-                writer:writeControlText("[" .. visible .. "]", controlStyle, key)
+                writer:writeControlText("[" .. visible .. "]", controlStyle, controlKey)
             end
         end
 
@@ -1126,6 +1314,32 @@ return function(deps)
                 defaultSelectedIndex = index
                 break
             end
+        end
+
+        if context.interactiveEnabled == false then
+            local selectedOption = options[defaultSelectedIndex] or options[1]
+            local label = tostring(selectedOption and selectedOption.label or "")
+            if label == "" then
+                label = tostring(selectedOption and selectedOption.value or "")
+            end
+            local width = clampControlInnerWidth(writer, parseInteger(attrs.size, nil) or math.max(12, #label))
+            if #label > width then
+                label = label:sub(1, width)
+            end
+            local isBlock = style.display == "block"
+            local previousIndent = nil
+            if isBlock then
+                previousIndent = writer:beginBlock(style)
+            end
+            writer:writeControlText(
+                "< " .. label .. " >",
+                cloneControlStyle(style, false, hasBooleanAttr(attrs, "disabled")),
+                nil
+            )
+            if isBlock then
+                writer:endBlock(style, previousIndent)
+            end
+            return true
         end
 
         local control = {
@@ -1184,6 +1398,27 @@ return function(deps)
         local formId = resolveControlFormId(context, node)
         local key = makeControlKey(formId, node)
         local defaultValue = decodeEntities(nodeTextContent(node) or "")
+        if context.interactiveEnabled == false then
+            local display = tostring(defaultValue):gsub("\r", ""):gsub("\n", " ")
+            local width = clampControlInnerWidth(writer, parseInteger(attrs.cols, nil) or math.max(18, #display))
+            if #display > width then
+                display = display:sub(1, width)
+            end
+            local isBlock = style.display == "block"
+            local previousIndent = nil
+            if isBlock then
+                previousIndent = writer:beginBlock(style)
+            end
+            writer:writeControlText(
+                "[[" .. display .. "]]",
+                cloneControlStyle(style, false, hasBooleanAttr(attrs, "disabled")),
+                nil
+            )
+            if isBlock then
+                writer:endBlock(style, previousIndent)
+            end
+            return true
+        end
         local control = {
             key = key,
             formId = formId,
@@ -1249,6 +1484,22 @@ return function(deps)
             label = "Button"
         end
         local value = tostring(attrs.value or label)
+        if context.interactiveEnabled == false then
+            local isBlock = style.display == "block"
+            local previousIndent = nil
+            if isBlock then
+                previousIndent = writer:beginBlock(style)
+            end
+            writer:writeControlText(
+                "[ " .. label .. " ]",
+                cloneControlStyle(style, false, hasBooleanAttr(attrs, "disabled")),
+                nil
+            )
+            if isBlock then
+                writer:endBlock(style, previousIndent)
+            end
+            return true
+        end
         local control = {
             key = key,
             formId = formId,
@@ -1286,7 +1537,7 @@ return function(deps)
         return true
     end
 
-    local function renderNode(node, parentStyle, rules, writer, context, baseUrl)
+    local function renderNode(node, parentStyle, rules, writer, context, baseUrl, renderOptions)
         maybeYield()
         if node.type == "text" then
             writer:writeText(node.text or "", parentStyle, context.currentHref, parentStyle.whiteSpace == "pre")
@@ -1297,7 +1548,7 @@ return function(deps)
             return
         end
 
-        local style = computeStyle(node, parentStyle, rules)
+        local style = computeStyle(node, parentStyle, rules, renderOptions)
         if style.display == "none" then
             return
         end
@@ -1353,7 +1604,7 @@ return function(deps)
         end
 
         local previousHref = context.currentHref
-        if tag == "a" and node.attrs and node.attrs.href then
+        if tag == "a" and context.linksEnabled ~= false and node.attrs and node.attrs.href then
             context.currentHref = resolveRelativeUrl(baseUrl, node.attrs.href)
         end
 
@@ -1364,7 +1615,7 @@ return function(deps)
         end
 
         local pushedForm = false
-        if tag == "form" then
+        if tag == "form" and context.interactiveEnabled ~= false then
             local formId = registerForm(context, node, baseUrl)
             table.insert(context.formStack, formId)
             pushedForm = true
@@ -1387,7 +1638,7 @@ return function(deps)
 
         for _, child in ipairs(node.children or {}) do
             maybeYield()
-            renderNode(child, style, rules, writer, context, baseUrl)
+            renderNode(child, style, rules, writer, context, baseUrl, renderOptions)
         end
 
         if liIndent then
@@ -1450,6 +1701,7 @@ return function(deps)
     end
 
     local function buildDocument(htmlText, baseUrl)
+        local renderOptions = resolveRenderOptions()
         local root = parseHTML(htmlText)
         local nextNodeId = 0
         walkNode(root, function(node)
@@ -1483,33 +1735,35 @@ style, script, head, meta, link, title { display: none; }
 ]]
         addCss(defaults)
 
-        for _, css in ipairs(cssBlocks) do
-            addCss(css)
-        end
-
-        local maxExternalStylesheets = 6
-        local loaded = 0
-        local seen = {}
-        for _, href in ipairs(cssLinks) do
-            maybeYield()
-            if loaded >= maxExternalStylesheets then
-                break
+        if renderOptions.allowDocumentCss then
+            for _, css in ipairs(cssBlocks) do
+                addCss(css)
             end
-            local cssUrl = resolveRelativeUrl(baseUrl, href)
-            if cssUrl and not seen[cssUrl] then
-                seen[cssUrl] = true
-                local cssBody, _, _, err = fetchTextResource(cssUrl, false)
-                if cssBody and not err then
-                    addCss(cssBody)
-                    loaded = loaded + 1
+
+            local maxExternalStylesheets = 6
+            local loaded = 0
+            local seen = {}
+            for _, href in ipairs(cssLinks) do
+                maybeYield()
+                if loaded >= maxExternalStylesheets then
+                    break
+                end
+                local cssUrl = resolveRelativeUrl(baseUrl, href)
+                if cssUrl and not seen[cssUrl] then
+                    seen[cssUrl] = true
+                    local cssBody, _, _, err = fetchTextResource(cssUrl, false)
+                    if cssBody and not err then
+                        addCss(cssBody)
+                        loaded = loaded + 1
+                    end
                 end
             end
         end
 
         local baseStyle = {
             display = "block",
-            fg = colors.white,
-            bg = colors.black,
+            fg = renderOptions.defaultForeground,
+            bg = renderOptions.defaultBackground,
             whiteSpace = "normal",
             bold = false,
             textTransform = "none",
@@ -1523,8 +1777,8 @@ style, script, head, meta, link, title { display: none; }
         }
         local htmlNode = findFirstTag(root, "html")
         local bodyNode = findFirstTag(root, "body")
-        local htmlStyle = htmlNode and computeStyle(htmlNode, baseStyle, rules) or baseStyle
-        local bodyStyle = bodyNode and computeStyle(bodyNode, htmlStyle, rules) or htmlStyle
+        local htmlStyle = htmlNode and computeStyle(htmlNode, baseStyle, rules, renderOptions) or baseStyle
+        local bodyStyle = bodyNode and computeStyle(bodyNode, htmlStyle, rules, renderOptions) or htmlStyle
 
         return {
             root = root,
@@ -1532,6 +1786,10 @@ style, script, head, meta, link, title { display: none; }
             baseUrl = baseUrl,
             title = pageTitle or "",
             source = htmlText,
+            renderOptions = renderOptions,
+            defaultForeground = ensureContrastingForeground(bodyStyle.fg or htmlStyle.fg or baseStyle.fg, bodyStyle.bg or htmlStyle.bg
+                or baseStyle.bg),
+            defaultBackground = bodyStyle.bg or htmlStyle.bg or baseStyle.bg,
             pageOverflowX = bodyStyle.overflowX or htmlStyle.overflowX or "visible",
             pageOverflowY = bodyStyle.overflowY or htmlStyle.overflowY or "visible",
         }
@@ -1558,10 +1816,11 @@ style, script, head, meta, link, title { display: none; }
         end
 
         local contentWidth = math.max(1, width or 1)
+        local renderOptions = document.renderOptions or resolveRenderOptions()
         local baseStyle = {
             display = "block",
-            fg = colors.white,
-            bg = colors.black,
+            fg = document.defaultForeground or renderOptions.defaultForeground or colors.white,
+            bg = document.defaultBackground or renderOptions.defaultBackground or colors.black,
             whiteSpace = "normal",
             bold = false,
             textTransform = "none",
@@ -1576,7 +1835,7 @@ style, script, head, meta, link, title { display: none; }
 
         local bodyNode = findFirstTag(document.root, "body")
         if bodyNode then
-            local bodyStyle = computeStyle(bodyNode, baseStyle, document.rules)
+            local bodyStyle = computeStyle(bodyNode, baseStyle, document.rules, renderOptions)
             baseStyle.fg = bodyStyle.fg or baseStyle.fg
             baseStyle.bg = bodyStyle.bg or baseStyle.bg
         end
@@ -1600,9 +1859,11 @@ style, script, head, meta, link, title { display: none; }
             controlOrder = {},
             formState = formState or {},
             focusControlKey = focusControlKey,
+            interactiveEnabled = renderOptions.interactiveEnabled ~= false,
+            linksEnabled = renderOptions.linksEnabled ~= false,
         }
         local renderRoot = bodyNode or findFirstTag(document.root, "html") or document.root
-        renderNode(renderRoot, baseStyle, document.rules, writer, context, document.baseUrl)
+        renderNode(renderRoot, baseStyle, document.rules, writer, context, document.baseUrl, renderOptions)
 
         local totalLines = writer:contentLineCount()
         if writer.storeAllLines then

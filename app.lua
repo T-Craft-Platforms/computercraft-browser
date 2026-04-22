@@ -41,10 +41,14 @@ local browserSettings = {
     browser_data_dir = DEFAULT_BROWSER_DATA_DIR,
     downloads_dir = DEFAULT_BROWSER_DOWNLOADS_DIR,
     fullscreen_mode = "normal",
+    browser_engine_level = "advanced",
+    default_bg_color = "black",
+    default_text_color = "white",
 }
 local browserFavorites = {}
 local browserHistory = {}
 local nextBrowserHistoryId = 1
+local activeBrowserStatePath = nil
 local persistBrowserState
 local persistPathSettings
 local state
@@ -87,6 +91,116 @@ local function normalizeFullscreenMode(value)
         return "seamless"
     end
     return "normal"
+end
+
+function parseBrowserEngineLevel(value)
+    local lowered = core.trim(tostring(value or "")):lower()
+    lowered = lowered:gsub("%-", "_")
+    if lowered == "text" or lowered == "textonly" then
+        lowered = "text_only"
+    end
+    if lowered == "text_only" or lowered == "lite" or lowered == "advanced" then
+        return lowered
+    end
+    return nil
+end
+
+function normalizeBrowserEngineLevel(value)
+    return parseBrowserEngineLevel(value) or "advanced"
+end
+
+local SUPPORTED_SETTING_COLOR_VALUES = {
+    white = colors.white,
+    orange = colors.orange,
+    magenta = colors.magenta,
+    lightblue = colors.lightBlue,
+    yellow = colors.yellow,
+    lime = colors.lime,
+    pink = colors.pink,
+    gray = colors.gray,
+    lightgray = colors.lightGray,
+    cyan = colors.cyan,
+    purple = colors.purple,
+    blue = colors.blue,
+    brown = colors.brown,
+    green = colors.green,
+    red = colors.red,
+    black = colors.black,
+}
+
+local SUPPORTED_SETTING_COLOR_ALIASES = {
+    white = "white",
+    orange = "orange",
+    magenta = "magenta",
+    lightblue = "lightblue",
+    light_blue = "lightblue",
+    yellow = "yellow",
+    lime = "lime",
+    pink = "pink",
+    gray = "gray",
+    grey = "gray",
+    lightgray = "lightgray",
+    lightgrey = "lightgray",
+    light_gray = "lightgray",
+    light_grey = "lightgray",
+    cyan = "cyan",
+    purple = "purple",
+    blue = "blue",
+    brown = "brown",
+    green = "green",
+    red = "red",
+    black = "black",
+}
+
+local COLOR_VALUE_TO_SETTING_NAME = {}
+for name, colorValue in pairs(SUPPORTED_SETTING_COLOR_VALUES) do
+    COLOR_VALUE_TO_SETTING_NAME[colorValue] = name
+end
+
+local SUPPORTED_SETTING_COLOR_ERROR_TEXT = table.concat({
+    "white",
+    "orange",
+    "magenta",
+    "lightblue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "lightgray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+}, "/")
+
+function parseSettingColorName(value)
+    local raw = core.trim(tostring(value or "")):lower()
+    if raw == "" then
+        return nil
+    end
+    local compact = raw:gsub("%s+", ""):gsub("%-", "_")
+    local aliased = SUPPORTED_SETTING_COLOR_ALIASES[compact]
+    if aliased then
+        return aliased
+    end
+    if type(core.parseCssColor) == "function" then
+        local parsedValue = core.parseCssColor(raw, nil)
+        if parsedValue and COLOR_VALUE_TO_SETTING_NAME[parsedValue] then
+            return COLOR_VALUE_TO_SETTING_NAME[parsedValue]
+        end
+    end
+    return nil
+end
+
+function normalizeSettingColorName(value, fallbackName)
+    local parsed = parseSettingColorName(value)
+    if parsed then
+        return parsed
+    end
+    return fallbackName
 end
 
 local function normalizeBrowserDataDir(rawPath)
@@ -212,8 +326,15 @@ persistPathSettings = function()
     if not handle then
         return false, "Could not open path settings for writing"
     end
-    handle.write(encoded)
-    handle.close()
+    local okWrite, writeErr = pcall(handle.write, encoded)
+    if not okWrite then
+        pcall(handle.close)
+        return false, tostring(writeErr or "Failed to write path settings")
+    end
+    local okClose, closeErr = pcall(handle.close)
+    if not okClose then
+        return false, tostring(closeErr or "Failed to close path settings")
+    end
     return true, nil
 end
 
@@ -382,6 +503,29 @@ local function setBrowserSetting(key, value)
             return false, "Invalid fullscreen_mode value (expected normal/seamless)"
         end
         browserSettings[normalized] = normalizeFullscreenMode(lowered)
+        if persistBrowserState then
+            persistBrowserState()
+        end
+        return true, nil
+    end
+    if normalized == "browser_engine_level" then
+        local lowered = parseBrowserEngineLevel(value)
+        if not lowered then
+            return false, "Invalid browser_engine_level value (expected text_only/lite/advanced)"
+        end
+        browserSettings[normalized] = lowered
+        if persistBrowserState then
+            persistBrowserState()
+        end
+        return true, nil
+    end
+    if normalized == "default_bg_color" or normalized == "default_text_color" then
+        local colorName = parseSettingColorName(value)
+        if not colorName then
+            return false,
+                "Invalid color value (expected one of: " .. SUPPORTED_SETTING_COLOR_ERROR_TEXT .. ")"
+        end
+        browserSettings[normalized] = colorName
         if persistBrowserState then
             persistBrowserState()
         end
@@ -644,6 +788,7 @@ local function loadBrowserState()
         statePath = LEGACY_BROWSER_STATE_PATH
     end
     if not fs.exists(statePath) then
+        activeBrowserStatePath = browserStatePath()
         return false, "No saved state"
     end
 
@@ -681,6 +826,9 @@ local function loadBrowserState()
     browserSettings.browser_data_dir = currentBrowserDataDir()
     browserSettings.downloads_dir = currentDownloadsDir()
     browserSettings.fullscreen_mode = normalizeFullscreenMode(browserSettings.fullscreen_mode)
+    browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
+    browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
+    browserSettings.default_text_color = normalizeSettingColorName(browserSettings.default_text_color, "white")
 
     browserFavorites = {}
     if type(decoded.favorites) == "table" then
@@ -744,6 +892,7 @@ local function loadBrowserState()
     if persistPathSettings then
         persistPathSettings()
     end
+    activeBrowserStatePath = statePath
     return true, nil
 end
 
@@ -776,17 +925,41 @@ persistBrowserState = function(forceWrite)
         return false, "Failed to encode state"
     end
 
-    local handle = fs.open(browserStatePath(), "w")
+    local targetPath = browserStatePath()
+    if activeBrowserStatePath and activeBrowserStatePath ~= "" then
+        targetPath = activeBrowserStatePath
+    elseif fs.exists(LEGACY_BROWSER_STATE_PATH) and not fs.exists(targetPath) then
+        targetPath = LEGACY_BROWSER_STATE_PATH
+    end
+
+    local targetDir = fs.getDir(targetPath)
+    if targetDir and targetDir ~= "" and not ensureDirExists(targetDir) then
+        return false, "Could not prepare state directory"
+    end
+
+    local handle = fs.open(targetPath, "w")
     if not handle then
         return false, "Could not open state file for writing"
     end
-    handle.write(encoded)
-    handle.close()
+
+    local okWrite, writeErr = pcall(handle.write, encoded)
+    if not okWrite then
+        pcall(handle.close)
+        return false, tostring(writeErr or "Failed to write state file")
+    end
+    local okClose, closeErr = pcall(handle.close)
+    if not okClose then
+        return false, tostring(closeErr or "Failed to close state file")
+    end
+    activeBrowserStatePath = targetPath
     return true, nil
 end
 
 loadPathSettings()
 loadBrowserState()
+browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
+browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
+browserSettings.default_text_color = normalizeSettingColorName(browserSettings.default_text_color, "white")
 if fs.exists("/.vfs") then
     local targetVfsRoot = currentVfsRoot()
     local vfsParent = fs.getDir(targetVfsRoot)
@@ -823,6 +996,15 @@ local content = createContent({
     core = core,
     html = html,
     network = network,
+    getEngineLevel = function()
+        return normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
+    end,
+    getDefaultBackgroundColor = function()
+        return normalizeSettingColorName(browserSettings.default_bg_color, "black")
+    end,
+    getDefaultTextColor = function()
+        return normalizeSettingColorName(browserSettings.default_text_color, "white")
+    end,
 })
 local sandbox = createSandbox({
     core = core,
@@ -931,6 +1113,14 @@ local function parseSettingsStatusMessage(headers, currentUrl)
         return nil
     end
     return parsed
+end
+
+function parseInteger(value, fallback)
+    local number = tonumber(value)
+    if not number then
+        return fallback
+    end
+    return math.floor(number)
 end
 
 local function createTab(initialUrl)
@@ -1779,6 +1969,8 @@ function ensureModalInput(spec)
     if spec.input.maxLen ~= nil then
         spec.input.maxLen = math.max(1, math.floor(tonumber(spec.input.maxLen) or 256))
     end
+    local cursor = tonumber(spec.input.cursor) or (#spec.input.value + 1)
+    spec.input.cursor = clamp(math.floor(cursor), 1, #spec.input.value + 1)
     return spec.input
 end
 
@@ -1792,6 +1984,7 @@ function appendModalInput(spec, text)
         return false
     end
     local value = tostring(input.value or "")
+    local cursor = clamp(math.floor(tonumber(input.cursor) or (#value + 1)), 1, #value + 1)
     if input.maxLen then
         local remaining = input.maxLen - #value
         if remaining <= 0 then
@@ -1801,7 +1994,10 @@ function appendModalInput(spec, text)
             chunk = chunk:sub(1, remaining)
         end
     end
-    input.value = value .. chunk
+    local before = value:sub(1, cursor - 1)
+    local after = value:sub(cursor)
+    input.value = before .. chunk .. after
+    input.cursor = clamp(cursor + #chunk, 1, #input.value + 1)
     return true
 end
 
@@ -1811,11 +2007,63 @@ function deleteModalInputBack(spec)
         return false
     end
     local value = tostring(input.value or "")
-    if #value <= 0 then
+    local cursor = clamp(math.floor(tonumber(input.cursor) or (#value + 1)), 1, #value + 1)
+    if #value <= 0 or cursor <= 1 then
         return false
     end
-    input.value = value:sub(1, #value - 1)
+    local before = value:sub(1, cursor - 2)
+    local after = value:sub(cursor)
+    input.value = before .. after
+    input.cursor = cursor - 1
     return true
+end
+
+function deleteModalInputForward(spec)
+    local input = ensureModalInput(spec)
+    if not input then
+        return false
+    end
+    local value = tostring(input.value or "")
+    local cursor = clamp(math.floor(tonumber(input.cursor) or (#value + 1)), 1, #value + 1)
+    if #value <= 0 or cursor > #value then
+        return false
+    end
+    local before = value:sub(1, cursor - 1)
+    local after = value:sub(cursor + 1)
+    input.value = before .. after
+    input.cursor = clamp(cursor, 1, #input.value + 1)
+    return true
+end
+
+function moveModalInputCursor(spec, delta)
+    local input = ensureModalInput(spec)
+    if not input then
+        return false
+    end
+    local value = tostring(input.value or "")
+    local cursor = clamp(math.floor(tonumber(input.cursor) or (#value + 1)), 1, #value + 1)
+    local moved = clamp(cursor + math.floor(tonumber(delta) or 0), 1, #value + 1)
+    if moved == cursor then
+        return false
+    end
+    input.cursor = moved
+    return true
+end
+
+function setModalInputCursor(spec, cursorPos)
+    local input = ensureModalInput(spec)
+    if not input then
+        return false
+    end
+    local value = tostring(input.value or "")
+    input.cursor = clamp(parseInteger(cursorPos, (#value + 1)), 1, #value + 1)
+    return true
+end
+
+function withModalCursorMarker(text, cursor)
+    local source = tostring(text or "")
+    local cursorPos = clamp(parseInteger(cursor, (#source + 1)), 1, #source + 1)
+    return source:sub(1, cursorPos - 1) .. "|" .. source:sub(cursorPos), cursorPos
 end
 
 local function drawModal()
@@ -1917,16 +2165,27 @@ local function drawModal()
             shown = placeholder
         end
         local maxChars = math.max(0, panelWidth - 4)
-        if #shown > maxChars then
-            shown = shown:sub(#shown - maxChars + 1)
+        local displayed = shown
+        local cursorPos = clamp(parseInteger(input.cursor, (#inputValue + 1)), 1, #inputValue + 1)
+        if #displayed > maxChars then
+            local start = 1
+            if cursorPos > maxChars then
+                start = cursorPos - maxChars + 1
+            end
+            if start + maxChars - 1 > #displayed then
+                start = math.max(1, #displayed - maxChars + 1)
+            end
+            displayed = displayed:sub(start, start + maxChars - 1)
+            cursorPos = clamp(cursorPos - start + 1, 1, #displayed + 1)
         end
+        displayed = withModalCursorMarker(displayed, cursorPos)
         local inputBg = colors.white
         local inputFg = (inputValue == "" and placeholder ~= "") and colors.gray or colors.black
         writeLine(inputY, string.rep(" ", math.max(0, panelWidth - 2)), inputBg, inputFg)
         term.setCursorPos(x1 + 1, inputY)
         term.setBackgroundColor(inputBg)
         term.setTextColor(inputFg)
-        term.write(shown)
+        term.write(displayed)
     end
 
     local labels = {}
@@ -1984,7 +2243,7 @@ local function drawModal()
         cursorX = cursorX + #label + buttonGap
     end
 
-    term.setCursorBlink(hasInput)
+    term.setCursorBlink(false)
     modal.layout = {
         panel = { x1 = x1, x2 = x2, y1 = y1, y2 = y2 },
         buttons = layoutButtons,
@@ -2160,10 +2419,37 @@ local function handleModalEvent(event)
 
     if name == "key" then
         local key = event[2]
-        if (key == keys.backspace or key == keys.delete) and ensureModalInput(spec) then
-            deleteModalInputBack(spec)
-            draw()
-            return true
+        if ensureModalInput(spec) then
+            if key == keys.left then
+                moveModalInputCursor(spec, -1)
+                draw()
+                return true
+            end
+            if key == keys.right then
+                moveModalInputCursor(spec, 1)
+                draw()
+                return true
+            end
+            if key == keys.home then
+                setModalInputCursor(spec, 1)
+                draw()
+                return true
+            end
+            if key == keys["end"] then
+                setModalInputCursor(spec, math.huge)
+                draw()
+                return true
+            end
+            if key == keys.backspace then
+                deleteModalInputBack(spec)
+                draw()
+                return true
+            end
+            if key == keys.delete then
+                deleteModalInputForward(spec)
+                draw()
+                return true
+            end
         end
         local action = nil
         if type(spec.keyActions) == "table" then
@@ -2204,6 +2490,13 @@ local function handleModalEvent(event)
             end
         end
         if layout and layout.input and y == layout.input.y and x >= layout.input.x1 and x <= layout.input.x2 then
+            local input = ensureModalInput(spec)
+            if input then
+                local value = tostring(input.value or "")
+                local relative = x - layout.input.x1 + 1
+                local cursor = clamp(relative, 1, #value + 1)
+                setModalInputCursor(spec, cursor)
+            end
             draw()
             return true
         end
@@ -2802,8 +3095,17 @@ function downloadCurrentPage(tab)
         target.status = "Download failed: cannot write file"
         return false
     end
-    handle.write(body)
-    handle.close()
+    local okWrite, writeErr = pcall(handle.write, body)
+    if not okWrite then
+        pcall(handle.close)
+        target.status = "Download failed: " .. tostring(writeErr or "could not write file")
+        return false
+    end
+    local okClose, closeErr = pcall(handle.close)
+    if not okClose then
+        target.status = "Download failed: " .. tostring(closeErr or "could not close file")
+        return false
+    end
 
     target.status = ("Downloaded %d bytes to %s"):format(#tostring(body or ""), tostring(savePath))
     return true
@@ -2979,7 +3281,8 @@ local function isEditableFormControl(control)
         or inputType == "submit"
         or inputType == "reset"
         or inputType == "button"
-        or inputType == "image" then
+        or inputType == "image"
+        or inputType == "color" then
         return false
     end
     return true
@@ -3046,130 +3349,140 @@ local function removeFromFormControl(stateEntry, backward)
     clampControlCursor(stateEntry)
 end
 
+function copyControlDefaults(defaults)
+    local nextState = {}
+    if type(defaults) ~= "table" then
+        return nextState
+    end
+    for defaultKey in pairs(defaults) do
+        if type(defaults[defaultKey]) == "table" then
+            local copied = {}
+            for i = 1, #defaults[defaultKey] do
+                copied[i] = defaults[defaultKey][i]
+            end
+            nextState[defaultKey] = copied
+        else
+            nextState[defaultKey] = defaults[defaultKey]
+        end
+    end
+    return nextState
+end
+
 local function resetForm(tab, formId)
     local target = tab or activeTab()
-    local meta = target.formMeta or {}
-    local forms = meta.formsById or {}
-    local controls = meta.controlsByKey or {}
-    local form = forms[formId]
+    local meta = target.formMeta
+    local form = meta and meta.formsById and meta.formsById[formId]
     if not form then
         return false
     end
 
-    target.formState = target.formState or {}
+    local controls = meta.controlsByKey or {}
+    local formState = target.formState or {}
+    target.formState = formState
     for _, key in ipairs(form.controlKeys or {}) do
         local control = controls[key]
         if control then
-            local nextState = {}
-            for defaultKey, defaultValue in pairs(control.defaults or {}) do
-                if type(defaultValue) == "table" then
-                    local copied = {}
-                    for i, value in ipairs(defaultValue) do
-                        copied[i] = value
-                    end
-                    nextState[defaultKey] = copied
-                else
-                    nextState[defaultKey] = defaultValue
-                end
-            end
-            target.formState[key] = nextState
+            formState[key] = copyControlDefaults(control.defaults)
         end
     end
     bumpRenderRevision(target)
     return true
 end
 
-local function collectFormFields(tab, formId, submitterKey)
+function pushFormField(fields, name, value)
+    fields[#fields + 1] = {
+        name = name,
+        value = tostring(value or ""),
+    }
+end
+
+function collectInputFormField(fields, control, stateEntry, name, key, submitterKey)
+    local inputType = tostring(control.inputType or "text"):lower()
+    if inputType == "submit" or inputType == "image" then
+        if key == submitterKey and name ~= "" then
+            pushFormField(fields, name, (stateEntry and stateEntry.value) or control.defaultValue or "")
+        end
+        return
+    end
+    if inputType == "reset" or inputType == "button" then
+        return
+    end
+    if inputType == "checkbox" or inputType == "radio" then
+        if stateEntry and stateEntry.checked and name ~= "" then
+            pushFormField(fields, name, stateEntry.value or control.defaultValue or "on")
+        end
+        return
+    end
+    if name ~= "" then
+        pushFormField(fields, name, (stateEntry and stateEntry.value) or control.defaultValue or "")
+    end
+end
+
+function collectSelectFormField(fields, control, stateEntry, name)
+    if name == "" then
+        return
+    end
+    local options = control.options or {}
+    if control.multiple then
+        for _, selectedIndex in ipairs((stateEntry and stateEntry.selectedIndices) or {}) do
+            local option = options[selectedIndex]
+            if option then
+                pushFormField(fields, name, option.value or option.label or "")
+            end
+        end
+        return
+    end
+    local selectedIndex = (stateEntry and tonumber(stateEntry.selectedIndex)) or control.defaultSelectedIndex or 1
+    selectedIndex = clamp(math.floor(selectedIndex or 1), 1, math.max(1, #options))
+    local option = options[selectedIndex]
+    if option then
+        pushFormField(fields, name, option.value or option.label or "")
+    end
+end
+
+function collectButtonFormField(fields, control, stateEntry, name, key, submitterKey)
+    if name == "" then
+        return
+    end
+    local buttonType = tostring(control.buttonType or "submit"):lower()
+    if buttonType == "submit" and key == submitterKey then
+        pushFormField(fields, name, (stateEntry and stateEntry.value) or control.value or control.defaultValue or "")
+    end
+end
+
+function collectFormFields(tab, formId, submitterKey)
     local target = tab or activeTab()
-    local meta = target.formMeta or {}
-    local forms = meta.formsById or {}
-    local controls = meta.controlsByKey or {}
-    local form = forms[formId]
+    local formMeta = target.formMeta or {}
+    local form = formMeta.formsById and formMeta.formsById[formId]
     if not form then
         return {}
     end
 
+    local controls = formMeta.controlsByKey or {}
+    local formState = target.formState or {}
     local fields = {}
     for _, key in ipairs(form.controlKeys or {}) do
         local control = controls[key]
-        local stateEntry = target.formState and target.formState[key] or nil
         if control and not control.disabled then
+            local stateEntry = formState[key]
             local name = trim(tostring(control.name or ""))
             if control.tag == "input" then
-                local inputType = tostring(control.inputType or "text"):lower()
-                if inputType == "submit" or inputType == "image" then
-                    if key == submitterKey and name ~= "" then
-                        fields[#fields + 1] = {
-                            name = name,
-                            value = tostring((stateEntry and stateEntry.value) or control.defaultValue or ""),
-                        }
-                    end
-                elseif inputType == "reset" or inputType == "button" then
-                    -- Never included in payload.
-                elseif inputType == "checkbox" or inputType == "radio" then
-                    if stateEntry and stateEntry.checked and name ~= "" then
-                        fields[#fields + 1] = {
-                            name = name,
-                            value = tostring(stateEntry.value or control.defaultValue or "on"),
-                        }
-                    end
-                else
-                    if name ~= "" then
-                        fields[#fields + 1] = {
-                            name = name,
-                            value = tostring((stateEntry and stateEntry.value) or control.defaultValue or ""),
-                        }
-                    end
-                end
+                collectInputFormField(fields, control, stateEntry, name, key, submitterKey)
             elseif control.tag == "textarea" then
                 if name ~= "" then
-                    fields[#fields + 1] = {
-                        name = name,
-                        value = tostring((stateEntry and stateEntry.value) or control.defaultValue or ""),
-                    }
+                    pushFormField(fields, name, (stateEntry and stateEntry.value) or control.defaultValue or "")
                 end
             elseif control.tag == "select" then
-                if name ~= "" then
-                    local options = control.options or {}
-                    if control.multiple then
-                        local selected = (stateEntry and stateEntry.selectedIndices) or {}
-                        for _, index in ipairs(selected) do
-                            local option = options[index]
-                            if option then
-                                fields[#fields + 1] = {
-                                    name = name,
-                                    value = tostring(option.value or option.label or ""),
-                                }
-                            end
-                        end
-                    else
-                        local index = stateEntry and tonumber(stateEntry.selectedIndex) or control.defaultSelectedIndex or 1
-                        index = clamp(math.floor(index or 1), 1, math.max(1, #options))
-                        local option = options[index]
-                        if option then
-                            fields[#fields + 1] = {
-                                name = name,
-                                value = tostring(option.value or option.label or ""),
-                            }
-                        end
-                    end
-                end
+                collectSelectFormField(fields, control, stateEntry, name)
             elseif control.tag == "button" then
-                local buttonType = tostring(control.buttonType or "submit"):lower()
-                if buttonType == "submit" and key == submitterKey and name ~= "" then
-                    fields[#fields + 1] = {
-                        name = name,
-                        value = tostring((stateEntry and stateEntry.value) or control.value or control.defaultValue or ""),
-                    }
-                end
+                collectButtonFormField(fields, control, stateEntry, name, key, submitterKey)
             end
         end
     end
-
     return fields
 end
 
-local function refreshCurrentDocumentWithoutNavigation(tab)
+function refreshCurrentDocumentWithoutNavigation(tab)
     local target = tab or activeTab()
     local currentUrl = trim(target.currentUrl or "")
     if currentUrl == "" then
@@ -3231,7 +3544,7 @@ local function refreshCurrentDocumentWithoutNavigation(tab)
     return true
 end
 
-local function submitForm(tab, formId, submitterKey)
+function submitForm(tab, formId, submitterKey)
     local target = tab or activeTab()
     local meta = target.formMeta or {}
     local forms = meta.formsById or {}
@@ -3297,7 +3610,7 @@ local function submitForm(tab, formId, submitterKey)
     return true
 end
 
-local function cycleSelect(tab, control, stateEntry, direction)
+function cycleSelect(tab, control, stateEntry, direction)
     local target = tab or activeTab()
     local options = control.options or {}
     if #options == 0 then
@@ -3316,7 +3629,38 @@ local function cycleSelect(tab, control, stateEntry, direction)
     return true
 end
 
-local function activateFormControl(tab, key)
+function cycleColorInput(tab, control, stateEntry, direction)
+    local target = tab or activeTab()
+    local options = control.colorOptions or {}
+    if #options == 0 then
+        return false
+    end
+
+    local currentIndex = tonumber(stateEntry.colorIndex)
+    if not currentIndex then
+        local currentValue = trim(tostring(stateEntry.value or "")):lower()
+        for i, name in ipairs(options) do
+            if name == currentValue then
+                currentIndex = i
+                break
+            end
+        end
+    end
+    currentIndex = clamp(math.floor(currentIndex or 1), 1, #options)
+    local nextIndex = currentIndex + (direction or 1)
+    if nextIndex < 1 then
+        nextIndex = #options
+    elseif nextIndex > #options then
+        nextIndex = 1
+    end
+
+    stateEntry.colorIndex = nextIndex
+    stateEntry.value = tostring(options[nextIndex] or options[1] or "white")
+    bumpRenderRevision(target)
+    return true
+end
+
+function activateFormControl(tab, key)
     local target = tab or activeTab()
     local control, stateEntry = formControl(target, key)
     if not control or control.disabled then
@@ -3361,6 +3705,9 @@ local function activateFormControl(tab, key)
             end
             return true
         end
+        if inputType == "color" then
+            return cycleColorInput(target, control, stateEntry, 1)
+        end
         if inputType == "reset" then
             if control.formId then
                 return resetForm(target, control.formId)
@@ -3400,7 +3747,7 @@ local function activateFormControl(tab, key)
     return false
 end
 
-local function moveFocusedFormControl(tab, direction)
+function moveFocusedFormControl(tab, direction)
     local target = tab or activeTab()
     local meta = target.formMeta or {}
     local order = meta.controlOrder or {}
@@ -3435,7 +3782,7 @@ local function moveFocusedFormControl(tab, direction)
     return false
 end
 
-local function handleFocusedFormControlKey(tab, key)
+function handleFocusedFormControlKey(tab, key)
     local target = tab or activeTab()
     if not target.focusedFormControl then
         return false
@@ -3464,6 +3811,9 @@ local function handleFocusedFormControlKey(tab, key)
         end
         if control.tag == "input" then
             local inputType = tostring(control.inputType or "text"):lower()
+            if inputType == "color" then
+                return cycleColorInput(target, control, stateEntry, 1)
+            end
             if inputType == "reset" or inputType == "submit" or inputType == "image" then
                 return activateFormControl(target, control.key)
             end
@@ -3488,6 +3838,9 @@ local function handleFocusedFormControlKey(tab, key)
     if key == keys.space then
         if control.tag == "input" then
             local inputType = tostring(control.inputType or "text"):lower()
+            if inputType == "color" then
+                return cycleColorInput(target, control, stateEntry, 1)
+            end
             if inputType == "checkbox" or inputType == "radio" or inputType == "submit" or inputType == "reset" or inputType == "button" then
                 return activateFormControl(target, control.key)
             end
@@ -3498,6 +3851,10 @@ local function handleFocusedFormControlKey(tab, key)
 
     if control.tag == "input" then
         local inputType = tostring(control.inputType or "text"):lower()
+        if inputType == "color" and (key == keys.left or key == keys.up or key == keys.right or key == keys.down) then
+            local direction = (key == keys.left or key == keys.up) and -1 or 1
+            return cycleColorInput(target, control, stateEntry, direction)
+        end
         if (inputType == "number" or inputType == "range")
             and (key == keys.up or key == keys.down)
             and isEditableFormControl(control) then
@@ -3556,7 +3913,7 @@ local function handleFocusedFormControlKey(tab, key)
     return true
 end
 
-local function handleFocusedFormControlChar(tab, character)
+function handleFocusedFormControlChar(tab, character)
     local target = tab or activeTab()
     if not target.focusedFormControl then
         return false
@@ -3569,7 +3926,7 @@ local function handleFocusedFormControlChar(tab, character)
     return true
 end
 
-local function handleFocusedFormControlPaste(tab, text)
+function handleFocusedFormControlPaste(tab, text)
     local target = tab or activeTab()
     if not target.focusedFormControl then
         return false
@@ -3582,7 +3939,7 @@ local function handleFocusedFormControlPaste(tab, text)
     return true
 end
 
-local function loadDocumentWithAbort(tab, normalized, allowFallback, requestOptions)
+function loadDocumentWithAbort(tab, normalized, allowFallback, requestOptions)
     if not parallel or not parallel.waitForAny then
         local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback, requestOptions)
         if not body then
@@ -3685,12 +4042,12 @@ local function loadDocumentWithAbort(tab, normalized, allowFallback, requestOpti
     return result, aborted
 end
 
-local function isLuaUrl(url)
+function isLuaUrl(url)
     local stripped = (url or ""):gsub("[?#].*$", ""):lower()
     return stripped:match("%.lua$") ~= nil
 end
 
-local function buildLuaSourceHtml(url, body, heading, statusLine)
+function buildLuaSourceHtml(url, body, heading, statusLine)
     return "<html><body><h3>" .. escapeHtml(heading) .. "</h3>"
         .. "<p><b>URL:</b> <code>" .. escapeHtml(url) .. "</code></p>"
         .. (statusLine and ("<p><i>" .. escapeHtml(statusLine) .. "</i></p><hr>") or "")
@@ -4079,7 +4436,7 @@ function appletRunningInTab(tab)
     return not not (applet and applet.running and applet.session and not applet.session.done)
 end
 
-local function isBrowserManagedTimerId(timerId)
+function isBrowserManagedTimerId(timerId)
     if state.animationTimer and timerId == state.animationTimer then
         return true
     end
@@ -4205,132 +4562,16 @@ function dispatchEventToBackgroundApplets(event)
     return delivered
 end
 
-navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
-    local target = tab or activeTab()
-    local normalized, inferred = normalizeInputUrl(rawInput)
-    local normalizedLower = trim(tostring(normalized or "")):lower()
-    state.highUsage.loadingFrame = true
-
-    if startsWith(normalizedLower, APPLET_ACTION_PREFIX) then
-        target.loading = false
-        return handleAppletActionNavigation(normalized, target)
-    end
-
-    stopAppletForTab(target, true)
-
-    target.loading = true
-    target.status = "Loading " .. normalized
-    target.urlInput = normalized
-    target.urlCursor = #target.urlInput + 1
-    target.urlOffset = 0
-    clearUrlSelection(target)
+function finalizeNavigationRender(target)
+    target.scroll = 0
+    renderDocument(target)
     draw()
-
-    -- Detect .lua URLs and handle applet execution
-    if isLuaUrl(normalized) then
-        local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback or inferred, requestOptions)
-        target.loading = false
-
-        if not body then
-            -- Failed to fetch; show error page
-            local errUrl = normalized
-            local errBody = makeErrorPage(errUrl, err or "Unknown error")
-            target.document = buildDocument(errBody, errUrl)
-            target.currentUrl = errUrl
-            target.urlInput = errUrl
-            target.urlCursor = #target.urlInput + 1
-            target.urlOffset = 0
-            target.status = target.document.title or ""
-            target.urlFocus = false
-            clearUrlSelection(target)
-            clearPageSelection(target)
-            target.formState = {}
-            target.formMeta = nil
-            target.focusedFormControl = nil
-            target.renderRevision = 0
-            target.lastRenderSignature = nil
-            target.aboutUpdateIntervalMs = nil
-            target.settingsStickyStatus = nil
-            target.pendingApplet = nil
-            if addToHistory then
-                pushHistory(target, errUrl)
-            end
-            target.scroll = 0
-            renderDocument(target)
-            draw()
-            if scheduleAboutUpdateTimer then
-                scheduleAboutUpdateTimer()
-            end
-            return false
-        end
-
-        local resolvedUrl = finalUrl or normalized
-        target.pendingApplet = {
-            sourceUrl = resolvedUrl,
-            sourceCode = body,
-            addToHistory = addToHistory == true,
-            trackHistory = shouldTrackNavigationInHistory(normalized),
-            tabHistoryCommitted = false,
-            browserHistoryCommitted = false,
-            historyCommitted = false,
-        }
-        if addToHistory then
-            pushHistory(target, resolvedUrl)
-        elseif target.historyIndex > 0 then
-            target.history[target.historyIndex] = resolvedUrl
-        else
-            pushHistory(target, resolvedUrl)
-        end
-        target.pendingApplet.tabHistoryCommitted = true
-        target.document = buildDocument(buildLuaAppletPromptHtml(resolvedUrl), resolvedUrl)
-        target.currentUrl = resolvedUrl
-        target.urlInput = resolvedUrl
-        target.urlCursor = #target.urlInput + 1
-        target.urlOffset = 0
-        target.status = "Executable detected: " .. resolvedUrl
-
-        target.urlFocus = false
-        clearUrlSelection(target)
-        clearPageSelection(target)
-        target.formState = {}
-        target.formMeta = nil
-        target.focusedFormControl = nil
-        target.renderRevision = 0
-        target.lastRenderSignature = nil
-        target.aboutUpdateIntervalMs = nil
-        target.settingsStickyStatus = nil
-        target.scroll = 0
-        renderDocument(target)
-        draw()
-        if scheduleAboutUpdateTimer then
-            scheduleAboutUpdateTimer()
-        end
-        return true
+    if scheduleAboutUpdateTimer then
+        scheduleAboutUpdateTimer()
     end
+end
 
-    local result, aborted = loadDocumentWithAbort(target, normalized, allowFallback or inferred, requestOptions)
-    target.loading = false
-    if aborted then
-        target.status = "Load aborted"
-        draw()
-        if scheduleAboutUpdateTimer then
-            scheduleAboutUpdateTimer()
-        end
-        return false
-    end
-
-    local finalUrl = normalized
-    local document = nil
-    if result then
-        finalUrl = result.finalUrl or finalUrl
-        if result.document then
-            document = result.document
-        end
-    end
-    if not document then
-        document = buildDocument(makeErrorPage(normalized, "Unknown error"), normalized)
-    end
-
+function applyLoadedDocumentToTab(target, finalUrl, document, aboutUpdateIntervalMs, settingsStickyStatus)
     target.document = document
     target.currentUrl = finalUrl
     target.urlInput = finalUrl
@@ -4345,28 +4586,125 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     target.focusedFormControl = nil
     target.renderRevision = 0
     target.lastRenderSignature = nil
-    target.aboutUpdateIntervalMs = result and result.aboutUpdateIntervalMs or nil
-    target.settingsStickyStatus = result and result.settingsStickyStatus or nil
+    target.aboutUpdateIntervalMs = aboutUpdateIntervalMs
+    target.settingsStickyStatus = settingsStickyStatus
     target.pendingApplet = nil
+end
 
+function commitTabHistoryUrl(target, addToHistory, url)
     if addToHistory then
-        pushHistory(target, finalUrl)
+        pushHistory(target, url)
     elseif target.historyIndex > 0 then
-        target.history[target.historyIndex] = finalUrl
+        target.history[target.historyIndex] = url
     else
-        pushHistory(target, finalUrl)
+        pushHistory(target, url)
     end
+end
+
+function handleLuaNavigation(target, normalized, allowFallback, requestOptions, addToHistory)
+    local body, finalUrl, _, err = fetchTextResource(normalized, allowFallback, requestOptions)
+    target.loading = false
+
+    if not body then
+        local errUrl = normalized
+        local errDocument = buildDocument(makeErrorPage(errUrl, err or "Unknown error"), errUrl)
+        applyLoadedDocumentToTab(target, errUrl, errDocument, nil, nil)
+        if addToHistory then
+            pushHistory(target, errUrl)
+        end
+        finalizeNavigationRender(target)
+        return false
+    end
+
+    local resolvedUrl = finalUrl or normalized
+    target.pendingApplet = {
+        sourceUrl = resolvedUrl,
+        sourceCode = body,
+        addToHistory = addToHistory == true,
+        trackHistory = shouldTrackNavigationInHistory(normalized),
+        tabHistoryCommitted = false,
+        browserHistoryCommitted = false,
+        historyCommitted = false,
+    }
+    commitTabHistoryUrl(target, addToHistory, resolvedUrl)
+    target.pendingApplet.tabHistoryCommitted = true
+
+    local promptDocument = buildDocument(buildLuaAppletPromptHtml(resolvedUrl), resolvedUrl)
+    applyLoadedDocumentToTab(target, resolvedUrl, promptDocument, nil, nil)
+    target.status = "Executable detected: " .. resolvedUrl
+    target.pendingApplet = {
+        sourceUrl = resolvedUrl,
+        sourceCode = body,
+        addToHistory = addToHistory == true,
+        trackHistory = shouldTrackNavigationInHistory(normalized),
+        tabHistoryCommitted = true,
+        browserHistoryCommitted = false,
+        historyCommitted = false,
+    }
+    finalizeNavigationRender(target)
+    return true
+end
+
+function handleDocumentNavigation(target, normalized, allowFallback, requestOptions, addToHistory)
+    local result, aborted = loadDocumentWithAbort(target, normalized, allowFallback, requestOptions)
+    target.loading = false
+    if aborted then
+        target.status = "Load aborted"
+        draw()
+        if scheduleAboutUpdateTimer then
+            scheduleAboutUpdateTimer()
+        end
+        return false
+    end
+
+    local finalUrl = normalized
+    local document = nil
+    local aboutUpdateIntervalMs = nil
+    local settingsStickyStatus = nil
+    if result then
+        finalUrl = result.finalUrl or finalUrl
+        document = result.document
+        aboutUpdateIntervalMs = result.aboutUpdateIntervalMs
+        settingsStickyStatus = result.settingsStickyStatus
+    end
+    if not document then
+        document = buildDocument(makeErrorPage(normalized, "Unknown error"), normalized)
+    end
+
+    applyLoadedDocumentToTab(target, finalUrl, document, aboutUpdateIntervalMs, settingsStickyStatus)
+    commitTabHistoryUrl(target, addToHistory, finalUrl)
     if shouldTrackNavigationInHistory(normalized) then
         addBrowserHistory(finalUrl, target.document and target.document.title or "")
     end
-
-    target.scroll = 0
-    renderDocument(target)
-    draw()
-    if scheduleAboutUpdateTimer then
-        scheduleAboutUpdateTimer()
-    end
+    finalizeNavigationRender(target)
     return true
+end
+
+navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
+    local target = tab or activeTab()
+    local normalized, inferred = normalizeInputUrl(rawInput)
+    local normalizedLower = trim(tostring(normalized or "")):lower()
+    local shouldAllowFallback = allowFallback or inferred
+    state.highUsage.loadingFrame = true
+
+    if startsWith(normalizedLower, APPLET_ACTION_PREFIX) then
+        target.loading = false
+        return handleAppletActionNavigation(normalized, target)
+    end
+
+    stopAppletForTab(target, true)
+    target.loading = true
+    target.status = "Loading " .. normalized
+    target.urlInput = normalized
+    target.urlCursor = #target.urlInput + 1
+    target.urlOffset = 0
+    clearUrlSelection(target)
+    draw()
+
+    if isLuaUrl(normalized) then
+        return handleLuaNavigation(target, normalized, shouldAllowFallback, requestOptions, addToHistory)
+    end
+    return handleDocumentNavigation(target, normalized, shouldAllowFallback, requestOptions, addToHistory)
 end
 
 function goBack()
