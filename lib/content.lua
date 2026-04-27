@@ -21,7 +21,7 @@ return function(deps)
     local fetchTextResource = network.fetchTextResource
     local getEngineLevel = deps.getEngineLevel
     local getDefaultBackgroundColor = deps.getDefaultBackgroundColor
-    local getDefaultTextColor = deps.getDefaultTextColor
+    local getDefaultForegroundColor = deps.getDefaultForegroundColor or deps.getDefaultTextColor
     local YIELD_EVENT = "__cc_browser_content_yield"
     local YIELD_STEP_BUDGET = 1400
     local yieldSteps = 0
@@ -198,14 +198,22 @@ return function(deps)
         return fallback
     end
 
-    local function resolveRenderOptions()
+    local function isAboutPageUrl(url)
+        local lowered = trim(tostring(url or "")):lower()
+        return lowered:sub(1, 6) == "about:"
+    end
+
+    local function resolveRenderOptions(baseUrl)
         local engineLevel = normalizeEngineLevel(type(getEngineLevel) == "function" and getEngineLevel() or "advanced")
+        if isAboutPageUrl(baseUrl) then
+            engineLevel = "advanced"
+        end
         local defaultBg = parseConfiguredColorValue(
             type(getDefaultBackgroundColor) == "function" and getDefaultBackgroundColor() or "black",
             colors.black
         )
         local defaultFg = parseConfiguredColorValue(
-            type(getDefaultTextColor) == "function" and getDefaultTextColor() or "white",
+            type(getDefaultForegroundColor) == "function" and getDefaultForegroundColor() or "white",
             colors.white
         )
         defaultFg = ensureContrastingForeground(defaultFg, defaultBg)
@@ -1701,7 +1709,7 @@ return function(deps)
     end
 
     local function buildDocument(htmlText, baseUrl)
-        local renderOptions = resolveRenderOptions()
+        local renderOptions = resolveRenderOptions(baseUrl)
         local root = parseHTML(htmlText)
         local nextNodeId = 0
         walkNode(root, function(node)
@@ -1763,7 +1771,7 @@ style, script, head, meta, link, title { display: none; }
         local baseStyle = {
             display = "block",
             fg = renderOptions.defaultForeground,
-            bg = renderOptions.defaultBackground,
+            bg = nil,
             whiteSpace = "normal",
             bold = false,
             textTransform = "none",
@@ -1780,6 +1788,7 @@ style, script, head, meta, link, title { display: none; }
         local htmlStyle = htmlNode and computeStyle(htmlNode, baseStyle, rules, renderOptions) or baseStyle
         local bodyStyle = bodyNode and computeStyle(bodyNode, htmlStyle, rules, renderOptions) or htmlStyle
 
+        local pageBackground = bodyStyle.bg or htmlStyle.bg or renderOptions.defaultBackground
         return {
             root = root,
             rules = rules,
@@ -1787,9 +1796,8 @@ style, script, head, meta, link, title { display: none; }
             title = pageTitle or "",
             source = htmlText,
             renderOptions = renderOptions,
-            defaultForeground = ensureContrastingForeground(bodyStyle.fg or htmlStyle.fg or baseStyle.fg, bodyStyle.bg or htmlStyle.bg
-                or baseStyle.bg),
-            defaultBackground = bodyStyle.bg or htmlStyle.bg or baseStyle.bg,
+            defaultForeground = ensureContrastingForeground(bodyStyle.fg or htmlStyle.fg or baseStyle.fg, pageBackground),
+            defaultBackground = pageBackground,
             pageOverflowX = bodyStyle.overflowX or htmlStyle.overflowX or "visible",
             pageOverflowY = bodyStyle.overflowY or htmlStyle.overflowY or "visible",
         }
@@ -1816,11 +1824,11 @@ style, script, head, meta, link, title { display: none; }
         end
 
         local contentWidth = math.max(1, width or 1)
-        local renderOptions = document.renderOptions or resolveRenderOptions()
+        local renderOptions = document.renderOptions or resolveRenderOptions(document.baseUrl)
         local baseStyle = {
             display = "block",
             fg = document.defaultForeground or renderOptions.defaultForeground or colors.white,
-            bg = document.defaultBackground or renderOptions.defaultBackground or colors.black,
+            bg = nil,
             whiteSpace = "normal",
             bold = false,
             textTransform = "none",
@@ -1847,7 +1855,8 @@ style, script, head, meta, link, title { display: none; }
                 windowEndLine = startLine + lineCount - 1,
             }
         end
-        local writer = createWriter(contentWidth, baseStyle.bg, writerOptions)
+        local pageBackground = document.defaultBackground or renderOptions.defaultBackground or colors.black
+        local writer = createWriter(contentWidth, pageBackground, writerOptions)
         local context = {
             currentHref = nil,
             listStack = {},

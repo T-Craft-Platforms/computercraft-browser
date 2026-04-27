@@ -486,7 +486,7 @@ return function(core, options)
                 statusMessage = "Settings API is unavailable."
             else
                 local bgColor = trim(tostring(params.default_bg_color or ""))
-                local textColor = trim(tostring(params.default_text_color or ""))
+                local fgColor = trim(tostring(params.default_fg_color or params.default_text_color or ""))
                 local savedCount = 0
                 local errors = {}
 
@@ -498,12 +498,12 @@ return function(core, options)
                         errors[#errors + 1] = tostring(errBg or "Could not save default_bg_color")
                     end
                 end
-                if textColor ~= "" then
-                    local okText, errText = aboutApi.setSetting("default_text_color", textColor)
-                    if okText then
+                if fgColor ~= "" then
+                    local okFg, errFg = aboutApi.setSetting("default_fg_color", fgColor)
+                    if okFg then
                         savedCount = savedCount + 1
                     else
-                        errors[#errors + 1] = tostring(errText or "Could not save default_text_color")
+                        errors[#errors + 1] = tostring(errFg or "Could not save default_fg_color")
                     end
                 end
 
@@ -576,8 +576,9 @@ return function(core, options)
                 end
             elseif key == "default_bg_color" then
                 value = tostring(params.default_bg_color or value or "")
-            elseif key == "default_text_color" then
-                value = tostring(params.default_text_color or value or "")
+            elseif key == "default_fg_color" or key == "default_text_color" or key == "default_foreground_color" then
+                key = "default_fg_color"
+                value = tostring(params.default_fg_color or params.default_text_color or value or "")
             end
             if key == "" then
                 statusMessage = "Missing setting key."
@@ -733,11 +734,11 @@ return function(core, options)
 
         local browserDataDirValue = trim(tostring(params.browser_data_dir_value or params.settings_dir_value or ""))
         if browserDataDirValue == "" then
-            browserDataDirValue = trim(tostring(settings.browser_data_dir or "/cc-browser"))
+            browserDataDirValue = trim(tostring(settings.browser_data_dir or "/.data/"))
         end
         local downloadsDirValue = trim(tostring(params.downloads_dir_value or ""))
         if downloadsDirValue == "" then
-            downloadsDirValue = trim(tostring(settings.downloads_dir or "/cc-browser/downloads"))
+            downloadsDirValue = trim(tostring(settings.downloads_dir or "/downloads/"))
         end
 
         local browserEngineLevelValue = tostring(settings.browser_engine_level or "advanced"):lower()
@@ -750,9 +751,9 @@ return function(core, options)
         if defaultBgColorValue == "" then
             defaultBgColorValue = trim(tostring(settings.default_bg_color or "black")):lower()
         end
-        local defaultTextColorValue = trim(tostring(params.default_text_color or "")):lower()
-        if defaultTextColorValue == "" then
-            defaultTextColorValue = trim(tostring(settings.default_text_color or "white")):lower()
+        local defaultFgColorValue = trim(tostring(params.default_fg_color or params.default_text_color or "")):lower()
+        if defaultFgColorValue == "" then
+            defaultFgColorValue = trim(tostring(settings.default_fg_color or settings.default_text_color or "white")):lower()
         end
 
         local tokenValues = {
@@ -782,7 +783,7 @@ return function(core, options)
             BROWSER_DATA_DIR_VALUE = escapeHtml(browserDataDirValue),
             DOWNLOADS_DIR_VALUE = escapeHtml(downloadsDirValue),
             DEFAULT_BG_COLOR_VALUE = escapeHtml(defaultBgColorValue),
-            DEFAULT_TEXT_COLOR_VALUE = escapeHtml(defaultTextColorValue),
+            DEFAULT_FG_COLOR_VALUE = escapeHtml(defaultFgColorValue),
             SETTINGS_LIST = table.concat(settingsItems),
             PARAMS_LIST = table.concat(paramItems),
         }

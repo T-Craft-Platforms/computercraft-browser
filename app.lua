@@ -1,8 +1,8 @@
-local APP_TITLE = "CC Browser"
-local APP_VERSION = "0.1.0"
-local APP_ICON = "[CC]"
+APP_TITLE = "CC Browser"
+APP_VERSION = "0.1.0"
+APP_ICON = "[CC]"
 
-local function getScriptDir()
+function getScriptDir()
     if shell and shell.getRunningProgram and fs and fs.getDir then
         local running = shell.getRunningProgram()
         if running and running ~= "" then
@@ -12,24 +12,35 @@ local function getScriptDir()
     return "/src/browser"
 end
 
-local SCRIPT_DIR = getScriptDir()
+SCRIPT_DIR = getScriptDir()
 
-local function loadModule(relativePath)
+function loadModule(relativePath)
     return dofile(fs.combine(SCRIPT_DIR, relativePath))
 end
 
-local core = loadModule("lib/core.lua")
-local createNetwork = loadModule("lib/network.lua")
-local createHtml = loadModule("lib/html.lua")
-local createContent = loadModule("lib/content.lua")
-local createUi = loadModule("ui/view.lua")
-local createSandbox = loadModule("lib/sandbox.lua")
+core = loadModule("lib/core.lua")
+createNetwork = loadModule("lib/network.lua")
+createHtml = loadModule("lib/html.lua")
+createContent = loadModule("lib/content.lua")
+createUi = loadModule("ui/view.lua")
+createSandbox = loadModule("lib/sandbox.lua")
+createPrinting = loadModule("lib/printing.lua")
+createFormControls = loadModule("lib/form-controls.lua")
 
-local DEFAULT_BROWSER_DATA_DIR = "/cc-browser"
-local DEFAULT_BROWSER_CONFIG_DIR = fs.combine(DEFAULT_BROWSER_DATA_DIR, "config")
-local DEFAULT_BROWSER_DOWNLOADS_DIR = fs.combine(DEFAULT_BROWSER_DATA_DIR, "downloads")
-local LEGACY_BROWSER_STATE_PATH = fs.combine(SCRIPT_DIR, "browser-state.tbl")
-local PATH_SETTINGS_PATH = fs.combine(DEFAULT_BROWSER_CONFIG_DIR, "paths.tbl")
+DEFAULT_BROWSER_DATA_DIR = "/cc-browser-data"
+DEFAULT_BROWSER_DOWNLOADS_DIR = fs.combine(DEFAULT_BROWSER_DATA_DIR, "downloads")
+LEGACY_BROWSER_DATA_DIR = "/cc-browser"
+LEGACY_BROWSER_DOWNLOADS_DIR = fs.combine(LEGACY_BROWSER_DATA_DIR, "downloads")
+LEGACY_ROOT_DOWNLOADS_DIR = "/downloads"
+LEGACY_SCRIPT_BROWSER_DATA_DIR = fs.combine((SCRIPT_DIR ~= "" and SCRIPT_DIR or "/"), ".data")
+if LEGACY_SCRIPT_BROWSER_DATA_DIR:sub(1, 1) ~= "/" then
+    LEGACY_SCRIPT_BROWSER_DATA_DIR = "/" .. LEGACY_SCRIPT_BROWSER_DATA_DIR
+end
+LEGACY_BROWSER_STATE_PATH = fs.combine(SCRIPT_DIR, "browser-state.tbl")
+LEGACY_DATA_BROWSER_STATE_PATH = fs.combine(fs.combine(LEGACY_BROWSER_DATA_DIR, "config"), "browser-state.tbl")
+local LEGACY_RELATIVE_BROWSER_STATE_PATH = fs.combine(fs.combine("cc-browser", "config"), "browser-state.tbl")
+local LEGACY_PATH_SETTINGS_PATH = fs.combine(fs.combine(LEGACY_BROWSER_DATA_DIR, "config"), "paths.tbl")
+local LEGACY_RELATIVE_PATH_SETTINGS_PATH = fs.combine(fs.combine("cc-browser", "config"), "paths.tbl")
 
 local browserSettings = {
     home_page = "about:home",
@@ -43,7 +54,7 @@ local browserSettings = {
     fullscreen_mode = "normal",
     browser_engine_level = "advanced",
     default_bg_color = "black",
-    default_text_color = "white",
+    default_fg_color = "white",
 }
 local browserFavorites = {}
 local browserHistory = {}
@@ -73,14 +84,35 @@ local function normalizeSettingKey(key)
         normalized = "browser_data_dir"
     elseif normalized == "fullscreen" then
         normalized = "fullscreen_mode"
+    elseif normalized == "default_text_color" or normalized == "default_foreground_color" then
+        normalized = "default_fg_color"
     end
     return normalized
 end
 
-local function normalizeDirSettingPath(rawPath, fallback)
+local function normalizeAbsolutePath(rawPath, fallback)
     local candidate = core.trim(tostring(rawPath or ""))
     if candidate == "" then
-        return fallback
+        candidate = core.trim(tostring(fallback or ""))
+    end
+    if candidate == "" then
+        return ""
+    end
+    candidate = candidate:gsub("\\", "/")
+    candidate = candidate:gsub("/+", "/")
+    if candidate:sub(1, 1) ~= "/" then
+        candidate = "/" .. candidate
+    end
+    if #candidate > 1 and candidate:sub(-1) == "/" then
+        candidate = candidate:sub(1, -2)
+    end
+    return candidate
+end
+
+local function normalizeDirSettingPath(rawPath, fallback)
+    local candidate = normalizeAbsolutePath(rawPath, fallback)
+    if candidate == "" then
+        return normalizeAbsolutePath(fallback, DEFAULT_BROWSER_DATA_DIR)
     end
     return candidate
 end
@@ -203,6 +235,27 @@ function normalizeSettingColorName(value, fallbackName)
     return fallbackName
 end
 
+local function settingColorValue(settingName, fallbackName)
+    local colorName = normalizeSettingColorName(browserSettings[settingName], fallbackName)
+    return SUPPORTED_SETTING_COLOR_VALUES[colorName] or SUPPORTED_SETTING_COLOR_VALUES[fallbackName] or colors.white
+end
+
+local function currentDefaultBackgroundColorValue()
+    return settingColorValue("default_bg_color", "black")
+end
+
+local function currentDefaultForegroundColorValue(background)
+    local bg = background or currentDefaultBackgroundColorValue()
+    local fg = settingColorValue("default_fg_color", "white")
+    if fg == bg then
+        if bg == colors.white or bg == colors.yellow or bg == colors.orange or bg == colors.lightGray then
+            return colors.black
+        end
+        return colors.white
+    end
+    return fg
+end
+
 local function normalizeBrowserDataDir(rawPath)
     local value = normalizeDirSettingPath(rawPath, DEFAULT_BROWSER_DATA_DIR)
     if fs and fs.getName and fs.getDir then
@@ -214,7 +267,7 @@ local function normalizeBrowserDataDir(rawPath)
             end
         end
     end
-    return value
+    return normalizeAbsolutePath(value, DEFAULT_BROWSER_DATA_DIR)
 end
 
 local function currentBrowserDataDir()
@@ -229,12 +282,50 @@ local function currentDownloadsDir()
     return normalizeDirSettingPath(browserSettings.downloads_dir, DEFAULT_BROWSER_DOWNLOADS_DIR)
 end
 
+local function currentPathSettingsPath()
+    return fs.combine(currentSettingsDir(), "paths.tbl")
+end
+
 local function currentVfsRoot()
     return fs.combine(currentBrowserDataDir(), "vfs")
 end
 
 local function browserStatePath()
     return fs.combine(currentSettingsDir(), "browser-state.tbl")
+end
+
+local function migrateLegacyBrowserDataDirIfNeeded()
+    local changedSettings = false
+    local currentDataDir = currentBrowserDataDir()
+    if currentDataDir == LEGACY_BROWSER_DATA_DIR or currentDataDir == LEGACY_SCRIPT_BROWSER_DATA_DIR then
+        browserSettings.browser_data_dir = DEFAULT_BROWSER_DATA_DIR
+        changedSettings = true
+    end
+
+    local currentDownloads = currentDownloadsDir()
+    if currentDownloads == LEGACY_BROWSER_DOWNLOADS_DIR or currentDownloads == LEGACY_ROOT_DOWNLOADS_DIR then
+        browserSettings.downloads_dir = DEFAULT_BROWSER_DOWNLOADS_DIR
+        changedSettings = true
+    end
+
+    local targetDataDir = currentBrowserDataDir()
+    if targetDataDir == DEFAULT_BROWSER_DATA_DIR
+        and fs.exists(LEGACY_BROWSER_DATA_DIR)
+        and fs.isDir(LEGACY_BROWSER_DATA_DIR)
+        and not fs.exists(DEFAULT_BROWSER_DATA_DIR) then
+        local targetParent = fs.getDir(DEFAULT_BROWSER_DATA_DIR)
+        if targetParent and targetParent ~= "" and not fs.exists(targetParent) then
+            pcall(fs.makeDir, targetParent)
+        end
+        pcall(fs.move, LEGACY_BROWSER_DATA_DIR, DEFAULT_BROWSER_DATA_DIR)
+    end
+
+    if changedSettings and persistPathSettings then
+        persistPathSettings()
+    end
+    if changedSettings and persistBrowserState then
+        persistBrowserState(true)
+    end
 end
 
 local function ensureDirExists(path)
@@ -249,6 +340,189 @@ local function ensureDirExists(path)
         return false
     end
     return fs.exists(path) and fs.isDir(path)
+end
+
+function canWriteToDirectory(path)
+    local target = normalizeAbsolutePath(path, "")
+    if target == "" then
+        return false
+    end
+    if not ensureDirExists(target) then
+        return false
+    end
+
+    local probePath = fs.combine(target, "__cc_browser_write_probe.tmp")
+    local handle = fs.open(probePath, "w")
+    if not handle then
+        return false
+    end
+
+    local okWrite = pcall(function()
+        handle.write("ok")
+    end)
+    if not okWrite then
+        okWrite = pcall(function()
+            handle:write("ok")
+        end)
+    end
+
+    local okClose = pcall(function()
+        handle.close()
+    end)
+    if not okClose then
+        pcall(function()
+            handle:close()
+        end)
+    end
+
+    pcall(function()
+        if fs.exists(probePath) then
+            fs.delete(probePath)
+        end
+    end)
+    return okWrite and okClose
+end
+
+function chooseWritableDirectory(candidates, fallback)
+    for _, candidate in ipairs(candidates or {}) do
+        local normalized = normalizeAbsolutePath(candidate, "")
+        if normalized ~= "" and canWriteToDirectory(normalized) then
+            return normalized
+        end
+    end
+    local fallbackPath = normalizeAbsolutePath(fallback, "")
+    if fallbackPath ~= "" and canWriteToDirectory(fallbackPath) then
+        return fallbackPath
+    end
+    return ""
+end
+
+function ensureWritableStoragePaths()
+    local changed = false
+
+    local dataPath = chooseWritableDirectory({
+        currentBrowserDataDir(),
+        DEFAULT_BROWSER_DATA_DIR,
+        LEGACY_BROWSER_DATA_DIR,
+        "/cc-browser",
+    }, DEFAULT_BROWSER_DATA_DIR)
+    if dataPath ~= "" and dataPath ~= currentBrowserDataDir() then
+        browserSettings.browser_data_dir = dataPath
+        changed = true
+    end
+
+    local downloadsPath = chooseWritableDirectory({
+        currentDownloadsDir(),
+        fs.combine(currentBrowserDataDir(), "downloads"),
+        DEFAULT_BROWSER_DOWNLOADS_DIR,
+        LEGACY_BROWSER_DOWNLOADS_DIR,
+        "/downloads",
+    }, DEFAULT_BROWSER_DOWNLOADS_DIR)
+    if downloadsPath ~= "" and downloadsPath ~= currentDownloadsDir() then
+        browserSettings.downloads_dir = downloadsPath
+        changed = true
+    end
+
+    if changed then
+        if persistPathSettings then
+            persistPathSettings()
+        end
+        if persistBrowserState then
+            persistBrowserState(true)
+        end
+    end
+end
+
+local function appendUniquePath(list, seen, path)
+    local normalized = normalizeAbsolutePath(path, "")
+    if normalized == "" then
+        return
+    end
+    if seen[normalized] then
+        return
+    end
+    seen[normalized] = true
+    list[#list + 1] = normalized
+end
+
+local function readTextFile(path)
+    if not (fs and fs.exists and fs.open) then
+        return nil, "Filesystem unavailable"
+    end
+    if not fs.exists(path) then
+        return nil, "File not found"
+    end
+
+    local handle = fs.open(path, "r")
+    if not handle then
+        return nil, "Could not open file"
+    end
+
+    local okRead, payloadOrErr = pcall(function()
+        return handle.readAll() or ""
+    end)
+    if not okRead then
+        okRead, payloadOrErr = pcall(function()
+            return handle:readAll() or ""
+        end)
+    end
+
+    local okClose = pcall(function()
+        handle.close()
+    end)
+    if not okClose then
+        pcall(function()
+            handle:close()
+        end)
+    end
+
+    if not okRead then
+        return nil, tostring(payloadOrErr or "Failed reading file")
+    end
+    return tostring(payloadOrErr or ""), nil
+end
+
+local function writeTextFile(path, payload)
+    if not (fs and fs.open) then
+        return false, "Filesystem unavailable"
+    end
+    local target = tostring(path or "")
+    if core.trim(target) == "" then
+        return false, "Invalid target path"
+    end
+
+    local targetDir = fs.getDir(target)
+    if targetDir and targetDir ~= "" and not ensureDirExists(targetDir) then
+        return false, "Could not prepare directory"
+    end
+
+    local handle = fs.open(target, "w")
+    if not handle then
+        return false, "Could not open file for writing"
+    end
+
+    local okWrite, writeErr = pcall(function()
+        handle.write(tostring(payload or ""))
+    end)
+    if not okWrite then
+        okWrite, writeErr = pcall(function()
+            handle:write(tostring(payload or ""))
+        end)
+    end
+
+    local okClose = pcall(function()
+        handle.close()
+    end)
+    if not okClose then
+        pcall(function()
+            handle:close()
+        end)
+    end
+
+    if not okWrite then
+        return false, tostring(writeErr or "Failed writing file")
+    end
+    return true, nil
 end
 
 local function listBrowserSettings()
@@ -274,32 +548,37 @@ local function loadPathSettings()
     if not (textutils and type(textutils.unserialize) == "function") then
         return false, "Serializer unavailable"
     end
-    if not fs.exists(PATH_SETTINGS_PATH) then
-        return false, "No saved path settings"
-    end
 
-    local handle = fs.open(PATH_SETTINGS_PATH, "r")
-    if not handle then
-        return false, "Could not open path settings"
-    end
-    local payload = handle.readAll() or ""
-    handle.close()
-    if payload == "" then
-        return false, "Path settings are empty"
-    end
+    local candidates = {}
+    local seen = {}
+    appendUniquePath(candidates, seen, currentPathSettingsPath())
+    appendUniquePath(candidates, seen, LEGACY_PATH_SETTINGS_PATH)
+    appendUniquePath(candidates, seen, LEGACY_RELATIVE_PATH_SETTINGS_PATH)
 
-    local okParse, decoded = pcall(textutils.unserialize, payload)
-    if not okParse or type(decoded) ~= "table" then
-        return false, "Path settings are invalid"
+    local lastErr = "No saved path settings"
+    for _, path in ipairs(candidates) do
+        if fs.exists(path) then
+            local payload, readErr = readTextFile(path)
+            if payload == nil then
+                lastErr = tostring(readErr or "Could not read path settings")
+            elseif payload == "" then
+                lastErr = "Path settings are empty"
+            else
+                local okParse, decoded = pcall(textutils.unserialize, payload)
+                if okParse and type(decoded) == "table" then
+                    local storedDataDir = decoded.browser_data_dir
+                    if storedDataDir == nil then
+                        storedDataDir = decoded.settings_dir
+                    end
+                    browserSettings.browser_data_dir = normalizeBrowserDataDir(storedDataDir)
+                    browserSettings.downloads_dir = normalizeDirSettingPath(decoded.downloads_dir, DEFAULT_BROWSER_DOWNLOADS_DIR)
+                    return true, nil
+                end
+                lastErr = "Path settings are invalid"
+            end
+        end
     end
-
-    local storedDataDir = decoded.browser_data_dir
-    if storedDataDir == nil then
-        storedDataDir = decoded.settings_dir
-    end
-    browserSettings.browser_data_dir = normalizeBrowserDataDir(storedDataDir)
-    browserSettings.downloads_dir = normalizeDirSettingPath(decoded.downloads_dir, DEFAULT_BROWSER_DOWNLOADS_DIR)
-    return true, nil
+    return false, lastErr
 end
 
 persistPathSettings = function()
@@ -309,10 +588,6 @@ persistPathSettings = function()
     if not (textutils and type(textutils.serialize) == "function") then
         return false, "Serializer unavailable"
     end
-    if not ensureDirExists(DEFAULT_BROWSER_CONFIG_DIR) then
-        return false, "Could not prepare config directory"
-    end
-
     local snapshot = {
         browser_data_dir = currentBrowserDataDir(),
         downloads_dir = currentDownloadsDir(),
@@ -322,18 +597,24 @@ persistPathSettings = function()
         return false, "Failed to encode path settings"
     end
 
-    local handle = fs.open(PATH_SETTINGS_PATH, "w")
-    if not handle then
-        return false, "Could not open path settings for writing"
+    local candidates = {}
+    local seen = {}
+    appendUniquePath(candidates, seen, currentPathSettingsPath())
+    appendUniquePath(candidates, seen, LEGACY_PATH_SETTINGS_PATH)
+    appendUniquePath(candidates, seen, LEGACY_RELATIVE_PATH_SETTINGS_PATH)
+
+    local wroteAny = false
+    local lastErr = "Could not open path settings for writing"
+    for _, path in ipairs(candidates) do
+        local okWrite, writeErr = writeTextFile(path, encoded)
+        if okWrite then
+            wroteAny = true
+        else
+            lastErr = tostring(writeErr or "Failed to write path settings")
+        end
     end
-    local okWrite, writeErr = pcall(handle.write, encoded)
-    if not okWrite then
-        pcall(handle.close)
-        return false, tostring(writeErr or "Failed to write path settings")
-    end
-    local okClose, closeErr = pcall(handle.close)
-    if not okClose then
-        return false, tostring(closeErr or "Failed to close path settings")
+    if not wroteAny then
+        return false, lastErr
     end
     return true, nil
 end
@@ -452,6 +733,9 @@ local function setBrowserSetting(key, value)
         if path == "" then
             return false, "Invalid browser_data_dir value (path cannot be empty)"
         end
+        if not canWriteToDirectory(path) then
+            return false, "Invalid browser_data_dir value (path is not writable)"
+        end
         browserSettings[normalized] = path
         local oldVfsRoot = fs.combine(oldDataDir, "vfs")
         local newVfsRoot = fs.combine(path, "vfs")
@@ -484,9 +768,12 @@ local function setBrowserSetting(key, value)
         return true, nil
     end
     if normalized == "downloads_dir" then
-        local path = core.trim(tostring(value or ""))
+        local path = normalizeDirSettingPath(value, DEFAULT_BROWSER_DOWNLOADS_DIR)
         if path == "" then
             return false, "Invalid downloads_dir value (path cannot be empty)"
+        end
+        if not canWriteToDirectory(path) then
+            return false, "Invalid downloads_dir value (path is not writable)"
         end
         browserSettings[normalized] = path
         if persistPathSettings then
@@ -519,7 +806,7 @@ local function setBrowserSetting(key, value)
         end
         return true, nil
     end
-    if normalized == "default_bg_color" or normalized == "default_text_color" then
+    if normalized == "default_bg_color" or normalized == "default_fg_color" then
         local colorName = parseSettingColorName(value)
         if not colorName then
             return false,
@@ -783,28 +1070,38 @@ local function loadBrowserState()
     if not (textutils and type(textutils.unserialize) == "function") then
         return false, "Serializer unavailable"
     end
-    local statePath = browserStatePath()
-    if not fs.exists(statePath) and fs.exists(LEGACY_BROWSER_STATE_PATH) then
-        statePath = LEGACY_BROWSER_STATE_PATH
+
+    local candidates = {}
+    local seen = {}
+    appendUniquePath(candidates, seen, browserStatePath())
+    appendUniquePath(candidates, seen, LEGACY_DATA_BROWSER_STATE_PATH)
+    appendUniquePath(candidates, seen, LEGACY_RELATIVE_BROWSER_STATE_PATH)
+    appendUniquePath(candidates, seen, LEGACY_BROWSER_STATE_PATH)
+
+    local decoded = nil
+    local statePath = nil
+    local lastErr = "No saved state"
+    for _, candidate in ipairs(candidates) do
+        if fs.exists(candidate) then
+            local payload, readErr = readTextFile(candidate)
+            if payload == nil then
+                lastErr = tostring(readErr or "Could not open saved state")
+            elseif payload == "" then
+                lastErr = "Saved state is empty"
+            else
+                local okParse, parsed = pcall(textutils.unserialize, payload)
+                if okParse and type(parsed) == "table" then
+                    decoded = parsed
+                    statePath = candidate
+                    break
+                end
+                lastErr = "Saved state is invalid"
+            end
+        end
     end
-    if not fs.exists(statePath) then
+    if not decoded then
         activeBrowserStatePath = browserStatePath()
-        return false, "No saved state"
-    end
-
-    local handle = fs.open(statePath, "r")
-    if not handle then
-        return false, "Could not open saved state"
-    end
-    local payload = handle.readAll() or ""
-    handle.close()
-    if payload == "" then
-        return false, "Saved state is empty"
-    end
-
-    local okParse, decoded = pcall(textutils.unserialize, payload)
-    if not okParse or type(decoded) ~= "table" then
-        return false, "Saved state is invalid"
+        return false, lastErr
     end
 
     if type(decoded.settings) == "table" then
@@ -828,7 +1125,7 @@ local function loadBrowserState()
     browserSettings.fullscreen_mode = normalizeFullscreenMode(browserSettings.fullscreen_mode)
     browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
     browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
-    browserSettings.default_text_color = normalizeSettingColorName(browserSettings.default_text_color, "white")
+    browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
 
     browserFavorites = {}
     if type(decoded.favorites) == "table" then
@@ -925,41 +1222,33 @@ persistBrowserState = function(forceWrite)
         return false, "Failed to encode state"
     end
 
-    local targetPath = browserStatePath()
-    if activeBrowserStatePath and activeBrowserStatePath ~= "" then
-        targetPath = activeBrowserStatePath
-    elseif fs.exists(LEGACY_BROWSER_STATE_PATH) and not fs.exists(targetPath) then
-        targetPath = LEGACY_BROWSER_STATE_PATH
-    end
+    local candidates = {}
+    local seen = {}
+    appendUniquePath(candidates, seen, browserStatePath())
+    appendUniquePath(candidates, seen, activeBrowserStatePath)
+    appendUniquePath(candidates, seen, LEGACY_DATA_BROWSER_STATE_PATH)
+    appendUniquePath(candidates, seen, LEGACY_RELATIVE_BROWSER_STATE_PATH)
+    appendUniquePath(candidates, seen, LEGACY_BROWSER_STATE_PATH)
 
-    local targetDir = fs.getDir(targetPath)
-    if targetDir and targetDir ~= "" and not ensureDirExists(targetDir) then
-        return false, "Could not prepare state directory"
+    local lastErr = "Could not write state file"
+    for _, targetPath in ipairs(candidates) do
+        local okWrite, writeErr = writeTextFile(targetPath, encoded)
+        if okWrite then
+            activeBrowserStatePath = targetPath
+            return true, nil
+        end
+        lastErr = tostring(writeErr or "Could not write state file")
     end
-
-    local handle = fs.open(targetPath, "w")
-    if not handle then
-        return false, "Could not open state file for writing"
-    end
-
-    local okWrite, writeErr = pcall(handle.write, encoded)
-    if not okWrite then
-        pcall(handle.close)
-        return false, tostring(writeErr or "Failed to write state file")
-    end
-    local okClose, closeErr = pcall(handle.close)
-    if not okClose then
-        return false, tostring(closeErr or "Failed to close state file")
-    end
-    activeBrowserStatePath = targetPath
-    return true, nil
+    return false, lastErr
 end
 
 loadPathSettings()
 loadBrowserState()
+migrateLegacyBrowserDataDirIfNeeded()
+ensureWritableStoragePaths()
 browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
 browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
-browserSettings.default_text_color = normalizeSettingColorName(browserSettings.default_text_color, "white")
+browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
 if fs.exists("/.vfs") then
     local targetVfsRoot = currentVfsRoot()
     local vfsParent = fs.getDir(targetVfsRoot)
@@ -1002,14 +1291,18 @@ local content = createContent({
     getDefaultBackgroundColor = function()
         return normalizeSettingColorName(browserSettings.default_bg_color, "black")
     end,
+    getDefaultForegroundColor = function()
+        return normalizeSettingColorName(browserSettings.default_fg_color, "white")
+    end,
     getDefaultTextColor = function()
-        return normalizeSettingColorName(browserSettings.default_text_color, "white")
+        return normalizeSettingColorName(browserSettings.default_fg_color, "white")
     end,
 })
 local sandbox = createSandbox({
     core = core,
     getVfsRoot = currentVfsRoot,
 })
+local printing = createPrinting()
 
 local clamp = core.clamp
 local startsWith = core.startsWith
@@ -1017,6 +1310,10 @@ local trim = core.trim
 local escapeHtml = core.escapeHtml
 local normalizeInputUrl = core.normalizeInputUrl
 local getHeader = core.getHeader
+local formControls = createFormControls({
+    clamp = clamp,
+    trim = trim,
+})
 
 local function homePageUrl()
     local homePage = trim(browserSettings.home_page or "about:home")
@@ -1141,6 +1438,8 @@ local function createTab(initialUrl)
         pageContentHeight = 1,
         pageWindowStart = 1,
         pageWindowEnd = 1,
+        pageDefaultBackground = currentDefaultBackgroundColorValue(),
+        pageDefaultForeground = currentDefaultForegroundColorValue(currentDefaultBackgroundColorValue()),
         renderRevision = 0,
         lastRenderSignature = nil,
         viewportWidth = 1,
@@ -1184,6 +1483,9 @@ state = {
         intervalMs = nil,
     },
     running = true,
+    initialTermBackground = nil,
+    initialTermForeground = nil,
+    syntheticCharPending = false,
     ctrlDown = false,
     shiftDown = false,
     highUsage = {
@@ -1192,6 +1494,7 @@ state = {
         lastFrameMs = 0,
         cooldownUntil = 0,
         loadingFrame = false,
+        intentionalUiBreak = false,
     },
     modal = {
         open = false,
@@ -1569,6 +1872,9 @@ local function closeTab(index)
         tab.history = { "about:blank" }
         tab.historyIndex = 1
         tab.document = buildDocument("<html><body></body></html>", "about:blank")
+        tab.pageDefaultBackground = tab.document.defaultBackground or currentDefaultBackgroundColorValue()
+        tab.pageDefaultForeground = tab.document.defaultForeground
+            or currentDefaultForegroundColorValue(tab.pageDefaultBackground)
         tab.pageLines = { createEmptyLine() }
         tab.pageContentHeight = 1
         tab.pageWindowStart = 1
@@ -1731,10 +2037,14 @@ local function renderDocument(tab)
     end
 
     if not target.document then
+        local fallbackBg = currentDefaultBackgroundColorValue()
+        local fallbackFg = currentDefaultForegroundColorValue(fallbackBg)
         target.pageLines = { createEmptyLine() }
         target.pageContentHeight = 1
         target.pageWindowStart = 1
         target.pageWindowEnd = 1
+        target.pageDefaultBackground = fallbackBg
+        target.pageDefaultForeground = fallbackFg
         target.viewportWidth = w
         target.showVerticalScrollbar = false
         target.formMeta = {
@@ -1849,6 +2159,10 @@ local function renderDocument(tab)
     target.pageContentHeight = totalLines
     target.pageWindowStart = windowStart
     target.pageWindowEnd = windowEnd
+    local pageBg = target.document.defaultBackground or currentDefaultBackgroundColorValue()
+    local pageFg = target.document.defaultForeground or currentDefaultForegroundColorValue(pageBg)
+    target.pageDefaultBackground = pageBg
+    target.pageDefaultForeground = pageFg
     target.formMeta = formMeta or {
         formsById = {},
         formOrder = {},
@@ -1924,6 +2238,12 @@ end
 local function openModal(spec)
     if type(spec) ~= "table" then
         return false
+    end
+    if spec.id ~= "high_usage_guard" then
+        state.highUsage.overCount = 0
+        state.highUsage.frozen = false
+        state.highUsage.loadingFrame = false
+        state.highUsage.intentionalUiBreak = true
     end
     state.modal.open = true
     state.modal.spec = spec
@@ -2066,128 +2386,81 @@ function withModalCursorMarker(text, cursor)
     return source:sub(1, cursorPos - 1) .. "|" .. source:sub(cursorPos), cursorPos
 end
 
-local function drawModal()
-    local modal = state.modal
-    if not modal.open then
-        modal.layout = nil
-        return false
-    end
-
-    local spec = modal.spec
-    if type(spec) ~= "table" then
-        clearModal()
-        return false
-    end
-
-    local w, h = term.getSize()
+local function modalBuildBodyLines(spec)
     local bodyLines = {}
-    local sourceLines = spec.lines
+    local sourceLines = spec and spec.lines or nil
     if type(sourceLines) == "table" then
         for _, line in ipairs(sourceLines) do
             bodyLines[#bodyLines + 1] = tostring(line or "")
         end
     end
     if #bodyLines == 0 then
-        bodyLines[1] = tostring(spec.message or "")
+        bodyLines[1] = tostring((spec and spec.message) or "")
+    end
+    return bodyLines
+end
+
+local function modalFillRow(x1, panelWidth, y, rowBackground, rowForeground)
+    term.setCursorPos(x1, y)
+    term.setBackgroundColor(rowBackground)
+    term.setTextColor(rowForeground)
+    term.write(string.rep(" ", panelWidth))
+end
+
+local function modalWriteLine(x1, y1, y2, panelWidth, y, text, rowBackground, rowForeground)
+    if y < y1 or y > y2 then
+        return
+    end
+    modalFillRow(x1, panelWidth, y, rowBackground, rowForeground)
+    local content = tostring(text or "")
+    local maxChars = math.max(0, panelWidth - 2)
+    if #content > maxChars then
+        content = content:sub(1, maxChars)
+    end
+    term.setCursorPos(x1 + 1, y)
+    term.setBackgroundColor(rowBackground)
+    term.setTextColor(rowForeground)
+    term.write(content)
+end
+
+local function modalRenderInputLine(x1, y1, y2, panelWidth, inputY, input)
+    if not inputY or inputY < y1 or inputY > y2 then
+        return
     end
 
-    local buttons = modalButtons(spec)
-    local input = ensureModalInput(spec)
-    local hasInput = input ~= nil
-    local hasTitle = trim(tostring(spec.title or "")) ~= ""
-    local bodyCount = math.max(1, #bodyLines)
-    local panelHeight = math.max(7, bodyCount + (hasTitle and 4 or 3) + (hasInput and 2 or 0))
-    panelHeight = math.min(h, panelHeight)
-
-    local panelWidth = math.min(w, math.max(20, math.min(spec.maxWidth or 58, w - 2)))
-    local x1 = math.max(1, math.floor((w - panelWidth) / 2) + 1)
-    local y1 = math.max(1, math.floor((h - panelHeight) / 2) + 1)
-    local x2 = x1 + panelWidth - 1
-    local y2 = y1 + panelHeight - 1
-
-    local background = spec.background or colors.lightGray
-    local foreground = spec.foreground or colors.black
-    local titleBackground = spec.titleBackground or colors.red
-    local titleForeground = spec.titleForeground or colors.white
-
-    local function fillRow(y, rowBackground, rowForeground)
-        term.setCursorPos(x1, y)
-        term.setBackgroundColor(rowBackground)
-        term.setTextColor(rowForeground)
-        term.write(string.rep(" ", panelWidth))
+    local inputValue = tostring(input.value or "")
+    local placeholder = tostring(input.placeholder or "")
+    local shown = inputValue
+    if shown == "" then
+        shown = placeholder
     end
 
-    local function writeLine(y, text, rowBackground, rowForeground)
-        if y < y1 or y > y2 then
-            return
+    local maxChars = math.max(0, panelWidth - 4)
+    local displayed = shown
+    local cursorPos = clamp(parseInteger(input.cursor, (#inputValue + 1)), 1, #inputValue + 1)
+    if #displayed > maxChars then
+        local start = 1
+        if cursorPos > maxChars then
+            start = cursorPos - maxChars + 1
         end
-        fillRow(y, rowBackground, rowForeground)
-        local content = tostring(text or "")
-        local maxChars = math.max(0, panelWidth - 2)
-        if #content > maxChars then
-            content = content:sub(1, maxChars)
+        if start + maxChars - 1 > #displayed then
+            start = math.max(1, #displayed - maxChars + 1)
         end
-        term.setCursorPos(x1 + 1, y)
-        term.setBackgroundColor(rowBackground)
-        term.setTextColor(rowForeground)
-        term.write(content)
+        displayed = displayed:sub(start, start + maxChars - 1)
+        cursorPos = clamp(cursorPos - start + 1, 1, #displayed + 1)
     end
 
-    for y = y1, y2 do
-        fillRow(y, background, foreground)
-    end
+    displayed = withModalCursorMarker(displayed, cursorPos)
+    local inputBg = colors.white
+    local inputFg = (inputValue == "" and placeholder ~= "") and colors.gray or colors.black
+    modalWriteLine(x1, y1, y2, panelWidth, inputY, string.rep(" ", math.max(0, panelWidth - 2)), inputBg, inputFg)
+    term.setCursorPos(x1 + 1, inputY)
+    term.setBackgroundColor(inputBg)
+    term.setTextColor(inputFg)
+    term.write(displayed)
+end
 
-    local contentY = y1 + 1
-    if hasTitle then
-        writeLine(y1, tostring(spec.title), titleBackground, titleForeground)
-        contentY = y1 + 2
-    end
-
-    local buttonY = math.max(contentY, y2 - 1)
-    local inputY = nil
-    if hasInput then
-        inputY = buttonY - 1
-    end
-    local maxBodyY = buttonY - (hasInput and 2 or 1)
-    for _, line in ipairs(bodyLines) do
-        if contentY > maxBodyY then
-            break
-        end
-        writeLine(contentY, line, background, foreground)
-        contentY = contentY + 1
-    end
-
-    if hasInput and inputY and inputY >= y1 and inputY <= y2 then
-        local inputValue = tostring(input.value or "")
-        local placeholder = tostring(input.placeholder or "")
-        local shown = inputValue
-        if shown == "" then
-            shown = placeholder
-        end
-        local maxChars = math.max(0, panelWidth - 4)
-        local displayed = shown
-        local cursorPos = clamp(parseInteger(input.cursor, (#inputValue + 1)), 1, #inputValue + 1)
-        if #displayed > maxChars then
-            local start = 1
-            if cursorPos > maxChars then
-                start = cursorPos - maxChars + 1
-            end
-            if start + maxChars - 1 > #displayed then
-                start = math.max(1, #displayed - maxChars + 1)
-            end
-            displayed = displayed:sub(start, start + maxChars - 1)
-            cursorPos = clamp(cursorPos - start + 1, 1, #displayed + 1)
-        end
-        displayed = withModalCursorMarker(displayed, cursorPos)
-        local inputBg = colors.white
-        local inputFg = (inputValue == "" and placeholder ~= "") and colors.gray or colors.black
-        writeLine(inputY, string.rep(" ", math.max(0, panelWidth - 2)), inputBg, inputFg)
-        term.setCursorPos(x1 + 1, inputY)
-        term.setBackgroundColor(inputBg)
-        term.setTextColor(inputFg)
-        term.write(displayed)
-    end
-
+local function modalResolveButtonLabels(buttons, panelWidth)
     local labels = {}
     local totalWidth = 0
     for index, button in ipairs(buttons) do
@@ -2209,11 +2482,16 @@ local function drawModal()
         totalWidth = totalWidth + (math.max(0, #buttons - 1) * buttonGap)
     end
 
+    return labels, buttonGap, totalWidth
+end
+
+local function modalDrawButtons(x1, x2, buttonY, buttons, labels, buttonGap, totalWidth)
     local left = x1 + 1
     local right = x2 - 1
     local cursorX = left
-    if totalWidth < (right - left + 1) then
-        cursorX = left + math.floor(((right - left + 1) - totalWidth) / 2)
+    local width = right - left + 1
+    if totalWidth < width then
+        cursorX = left + math.floor((width - totalWidth) / 2)
     end
 
     local layoutButtons = {}
@@ -2223,7 +2501,7 @@ local function drawModal()
             break
         end
 
-        local label = labels[index]
+        local label = tostring(labels[index] or "")
         if #label > available then
             label = label:sub(1, available)
         end
@@ -2239,9 +2517,72 @@ local function drawModal()
             x2 = cursorX + #label - 1,
             y = buttonY,
         }
-
         cursorX = cursorX + #label + buttonGap
     end
+    return layoutButtons
+end
+
+local function drawModal()
+    local modal = state.modal
+    if not modal.open then
+        modal.layout = nil
+        return false
+    end
+
+    local spec = modal.spec
+    if type(spec) ~= "table" then
+        clearModal()
+        return false
+    end
+
+    local w, h = term.getSize()
+    local bodyLines = modalBuildBodyLines(spec)
+    local buttons = modalButtons(spec)
+    local input = ensureModalInput(spec)
+    local hasInput = input ~= nil
+    local hasTitle = trim(tostring(spec.title or "")) ~= ""
+
+    local bodyCount = math.max(1, #bodyLines)
+    local panelHeight = math.max(7, bodyCount + (hasTitle and 4 or 3) + (hasInput and 2 or 0))
+    panelHeight = math.min(h, panelHeight)
+    local panelWidth = math.min(w, math.max(20, math.min(spec.maxWidth or 58, w - 2)))
+
+    local x1 = math.max(1, math.floor((w - panelWidth) / 2) + 1)
+    local y1 = math.max(1, math.floor((h - panelHeight) / 2) + 1)
+    local x2 = x1 + panelWidth - 1
+    local y2 = y1 + panelHeight - 1
+    local background = spec.background or colors.lightGray
+    local foreground = spec.foreground or colors.black
+    local titleBackground = spec.titleBackground or colors.red
+    local titleForeground = spec.titleForeground or colors.white
+
+    for y = y1, y2 do
+        modalFillRow(x1, panelWidth, y, background, foreground)
+    end
+
+    local contentY = y1 + 1
+    if hasTitle then
+        modalWriteLine(x1, y1, y2, panelWidth, y1, tostring(spec.title), titleBackground, titleForeground)
+        contentY = y1 + 2
+    end
+
+    local buttonY = math.max(contentY, y2 - 1)
+    local inputY = hasInput and (buttonY - 1) or nil
+    local maxBodyY = buttonY - (hasInput and 2 or 1)
+    for _, line in ipairs(bodyLines) do
+        if contentY > maxBodyY then
+            break
+        end
+        modalWriteLine(x1, y1, y2, panelWidth, contentY, line, background, foreground)
+        contentY = contentY + 1
+    end
+
+    if hasInput and input then
+        modalRenderInputLine(x1, y1, y2, panelWidth, inputY, input)
+    end
+
+    local labels, buttonGap, totalWidth = modalResolveButtonLabels(buttons, panelWidth)
+    local layoutButtons = modalDrawButtons(x1, x2, buttonY, buttons, labels, buttonGap, totalWidth)
 
     term.setCursorBlink(false)
     modal.layout = {
@@ -2417,8 +2758,28 @@ local function handleModalEvent(event)
         return true
     end
 
+    if name == "key_up" then
+        local key = event[2]
+        if key == keys.leftCtrl or key == keys.rightCtrl then
+            state.ctrlDown = false
+        elseif key == keys.leftShift or key == keys.rightShift then
+            state.shiftDown = false
+        end
+        spec.syntheticCharPending = false
+        return true
+    end
+
     if name == "key" then
         local key = event[2]
+        if key == keys.leftCtrl or key == keys.rightCtrl then
+            state.ctrlDown = true
+            return true
+        end
+        if key == keys.leftShift or key == keys.rightShift then
+            state.shiftDown = true
+            return true
+        end
+
         if ensureModalInput(spec) then
             if key == keys.left then
                 moveModalInputCursor(spec, -1)
@@ -2449,6 +2810,15 @@ local function handleModalEvent(event)
                 deleteModalInputForward(spec)
                 draw()
                 return true
+            end
+            if not state.ctrlDown then
+                local typed = keyToPrintableText(key, state.shiftDown)
+                if typed and typed ~= "" then
+                    appendModalInput(spec, typed)
+                    spec.syntheticCharPending = true
+                    draw()
+                    return true
+                end
             end
         end
         local action = nil
@@ -2505,12 +2875,17 @@ local function handleModalEvent(event)
     end
 
     if name == "char" and ensureModalInput(spec) then
+        if spec.syntheticCharPending then
+            spec.syntheticCharPending = false
+            return true
+        end
         appendModalInput(spec, event[2] or "")
         draw()
         return true
     end
 
     if name == "paste" and ensureModalInput(spec) then
+        spec.syntheticCharPending = false
         appendModalInput(spec, event[2] or "")
         draw()
         return true
@@ -2520,8 +2895,7 @@ local function handleModalEvent(event)
         or name == "mouse_up"
         or name == "mouse_scroll"
         or name == "char"
-        or name == "paste"
-        or name == "key_up" then
+        or name == "paste" then
         return true
     end
 
@@ -2667,79 +3041,7 @@ function wrapPrintLine(line, width)
 end
 
 function printLinesToPeripheral(printerDevice, lines, pageTitle)
-    if type(printerDevice) ~= "table" then
-        return false, "Printer peripheral unavailable"
-    end
-    if type(printerDevice.newPage) ~= "function"
-        or type(printerDevice.endPage) ~= "function"
-        or type(printerDevice.setCursorPos) ~= "function"
-        or type(printerDevice.write) ~= "function" then
-        return false, "Selected peripheral does not support printer API"
-    end
-
-    local pageWidth = 25
-    local pageHeight = 21
-    if type(printerDevice.getPageSize) == "function" then
-        local okSize, width, height = pcall(printerDevice.getPageSize)
-        if okSize and tonumber(width) and tonumber(height) then
-            pageWidth = math.max(1, math.floor(tonumber(width)))
-            pageHeight = math.max(1, math.floor(tonumber(height)))
-        end
-    end
-
-    local pagesPrinted = 0
-
-    local function beginPage()
-        local okNewPage, opened = pcall(printerDevice.newPage)
-        if not okNewPage or opened == false then
-            return false, "Printer is out of paper/ink or busy", pagesPrinted
-        end
-        pagesPrinted = pagesPrinted + 1
-        if type(printerDevice.setPageTitle) == "function" and tostring(pageTitle or "") ~= "" then
-            pcall(printerDevice.setPageTitle, tostring(pageTitle))
-        end
-        return true, nil, pagesPrinted
-    end
-
-    local okBegin, beginErr = beginPage()
-    if not okBegin then
-        return false, beginErr, pagesPrinted
-    end
-
-    local row = 1
-    for _, line in ipairs(lines or {}) do
-        local wrapped = wrapPrintLine(line, pageWidth)
-        for _, chunk in ipairs(wrapped) do
-            if row > pageHeight then
-                local okEndPage, ended = pcall(printerDevice.endPage)
-                if not okEndPage or ended == false then
-                    return false, "Could not finish printer page", pagesPrinted
-                end
-                local okNext, nextErr = beginPage()
-                if not okNext then
-                    return false, nextErr, pagesPrinted
-                end
-                row = 1
-            end
-
-            local okCursor = pcall(printerDevice.setCursorPos, 1, row)
-            if not okCursor then
-                return false, "Printer cursor positioning failed", pagesPrinted
-            end
-            local okWrite, writeErr = pcall(printerDevice.write, tostring(chunk or ""))
-            if not okWrite then
-                return false, "Printer write failed: " .. tostring(writeErr), pagesPrinted
-            end
-            row = row + 1
-        end
-    end
-
-    local okEndPage, ended = pcall(printerDevice.endPage)
-    if not okEndPage or ended == false then
-        return false, "Could not finalize printer job", pagesPrinted
-    end
-
-    return true, nil, pagesPrinted
+    return printing.printLinesToPeripheral(printerDevice, lines, pageTitle, wrapPrintLine)
 end
 
 function promptPrinterSelection(printerNames)
@@ -3081,29 +3383,9 @@ function downloadCurrentPage(tab)
         return false
     end
 
-    local dir = fs.getDir(savePath)
-    if dir and dir ~= "" and not fs.exists(dir) then
-        local okMake, makeErr = pcall(fs.makeDir, dir)
-        if not okMake then
-            target.status = "Download failed: could not create directory (" .. tostring(makeErr or dir) .. ")"
-            return false
-        end
-    end
-
-    local handle = fs.open(savePath, "w")
-    if not handle then
-        target.status = "Download failed: cannot write file"
-        return false
-    end
-    local okWrite, writeErr = pcall(handle.write, body)
+    local okWrite, writeErr = writeTextFile(savePath, body)
     if not okWrite then
-        pcall(handle.close)
         target.status = "Download failed: " .. tostring(writeErr or "could not write file")
-        return false
-    end
-    local okClose, closeErr = pcall(handle.close)
-    if not okClose then
-        target.status = "Download failed: " .. tostring(closeErr or "could not close file")
         return false
     end
 
@@ -3299,187 +3581,25 @@ local function setFocusedFormControl(tab, key)
     end
 end
 
-local function clampControlCursor(stateEntry)
-    local value = tostring(stateEntry.value or "")
-    local cursor = tonumber(stateEntry.cursor) or (#value + 1)
-    stateEntry.cursor = clamp(math.floor(cursor), 1, #value + 1)
-end
+local clampControlCursor = formControls.clampCursor
+local insertIntoFormControl = formControls.insert
+local removeFromFormControl = formControls.remove
 
-local function insertIntoFormControl(stateEntry, control, text)
-    local value = tostring(stateEntry.value or "")
-    local cursor = tonumber(stateEntry.cursor) or (#value + 1)
-    cursor = clamp(math.floor(cursor), 1, #value + 1)
-
-    local insertion = tostring(text or "")
-    if insertion == "" then
-        return
-    end
-
-    local before = value:sub(1, cursor - 1)
-    local after = value:sub(cursor)
-    local merged = before .. insertion .. after
-    if control and control.maxLength and tonumber(control.maxLength) then
-        merged = merged:sub(1, math.max(0, tonumber(control.maxLength)))
-    end
-    stateEntry.value = merged
-    stateEntry.cursor = clamp(cursor + #insertion, 1, #merged + 1)
-end
-
-local function removeFromFormControl(stateEntry, backward)
-    local value = tostring(stateEntry.value or "")
-    local cursor = tonumber(stateEntry.cursor) or (#value + 1)
-    cursor = clamp(math.floor(cursor), 1, #value + 1)
-    if backward then
-        if cursor <= 1 then
-            return
-        end
-        local before = value:sub(1, cursor - 2)
-        local after = value:sub(cursor)
-        stateEntry.value = before .. after
-        stateEntry.cursor = cursor - 1
-    else
-        if cursor > #value then
-            return
-        end
-        local before = value:sub(1, cursor - 1)
-        local after = value:sub(cursor + 1)
-        stateEntry.value = before .. after
-        stateEntry.cursor = cursor
-    end
-    clampControlCursor(stateEntry)
-end
-
-function copyControlDefaults(defaults)
-    local nextState = {}
-    if type(defaults) ~= "table" then
-        return nextState
-    end
-    for defaultKey in pairs(defaults) do
-        if type(defaults[defaultKey]) == "table" then
-            local copied = {}
-            for i = 1, #defaults[defaultKey] do
-                copied[i] = defaults[defaultKey][i]
-            end
-            nextState[defaultKey] = copied
-        else
-            nextState[defaultKey] = defaults[defaultKey]
-        end
-    end
-    return nextState
-end
+copyControlDefaults = formControls.copyControlDefaults
 
 local function resetForm(tab, formId)
     local target = tab or activeTab()
-    local meta = target.formMeta
-    local form = meta and meta.formsById and meta.formsById[formId]
-    if not form then
-        return false
-    end
-
-    local controls = meta.controlsByKey or {}
-    local formState = target.formState or {}
-    target.formState = formState
-    for _, key in ipairs(form.controlKeys or {}) do
-        local control = controls[key]
-        if control then
-            formState[key] = copyControlDefaults(control.defaults)
-        end
-    end
-    bumpRenderRevision(target)
-    return true
+    return formControls.resetForm(target, formId, bumpRenderRevision)
 end
 
-function pushFormField(fields, name, value)
-    fields[#fields + 1] = {
-        name = name,
-        value = tostring(value or ""),
-    }
-end
-
-function collectInputFormField(fields, control, stateEntry, name, key, submitterKey)
-    local inputType = tostring(control.inputType or "text"):lower()
-    if inputType == "submit" or inputType == "image" then
-        if key == submitterKey and name ~= "" then
-            pushFormField(fields, name, (stateEntry and stateEntry.value) or control.defaultValue or "")
-        end
-        return
-    end
-    if inputType == "reset" or inputType == "button" then
-        return
-    end
-    if inputType == "checkbox" or inputType == "radio" then
-        if stateEntry and stateEntry.checked and name ~= "" then
-            pushFormField(fields, name, stateEntry.value or control.defaultValue or "on")
-        end
-        return
-    end
-    if name ~= "" then
-        pushFormField(fields, name, (stateEntry and stateEntry.value) or control.defaultValue or "")
-    end
-end
-
-function collectSelectFormField(fields, control, stateEntry, name)
-    if name == "" then
-        return
-    end
-    local options = control.options or {}
-    if control.multiple then
-        for _, selectedIndex in ipairs((stateEntry and stateEntry.selectedIndices) or {}) do
-            local option = options[selectedIndex]
-            if option then
-                pushFormField(fields, name, option.value or option.label or "")
-            end
-        end
-        return
-    end
-    local selectedIndex = (stateEntry and tonumber(stateEntry.selectedIndex)) or control.defaultSelectedIndex or 1
-    selectedIndex = clamp(math.floor(selectedIndex or 1), 1, math.max(1, #options))
-    local option = options[selectedIndex]
-    if option then
-        pushFormField(fields, name, option.value or option.label or "")
-    end
-end
-
-function collectButtonFormField(fields, control, stateEntry, name, key, submitterKey)
-    if name == "" then
-        return
-    end
-    local buttonType = tostring(control.buttonType or "submit"):lower()
-    if buttonType == "submit" and key == submitterKey then
-        pushFormField(fields, name, (stateEntry and stateEntry.value) or control.value or control.defaultValue or "")
-    end
-end
+pushFormField = formControls.pushFormField
+collectInputFormField = formControls.collectInputFormField
+collectSelectFormField = formControls.collectSelectFormField
+collectButtonFormField = formControls.collectButtonFormField
 
 function collectFormFields(tab, formId, submitterKey)
     local target = tab or activeTab()
-    local formMeta = target.formMeta or {}
-    local form = formMeta.formsById and formMeta.formsById[formId]
-    if not form then
-        return {}
-    end
-
-    local controls = formMeta.controlsByKey or {}
-    local formState = target.formState or {}
-    local fields = {}
-    for _, key in ipairs(form.controlKeys or {}) do
-        local control = controls[key]
-        if control and not control.disabled then
-            local stateEntry = formState[key]
-            local name = trim(tostring(control.name or ""))
-            if control.tag == "input" then
-                collectInputFormField(fields, control, stateEntry, name, key, submitterKey)
-            elseif control.tag == "textarea" then
-                if name ~= "" then
-                    pushFormField(fields, name, (stateEntry and stateEntry.value) or control.defaultValue or "")
-                end
-            elseif control.tag == "select" then
-                collectSelectFormField(fields, control, stateEntry, name)
-            elseif control.tag == "button" then
-                collectButtonFormField(fields, control, stateEntry, name, key, submitterKey)
-            end
-        end
-    end
-    return fields
+    return formControls.collectFormFields(target, formId, submitterKey)
 end
 
 function refreshCurrentDocumentWithoutNavigation(tab)
@@ -4171,8 +4291,10 @@ function ensureAppletWindowForTab(tab, clearContent)
             pcall(applet.window.setVisible, shouldShow and true or false)
         end
         if (created or clearContent) and applet.window.setBackgroundColor and applet.window.clear then
-            pcall(applet.window.setBackgroundColor, colors.black)
-            pcall(applet.window.setTextColor, colors.white)
+            local bg = target.pageDefaultBackground or currentDefaultBackgroundColorValue()
+            local fg = target.pageDefaultForeground or currentDefaultForegroundColorValue(bg)
+            pcall(applet.window.setBackgroundColor, bg)
+            pcall(applet.window.setTextColor, fg)
             pcall(applet.window.clear)
             pcall(applet.window.setCursorPos, 1, 1)
         end
@@ -5393,6 +5515,67 @@ function pasteClipboardText()
     return true
 end
 
+function keyToPrintableText(key, shifted)
+    if key == nil then
+        return nil
+    end
+    if keys and keys.a and keys.z and key >= keys.a and key <= keys.z then
+        local base = string.byte("a")
+        local ch = string.char(base + (key - keys.a))
+        if shifted then
+            ch = ch:upper()
+        end
+        return ch
+    end
+    if key == keys.space then
+        return " "
+    end
+    if key == keys.zero then
+        return shifted and ")" or "0"
+    elseif key == keys.one then
+        return shifted and "!" or "1"
+    elseif key == keys.two then
+        return shifted and "@" or "2"
+    elseif key == keys.three then
+        return shifted and "#" or "3"
+    elseif key == keys.four then
+        return shifted and "$" or "4"
+    elseif key == keys.five then
+        return shifted and "%" or "5"
+    elseif key == keys.six then
+        return shifted and "^" or "6"
+    elseif key == keys.seven then
+        return shifted and "&" or "7"
+    elseif key == keys.eight then
+        return shifted and "*" or "8"
+    elseif key == keys.nine then
+        return shifted and "(" or "9"
+    elseif key == keys.minus then
+        return shifted and "_" or "-"
+    elseif key == keys.equals then
+        return shifted and "+" or "="
+    elseif key == keys.leftBracket then
+        return shifted and "{" or "["
+    elseif key == keys.rightBracket then
+        return shifted and "}" or "]"
+    elseif key == keys.backslash then
+        return shifted and "|" or "\\"
+    elseif key == keys.semicolon then
+        return shifted and ":" or ";"
+    elseif key == keys.apostrophe then
+        return shifted and "\"" or "'"
+    elseif key == keys.grave then
+        return shifted and "~" or "`"
+    elseif key == keys.comma then
+        return shifted and "<" or ","
+    elseif key == keys.period then
+        return shifted and ">" or "."
+    elseif key == keys.slash then
+        return shifted and "?" or "/"
+    end
+    return nil
+end
+
 function handleKeyDown(key, appletContext)
     if key ~= keys.v then
         state.skipNextPaste = false
@@ -5505,6 +5688,23 @@ function handleKeyDown(key, appletContext)
             end
         end
         return
+    end
+
+    if not state.ctrlDown then
+        local typed = keyToPrintableText(key, state.shiftDown)
+        if typed and typed ~= "" then
+            local tab = activeTab()
+            if tab.urlFocus then
+                insertUrlText(typed)
+                state.syntheticCharPending = true
+                return
+            end
+            if handleFocusedFormControlChar(tab, typed) then
+                bumpRenderRevision(tab)
+                state.syntheticCharPending = true
+                return
+            end
+        end
     end
 
     local tab = activeTab()
@@ -5626,6 +5826,10 @@ function handleTimer(timerId)
 end
 
 function handleChar(character)
+    if state.syntheticCharPending then
+        state.syntheticCharPending = false
+        return
+    end
     local byte = character and string.byte(character, 1) or nil
     if byte and byte >= 1 and byte <= 31 then
         if byte == 1 then
@@ -5693,8 +5897,16 @@ function handlePaste(text)
 end
 
 function bootstrap(initialUrls)
-    term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.white)
+    if state.initialTermBackground == nil and term and term.getBackgroundColor then
+        state.initialTermBackground = term.getBackgroundColor()
+    end
+    if state.initialTermForeground == nil and term and term.getTextColor then
+        state.initialTermForeground = term.getTextColor()
+    end
+    local bg = currentDefaultBackgroundColorValue()
+    local fg = currentDefaultForegroundColorValue(bg)
+    term.setBackgroundColor(bg)
+    term.setTextColor(fg)
     term.clear()
     term.setCursorPos(1, 1)
     scheduleAnimationTick()
@@ -5897,6 +6109,23 @@ function processFrameAfterEvent(frameStart)
 
     state.highUsage.lastFrameMs = (os.clock() - frameStart) * 1000
 
+    if state.highUsage.intentionalUiBreak then
+        state.highUsage.intentionalUiBreak = false
+        state.highUsage.overCount = 0
+        state.highUsage.frozen = false
+        state.highUsage.cooldownUntil = os.clock() + HIGH_USAGE_COOLDOWN_SECONDS
+        return
+    end
+
+    if state.modal.open then
+        local spec = state.modal.spec
+        if not (spec and spec.id == "high_usage_guard") then
+            state.highUsage.overCount = 0
+            state.highUsage.frozen = false
+            return
+        end
+    end
+
     if usageGuardEnabled() then
         if os.clock() < (state.highUsage.cooldownUntil or 0) then
             state.highUsage.overCount = 0
@@ -5948,6 +6177,10 @@ function processNextBrowserEvent()
     state.lastPulledEvent = { os.pullEvent() }
     state.highUsage.loadingFrame = false
 
+    if state.syntheticCharPending and state.lastPulledEvent[1] ~= "char" then
+        state.syntheticCharPending = false
+    end
+
     if state.skipNextPaste and state.lastPulledEvent[1] ~= "paste" and state.lastPulledEvent[1] ~= "key_up" then
         state.skipNextPaste = false
     end
@@ -5966,8 +6199,10 @@ end
 
 function shutdownBrowserUi()
     term.setCursorBlink(false)
-    term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.white)
+    local bg = state.initialTermBackground or colors.black
+    local fg = state.initialTermForeground or colors.white
+    term.setBackgroundColor(bg)
+    term.setTextColor(fg)
     term.clear()
     term.setCursorPos(1, 1)
     print(APP_TITLE .. " closed")

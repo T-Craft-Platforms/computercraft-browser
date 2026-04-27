@@ -503,6 +503,8 @@ return function(deps)
         local visibleHeight = math.max(1, h - topRows)
         local selection = state.caretMode and normalizedPageSelection(tab) or nil
         local viewportWidth = clamp(tab.viewportWidth or w, 1, w)
+        local defaultBg = tab.pageDefaultBackground or colors.black
+        local defaultFg = tab.pageDefaultForeground or colors.white
         local scrollbar = verticalScrollbarGeometry(tab, visibleHeight)
 
         for row = 1, visibleHeight do
@@ -513,12 +515,12 @@ return function(deps)
             local bgs = {}
             for x = 1, viewportWidth do
                 local ch = " "
-                local fg = colors.white
-                local bg = colors.black
+                local fg = defaultFg
+                local bg = defaultBg
                 if line then
                     ch = line.chars[x] or " "
-                    fg = line.fg[x] or colors.white
-                    bg = line.bg[x] or colors.black
+                    fg = line.fg[x] or defaultFg
+                    bg = line.bg[x] or defaultBg
                 end
                 if selection and pageSelectionContains(selection, lineIndex, x) then
                     fg = colors.white
@@ -530,13 +532,13 @@ return function(deps)
             end
             for x = viewportWidth + 1, w do
                 chars[x] = " "
-                fgs[x] = colors.toBlit(colors.white)
-                bgs[x] = colors.toBlit(colors.black)
+                fgs[x] = colors.toBlit(defaultFg)
+                bgs[x] = colors.toBlit(defaultBg)
             end
             if scrollbar and w >= 1 then
                 local inThumb = row >= scrollbar.thumbTop and row < (scrollbar.thumbTop + scrollbar.thumbHeight)
                 chars[w] = " "
-                fgs[w] = colors.toBlit(colors.white)
+                fgs[w] = colors.toBlit(defaultFg)
                 bgs[w] = colors.toBlit(inThumb and colors.lightGray or colors.gray)
             end
             term.setCursorPos(1, row + topRows)
@@ -546,13 +548,17 @@ return function(deps)
         local currentUrl = tostring(tab.currentUrl or ""):lower()
         local statusText = tostring(tab.settingsStickyStatus or "")
         if statusText ~= "" and currentUrl:sub(1, #"about:settings") == "about:settings" then
+            local statusRight = clamp(viewportWidth, 1, w)
             local badge = " " .. statusText .. " "
-            local maxBadgeWidth = math.max(12, math.floor(w * 0.55))
+            local maxBadgeWidth = math.max(12, math.floor(statusRight * 0.55))
             if #badge > maxBadgeWidth then
                 local inner = math.max(1, maxBadgeWidth - 5)
                 badge = " " .. statusText:sub(1, inner) .. "... "
             end
-            local x = math.max(1, w - #badge + 1)
+            if #badge > statusRight then
+                badge = badge:sub(1, statusRight)
+            end
+            local x = math.max(1, statusRight - #badge + 1)
             writeClipped(x, topRows + 1, badge, colors.black, colors.lime)
         end
     end

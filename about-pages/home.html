@@ -4,11 +4,6 @@
     <meta charset="utf-8">
     <title>Home</title>
     <style>
-      body {
-        color: white;
-        background-color: black;
-      }
-
       h1 {
         color: yellow;
         margin-top: 0;
@@ -38,20 +33,14 @@
     </style>
   </head>
   <body>
-    <h1>{{APP_ICON}} {{APP_TITLE}} Home</h1>
-    <p>Version: <code>{{APP_VERSION}}</code></p>
-    <p><code>{{CURRENT_URL}}</code></p>
+    <h1>{{APP_TITLE}} {{APP_VERSION}}</h1>
+    <p>Welcome back!</p>
 
-    <h2>Time</h2>
-    <ul>
-      <li>Minecraft: <code>{{MINECRAFT_TIME@500}}</code></li>
-      <li>Real life: <code>{{REAL_TIME@1000}}</code></li>
-    </ul>
+    <br>
 
-    <h2>Favorites (<code>{{FAVORITES_COUNT}}</code>)</h2>
-    <ul>
-      {{FAVORITES_LIST}}
-    </ul>
+    <p>Time: {{REAL_TIME@1000}}</p>
+
+    <br>
 
     <p><a href="about:favorites">Open favorites page</a> | <a href="about:history">History</a> | <a href="about:settings">Settings</a> | <a href="about:help">Help</a></p>
   </body>

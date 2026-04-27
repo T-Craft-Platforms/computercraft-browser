@@ -27,30 +27,204 @@ return function(deps)
         return VFS_ROOT
     end
 
-    local function sanitizePathPart(value)
-        local part = trim(tostring(value or "")):lower()
-        part = part:gsub("[^%w%._%-]", "_")
-        part = part:gsub("_+", "_")
-        part = part:gsub("^_+", "")
-        part = part:gsub("_+$", "")
-        if part == "" then
-            part = "unknown"
+    local URL_GUID_MAP_FILE = "url-guid-map.tbl"
+    local randomSeeded = false
+
+    local function seedRandom()
+        if randomSeeded then
+            return
         end
-        return part
+        randomSeeded = true
+
+        local seed = 0
+        if os and type(os.epoch) == "function" then
+            local okEpoch, epochValue = pcall(os.epoch, "utc")
+            if okEpoch and type(epochValue) == "number" then
+                seed = seed + epochValue
+            end
+        end
+        if os and type(os.clock) == "function" then
+            seed = seed + math.floor(os.clock() * 1000000)
+        end
+        local addr = 0
+        local addrHex = tostring({}):match("0x(%x+)")
+        if addrHex then
+            addr = tonumber(addrHex, 16) or 0
+        end
+        seed = (seed + addr) % 2147483647
+        if seed <= 0 then
+            seed = 1
+        end
+
+        math.randomseed(seed)
+        math.random()
+        math.random()
+        math.random()
     end
 
-    local function appletVfsBucket(sourceUrl)
-        local parsed = core.parseUrl and core.parseUrl(sourceUrl or "") or nil
-        if parsed and (parsed.scheme == "http" or parsed.scheme == "https") then
-            return sanitizePathPart(parsed.authority or "web")
+    local function randomHex(count)
+        local out = {}
+        for i = 1, count do
+            out[i] = ("%x"):format(math.random(0, 15))
         end
+        return table.concat(out)
+    end
+
+    local function generateGuid()
+        seedRandom()
+        local variant = ({ "8", "9", "a", "b" })[math.random(1, 4)]
+        return table.concat({
+            randomHex(8),
+            randomHex(4),
+            "4" .. randomHex(3),
+            variant .. randomHex(3),
+            randomHex(12),
+        }, "-")
+    end
+
+    local function isGuid(value)
+        local text = trim(tostring(value or "")):lower()
+        return text:match(
+            "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-4%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+        ) ~= nil
+    end
+
+    local function normalizeVfsUrlKey(sourceUrl)
+        local raw = trim(tostring(sourceUrl or ""))
+        if raw == "" then
+            return "about:blank"
+        end
+
+        local parsed = core.parseUrl and core.parseUrl(raw) or nil
+        if parsed and (parsed.scheme == "http" or parsed.scheme == "https") and parsed.authority then
+            local scheme = trim(tostring(parsed.scheme or "")):lower()
+            local authority = trim(tostring(parsed.authority or "")):lower()
+            local path = tostring(parsed.path or "/")
+            path = path:gsub("[?#].*$", "")
+            if path == "" then
+                path = "/"
+            end
+            return scheme .. "://" .. authority .. path
+        end
+
         if parsed and parsed.scheme == "file" then
-            return "local_files"
+            local path = tostring(parsed.path or "")
+            if parsed.authority and parsed.authority ~= "" then
+                if path == "" or path == "/" then
+                    path = parsed.authority
+                else
+                    path = parsed.authority .. path
+                end
+            end
+            path = path:gsub("[?#].*$", "")
+            if path == "" then
+                path = "/"
+            end
+            return "file://" .. path
         end
+
         if parsed and parsed.scheme then
-            return sanitizePathPart(parsed.scheme)
+            local path = tostring(parsed.path or ""):gsub("[?#].*$", "")
+            return tostring(parsed.scheme):lower() .. ":" .. path
         end
-        return "unknown"
+
+        return raw:gsub("[?#].*$", "")
+    end
+
+    local function loadUrlGuidMap(mappingPath)
+        if not (textutils and type(textutils.unserialize) == "function") then
+            return {}
+        end
+        if not fs.exists(mappingPath) then
+            return {}
+        end
+
+        local handle = fs.open(mappingPath, "r")
+        if not handle then
+            return {}
+        end
+
+        local payload = ""
+        local okRead = pcall(function()
+            payload = handle.readAll() or ""
+        end)
+        if not okRead then
+            okRead = pcall(function()
+                payload = handle:readAll() or ""
+            end)
+        end
+        pcall(function()
+            handle.close()
+        end)
+        pcall(function()
+            handle:close()
+        end)
+        if not okRead or payload == "" then
+            return {}
+        end
+
+        local okDecode, decoded = pcall(textutils.unserialize, payload)
+        if not okDecode or type(decoded) ~= "table" then
+            return {}
+        end
+
+        local cleaned = {}
+        for key, value in pairs(decoded) do
+            local normalizedKey = trim(tostring(key or ""))
+            local guid = trim(tostring(value or "")):lower()
+            if normalizedKey ~= "" and isGuid(guid) then
+                cleaned[normalizedKey] = guid
+            end
+        end
+        return cleaned
+    end
+
+    local function saveUrlGuidMap(mappingPath, mapping)
+        if not (textutils and type(textutils.serialize) == "function") then
+            return false
+        end
+
+        local encoded = textutils.serialize(mapping or {})
+        if not encoded then
+            return false
+        end
+
+        local handle = fs.open(mappingPath, "w")
+        if not handle then
+            return false
+        end
+
+        local okWrite = pcall(function()
+            handle.write(encoded)
+        end)
+        if not okWrite then
+            okWrite = pcall(function()
+                handle:write(encoded)
+            end)
+        end
+        local okClose = pcall(function()
+            handle.close()
+        end)
+        if not okClose then
+            okClose = pcall(function()
+                handle:close()
+            end)
+        end
+
+        return okWrite and okClose
+    end
+
+    local function guidInMapping(mapping, guid)
+        local needle = trim(tostring(guid or "")):lower()
+        if needle == "" then
+            return false
+        end
+        for _, existing in pairs(mapping or {}) do
+            if trim(tostring(existing or "")):lower() == needle then
+                return true
+            end
+        end
+        return false
     end
 
     local function ensureDir(path)
@@ -90,7 +264,21 @@ return function(deps)
         local sharedRoot = activeVfsRoot()
         migrateLegacyVfsRoot(sharedRoot)
         ensureDir(sharedRoot)
-        local vfsRoot = fs.combine(sharedRoot, appletVfsBucket(sourceUrl))
+
+        local mapPath = fs.combine(sharedRoot, URL_GUID_MAP_FILE)
+        local key = normalizeVfsUrlKey(sourceUrl)
+        local urlGuidMap = loadUrlGuidMap(mapPath)
+
+        local guid = trim(tostring(urlGuidMap[key] or "")):lower()
+        if not isGuid(guid) then
+            repeat
+                guid = generateGuid()
+            until not guidInMapping(urlGuidMap, guid)
+            urlGuidMap[key] = guid
+            saveUrlGuidMap(mapPath, urlGuidMap)
+        end
+
+        local vfsRoot = fs.combine(sharedRoot, guid)
         ensureDir(vfsRoot)
 
         local vfs = {}
@@ -100,9 +288,16 @@ return function(deps)
             cleaned = cleaned:gsub("\\", "/")
             -- Use fs.combine to normalize the path, then verify it stays within VFS_ROOT
             local combined = fs.combine(vfsRoot, cleaned)
-            -- Ensure the resolved path starts with VFS_ROOT to prevent traversal
+            -- Ensure the resolved path is exactly root or a child path.
             local normalizedRoot = fs.combine(vfsRoot, "")
-            if combined:sub(1, #normalizedRoot) ~= normalizedRoot then
+            if #normalizedRoot > 1 and normalizedRoot:sub(-1) == "/" then
+                normalizedRoot = normalizedRoot:sub(1, -2)
+            end
+            local rootPrefix = normalizedRoot
+            if rootPrefix:sub(-1) ~= "/" then
+                rootPrefix = rootPrefix .. "/"
+            end
+            if combined ~= normalizedRoot and combined:sub(1, #rootPrefix) ~= rootPrefix then
                 return fs.combine(vfsRoot, "blocked")
             end
             return combined
