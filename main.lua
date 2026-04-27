@@ -4,7 +4,19 @@ local function getScriptDir()
     if shell and shell.getRunningProgram and fs and fs.getDir then
         local running = shell.getRunningProgram()
         if running and running ~= "" then
+            if shell and type(shell.resolve) == "function" then
+                local okResolve, resolved = pcall(shell.resolve, running)
+                if okResolve and resolved and resolved ~= "" then
+                    return fs.getDir(resolved)
+                end
+            end
             return fs.getDir(running)
+        end
+    end
+    if shell and type(shell.dir) == "function" then
+        local cwd = shell.dir()
+        if cwd and cwd ~= "" then
+            return cwd
         end
     end
     return "/src/browser"

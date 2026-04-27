@@ -6,7 +6,19 @@ function getScriptDir()
     if shell and shell.getRunningProgram and fs and fs.getDir then
         local running = shell.getRunningProgram()
         if running and running ~= "" then
+            if shell and type(shell.resolve) == "function" then
+                local okResolve, resolved = pcall(shell.resolve, running)
+                if okResolve and resolved and resolved ~= "" then
+                    return fs.getDir(resolved)
+                end
+            end
             return fs.getDir(running)
+        end
+    end
+    if shell and type(shell.dir) == "function" then
+        local cwd = shell.dir()
+        if cwd and cwd ~= "" then
+            return cwd
         end
     end
     return "/src/browser"
@@ -27,18 +39,54 @@ createSandbox = loadModule("lib/sandbox.lua")
 createPrinting = loadModule("lib/printing.lua")
 createFormControls = loadModule("lib/form-controls.lua")
 
-DEFAULT_BROWSER_DATA_DIR = "/cc-browser-data"
+local function normalizeStorageRoot(path)
+    local normalized = tostring(path or "")
+    normalized = normalized:gsub("\\", "/")
+    normalized = normalized:gsub("/+", "/")
+    if normalized == "" then
+        normalized = "/"
+    end
+    if normalized:sub(1, 1) ~= "/" then
+        normalized = "/" .. normalized
+    end
+    if #normalized > 1 and normalized:sub(-1) == "/" then
+        normalized = normalized:sub(1, -2)
+    end
+    return normalized
+end
+
+local function resolveScriptStorageRoot()
+    local scriptBase = SCRIPT_DIR
+    if (not scriptBase or scriptBase == "") and shell and type(shell.dir) == "function" then
+        scriptBase = shell.dir()
+    end
+    if scriptBase == nil then
+        scriptBase = "/"
+    end
+    local combined = fs.combine(scriptBase, "data")
+    if shell and type(shell.resolve) == "function" then
+        local okResolve, resolved = pcall(shell.resolve, combined)
+        if okResolve and resolved and resolved ~= "" then
+            combined = resolved
+        end
+    end
+    return normalizeStorageRoot(combined)
+end
+
+local SCRIPT_STORAGE_ROOT = resolveScriptStorageRoot()
+DEFAULT_BROWSER_DATA_DIR = SCRIPT_STORAGE_ROOT
 DEFAULT_BROWSER_DOWNLOADS_DIR = fs.combine(DEFAULT_BROWSER_DATA_DIR, "downloads")
+LEGACY_DEFAULT_BROWSER_DATA_DIR = "/cc-browser-data"
+LEGACY_DEFAULT_BROWSER_DOWNLOADS_DIR = fs.combine(LEGACY_DEFAULT_BROWSER_DATA_DIR, "downloads")
 LEGACY_BROWSER_DATA_DIR = "/cc-browser"
 LEGACY_BROWSER_DOWNLOADS_DIR = fs.combine(LEGACY_BROWSER_DATA_DIR, "downloads")
 LEGACY_ROOT_DOWNLOADS_DIR = "/downloads"
-LEGACY_SCRIPT_BROWSER_DATA_DIR = fs.combine((SCRIPT_DIR ~= "" and SCRIPT_DIR or "/"), ".data")
-if LEGACY_SCRIPT_BROWSER_DATA_DIR:sub(1, 1) ~= "/" then
-    LEGACY_SCRIPT_BROWSER_DATA_DIR = "/" .. LEGACY_SCRIPT_BROWSER_DATA_DIR
-end
+LEGACY_SCRIPT_BROWSER_DATA_DIR = normalizeStorageRoot(fs.combine((SCRIPT_DIR ~= "" and SCRIPT_DIR or "/"), ".data"))
 LEGACY_BROWSER_STATE_PATH = fs.combine(SCRIPT_DIR, "browser-state.tbl")
+LEGACY_DEFAULT_DATA_BROWSER_STATE_PATH = fs.combine(fs.combine(LEGACY_DEFAULT_BROWSER_DATA_DIR, "config"), "browser-state.tbl")
 LEGACY_DATA_BROWSER_STATE_PATH = fs.combine(fs.combine(LEGACY_BROWSER_DATA_DIR, "config"), "browser-state.tbl")
 local LEGACY_RELATIVE_BROWSER_STATE_PATH = fs.combine(fs.combine("cc-browser", "config"), "browser-state.tbl")
+local LEGACY_DEFAULT_PATH_SETTINGS_PATH = fs.combine(fs.combine(LEGACY_DEFAULT_BROWSER_DATA_DIR, "config"), "paths.tbl")
 local LEGACY_PATH_SETTINGS_PATH = fs.combine(fs.combine(LEGACY_BROWSER_DATA_DIR, "config"), "paths.tbl")
 local LEGACY_RELATIVE_PATH_SETTINGS_PATH = fs.combine(fs.combine("cc-browser", "config"), "paths.tbl")
 
@@ -49,7 +97,6 @@ local browserSettings = {
     persistence_enabled = "true",
     usage_guard_enabled = "true",
     pause_inactive_applets = "true",
-    browser_data_dir = DEFAULT_BROWSER_DATA_DIR,
     downloads_dir = DEFAULT_BROWSER_DOWNLOADS_DIR,
     fullscreen_mode = "normal",
     browser_engine_level = "advanced",
@@ -112,7 +159,7 @@ end
 local function normalizeDirSettingPath(rawPath, fallback)
     local candidate = normalizeAbsolutePath(rawPath, fallback)
     if candidate == "" then
-        return normalizeAbsolutePath(fallback, DEFAULT_BROWSER_DATA_DIR)
+        return normalizeAbsolutePath(fallback, "")
     end
     return candidate
 end
@@ -256,22 +303,8 @@ local function currentDefaultForegroundColorValue(background)
     return fg
 end
 
-local function normalizeBrowserDataDir(rawPath)
-    local value = normalizeDirSettingPath(rawPath, DEFAULT_BROWSER_DATA_DIR)
-    if fs and fs.getName and fs.getDir then
-        local leaf = tostring(fs.getName(value) or ""):lower()
-        if leaf == "config" then
-            local parent = tostring(fs.getDir(value) or "")
-            if parent ~= "" then
-                value = parent
-            end
-        end
-    end
-    return normalizeAbsolutePath(value, DEFAULT_BROWSER_DATA_DIR)
-end
-
 local function currentBrowserDataDir()
-    return normalizeBrowserDataDir(browserSettings.browser_data_dir)
+    return DEFAULT_BROWSER_DATA_DIR
 end
 
 local function currentSettingsDir()
@@ -296,28 +329,38 @@ end
 
 local function migrateLegacyBrowserDataDirIfNeeded()
     local changedSettings = false
-    local currentDataDir = currentBrowserDataDir()
-    if currentDataDir == LEGACY_BROWSER_DATA_DIR or currentDataDir == LEGACY_SCRIPT_BROWSER_DATA_DIR then
-        browserSettings.browser_data_dir = DEFAULT_BROWSER_DATA_DIR
-        changedSettings = true
-    end
 
     local currentDownloads = currentDownloadsDir()
-    if currentDownloads == LEGACY_BROWSER_DOWNLOADS_DIR or currentDownloads == LEGACY_ROOT_DOWNLOADS_DIR then
+    if currentDownloads == LEGACY_DEFAULT_BROWSER_DOWNLOADS_DIR
+        or currentDownloads == LEGACY_BROWSER_DOWNLOADS_DIR
+        or currentDownloads == LEGACY_ROOT_DOWNLOADS_DIR then
         browserSettings.downloads_dir = DEFAULT_BROWSER_DOWNLOADS_DIR
         changedSettings = true
     end
 
     local targetDataDir = currentBrowserDataDir()
-    if targetDataDir == DEFAULT_BROWSER_DATA_DIR
-        and fs.exists(LEGACY_BROWSER_DATA_DIR)
-        and fs.isDir(LEGACY_BROWSER_DATA_DIR)
-        and not fs.exists(DEFAULT_BROWSER_DATA_DIR) then
-        local targetParent = fs.getDir(DEFAULT_BROWSER_DATA_DIR)
-        if targetParent and targetParent ~= "" and not fs.exists(targetParent) then
-            pcall(fs.makeDir, targetParent)
+    if not fs.exists(targetDataDir) then
+        local migrationSources = {
+            LEGACY_DEFAULT_BROWSER_DATA_DIR,
+            LEGACY_BROWSER_DATA_DIR,
+            LEGACY_SCRIPT_BROWSER_DATA_DIR,
+        }
+        for _, sourceDir in ipairs(migrationSources) do
+            local sourcePath = normalizeAbsolutePath(sourceDir, "")
+            if sourcePath ~= ""
+                and sourcePath ~= targetDataDir
+                and fs.exists(sourcePath)
+                and fs.isDir(sourcePath) then
+                local targetParent = fs.getDir(targetDataDir)
+                if targetParent and targetParent ~= "" and not fs.exists(targetParent) then
+                    pcall(fs.makeDir, targetParent)
+                end
+                local okMove = pcall(fs.move, sourcePath, targetDataDir)
+                if okMove and fs.exists(targetDataDir) then
+                    break
+                end
+            end
         end
-        pcall(fs.move, LEGACY_BROWSER_DATA_DIR, DEFAULT_BROWSER_DATA_DIR)
     end
 
     if changedSettings and persistPathSettings then
@@ -399,24 +442,18 @@ end
 
 function ensureWritableStoragePaths()
     local changed = false
-
-    local dataPath = chooseWritableDirectory({
-        currentBrowserDataDir(),
-        DEFAULT_BROWSER_DATA_DIR,
-        LEGACY_BROWSER_DATA_DIR,
-        "/cc-browser",
-    }, DEFAULT_BROWSER_DATA_DIR)
-    if dataPath ~= "" and dataPath ~= currentBrowserDataDir() then
-        browserSettings.browser_data_dir = dataPath
-        changed = true
-    end
+    local dataPath = currentBrowserDataDir()
+    ensureDirExists(dataPath)
+    ensureDirExists(currentSettingsDir())
+    ensureDirExists(currentVfsRoot())
 
     local downloadsPath = chooseWritableDirectory({
         currentDownloadsDir(),
-        fs.combine(currentBrowserDataDir(), "downloads"),
+        fs.combine(dataPath, "downloads"),
+        LEGACY_DEFAULT_BROWSER_DOWNLOADS_DIR,
         DEFAULT_BROWSER_DOWNLOADS_DIR,
         LEGACY_BROWSER_DOWNLOADS_DIR,
-        "/downloads",
+        LEGACY_ROOT_DOWNLOADS_DIR,
     }, DEFAULT_BROWSER_DOWNLOADS_DIR)
     if downloadsPath ~= "" and downloadsPath ~= currentDownloadsDir() then
         browserSettings.downloads_dir = downloadsPath
@@ -530,6 +567,7 @@ local function listBrowserSettings()
     for key, value in pairs(browserSettings) do
         copied[key] = tostring(value)
     end
+    copied.browser_data_dir = currentBrowserDataDir()
     return copied
 end
 
@@ -537,6 +575,9 @@ local function getBrowserSetting(key)
     local normalized = normalizeSettingKey(key)
     if normalized == "" then
         return nil
+    end
+    if normalized == "browser_data_dir" then
+        return currentBrowserDataDir()
     end
     return browserSettings[normalized]
 end
@@ -552,6 +593,7 @@ local function loadPathSettings()
     local candidates = {}
     local seen = {}
     appendUniquePath(candidates, seen, currentPathSettingsPath())
+    appendUniquePath(candidates, seen, LEGACY_DEFAULT_PATH_SETTINGS_PATH)
     appendUniquePath(candidates, seen, LEGACY_PATH_SETTINGS_PATH)
     appendUniquePath(candidates, seen, LEGACY_RELATIVE_PATH_SETTINGS_PATH)
 
@@ -566,12 +608,16 @@ local function loadPathSettings()
             else
                 local okParse, decoded = pcall(textutils.unserialize, payload)
                 if okParse and type(decoded) == "table" then
-                    local storedDataDir = decoded.browser_data_dir
-                    if storedDataDir == nil then
-                        storedDataDir = decoded.settings_dir
+                    local downloadsPath = decoded.downloads_dir
+                    if downloadsPath == nil then
+                        downloadsPath = decoded.download_path
                     end
-                    browserSettings.browser_data_dir = normalizeBrowserDataDir(storedDataDir)
-                    browserSettings.downloads_dir = normalizeDirSettingPath(decoded.downloads_dir, DEFAULT_BROWSER_DOWNLOADS_DIR)
+                    if downloadsPath == nil then
+                        downloadsPath = decoded.default_download_path
+                    end
+                    if downloadsPath ~= nil then
+                        browserSettings.downloads_dir = normalizeDirSettingPath(downloadsPath, DEFAULT_BROWSER_DOWNLOADS_DIR)
+                    end
                     return true, nil
                 end
                 lastErr = "Path settings are invalid"
@@ -589,7 +635,6 @@ persistPathSettings = function()
         return false, "Serializer unavailable"
     end
     local snapshot = {
-        browser_data_dir = currentBrowserDataDir(),
         downloads_dir = currentDownloadsDir(),
     }
     local encoded = textutils.serialize(snapshot)
@@ -597,24 +642,9 @@ persistPathSettings = function()
         return false, "Failed to encode path settings"
     end
 
-    local candidates = {}
-    local seen = {}
-    appendUniquePath(candidates, seen, currentPathSettingsPath())
-    appendUniquePath(candidates, seen, LEGACY_PATH_SETTINGS_PATH)
-    appendUniquePath(candidates, seen, LEGACY_RELATIVE_PATH_SETTINGS_PATH)
-
-    local wroteAny = false
-    local lastErr = "Could not open path settings for writing"
-    for _, path in ipairs(candidates) do
-        local okWrite, writeErr = writeTextFile(path, encoded)
-        if okWrite then
-            wroteAny = true
-        else
-            lastErr = tostring(writeErr or "Failed to write path settings")
-        end
-    end
-    if not wroteAny then
-        return false, lastErr
+    local okWrite, writeErr = writeTextFile(currentPathSettingsPath(), encoded)
+    if not okWrite then
+        return false, tostring(writeErr or "Failed to write path settings")
     end
     return true, nil
 end
@@ -728,44 +758,7 @@ local function setBrowserSetting(key, value)
         return false, "Invalid pause_inactive_applets value (expected true/false)"
     end
     if normalized == "browser_data_dir" then
-        local oldDataDir = currentBrowserDataDir()
-        local path = normalizeBrowserDataDir(value)
-        if path == "" then
-            return false, "Invalid browser_data_dir value (path cannot be empty)"
-        end
-        if not canWriteToDirectory(path) then
-            return false, "Invalid browser_data_dir value (path is not writable)"
-        end
-        browserSettings[normalized] = path
-        local oldVfsRoot = fs.combine(oldDataDir, "vfs")
-        local newVfsRoot = fs.combine(path, "vfs")
-        if oldVfsRoot ~= newVfsRoot and fs.exists(oldVfsRoot) and not fs.exists(newVfsRoot) then
-            local newVfsParent = fs.getDir(newVfsRoot)
-            if newVfsParent and newVfsParent ~= "" then
-                pcall(fs.makeDir, newVfsParent)
-            end
-            pcall(fs.move, oldVfsRoot, newVfsRoot)
-        end
-        if fs.exists("/.vfs") then
-            local newVfsParent = fs.getDir(newVfsRoot)
-            if newVfsParent and newVfsParent ~= "" then
-                pcall(fs.makeDir, newVfsParent)
-            end
-            if not fs.exists(newVfsRoot) then
-                pcall(fs.makeDir, newVfsRoot)
-            end
-            local importPath = fs.combine(newVfsRoot, "_legacy_root")
-            if not fs.exists(importPath) then
-                pcall(fs.move, "/.vfs", importPath)
-            end
-        end
-        if persistPathSettings then
-            persistPathSettings()
-        end
-        if persistBrowserState then
-            persistBrowserState(true)
-        end
-        return true, nil
+        return false, "browser_data_dir is fixed to " .. currentBrowserDataDir()
     end
     if normalized == "downloads_dir" then
         local path = normalizeDirSettingPath(value, DEFAULT_BROWSER_DOWNLOADS_DIR)
@@ -1074,6 +1067,7 @@ local function loadBrowserState()
     local candidates = {}
     local seen = {}
     appendUniquePath(candidates, seen, browserStatePath())
+    appendUniquePath(candidates, seen, LEGACY_DEFAULT_DATA_BROWSER_STATE_PATH)
     appendUniquePath(candidates, seen, LEGACY_DATA_BROWSER_STATE_PATH)
     appendUniquePath(candidates, seen, LEGACY_RELATIVE_BROWSER_STATE_PATH)
     appendUniquePath(candidates, seen, LEGACY_BROWSER_STATE_PATH)
@@ -1111,7 +1105,7 @@ local function loadBrowserState()
                 if normalized == "fullscreen_mode" then
                     browserSettings[normalized] = normalizeFullscreenMode(rawValue)
                 elseif normalized == "browser_data_dir" then
-                    browserSettings[normalized] = normalizeBrowserDataDir(rawValue)
+                    -- browser_data_dir is fixed to SCRIPT_DIR/data and cannot be overridden by saved state
                 elseif normalized == "downloads_dir" then
                     browserSettings[normalized] = normalizeDirSettingPath(rawValue, DEFAULT_BROWSER_DOWNLOADS_DIR)
                 else
@@ -1120,7 +1114,6 @@ local function loadBrowserState()
             end
         end
     end
-    browserSettings.browser_data_dir = currentBrowserDataDir()
     browserSettings.downloads_dir = currentDownloadsDir()
     browserSettings.fullscreen_mode = normalizeFullscreenMode(browserSettings.fullscreen_mode)
     browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
@@ -1189,7 +1182,7 @@ local function loadBrowserState()
     if persistPathSettings then
         persistPathSettings()
     end
-    activeBrowserStatePath = statePath
+    activeBrowserStatePath = browserStatePath()
     return true, nil
 end
 
@@ -1222,24 +1215,13 @@ persistBrowserState = function(forceWrite)
         return false, "Failed to encode state"
     end
 
-    local candidates = {}
-    local seen = {}
-    appendUniquePath(candidates, seen, browserStatePath())
-    appendUniquePath(candidates, seen, activeBrowserStatePath)
-    appendUniquePath(candidates, seen, LEGACY_DATA_BROWSER_STATE_PATH)
-    appendUniquePath(candidates, seen, LEGACY_RELATIVE_BROWSER_STATE_PATH)
-    appendUniquePath(candidates, seen, LEGACY_BROWSER_STATE_PATH)
-
-    local lastErr = "Could not write state file"
-    for _, targetPath in ipairs(candidates) do
-        local okWrite, writeErr = writeTextFile(targetPath, encoded)
-        if okWrite then
-            activeBrowserStatePath = targetPath
-            return true, nil
-        end
-        lastErr = tostring(writeErr or "Could not write state file")
+    local targetPath = browserStatePath()
+    local okWrite, writeErr = writeTextFile(targetPath, encoded)
+    if not okWrite then
+        return false, tostring(writeErr or "Could not write state file")
     end
-    return false, lastErr
+    activeBrowserStatePath = targetPath
+    return true, nil
 end
 
 loadPathSettings()
@@ -1270,6 +1252,7 @@ local network = createNetwork(core, {
         appTitle = APP_TITLE,
         appVersion = APP_VERSION,
         appIcon = APP_ICON,
+        getBrowserDataDir = currentBrowserDataDir,
         listSettings = listBrowserSettings,
         getSetting = getBrowserSetting,
         setSetting = setBrowserSetting,

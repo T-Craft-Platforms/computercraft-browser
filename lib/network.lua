@@ -559,9 +559,6 @@ return function(core, options)
                 end
             elseif key == "downloads_dir" then
                 value = tostring(params.downloads_dir_value or value or "")
-            elseif key == "browser_data_dir" or key == "settings_dir" then
-                key = "browser_data_dir"
-                value = tostring(params.browser_data_dir_value or params.settings_dir_value or value or "")
             elseif key == "fullscreen_mode" then
                 local choice = tostring(params.fullscreen_mode_choice or ""):lower()
                 if choice == "seamless" or choice == "seemless" then
@@ -584,8 +581,10 @@ return function(core, options)
                 statusMessage = "Missing setting key."
             elseif key == "home_page" and trim(tostring(value or "")) == "" then
                 statusMessage = "Missing home page value."
-            elseif (key == "downloads_dir" or key == "browser_data_dir") and trim(tostring(value or "")) == "" then
+            elseif key == "downloads_dir" and trim(tostring(value or "")) == "" then
                 statusMessage = ("Missing %s value."):format(key)
+            elseif key == "browser_data_dir" or key == "settings_dir" then
+                statusMessage = "browser_data_dir is fixed and cannot be changed."
             elseif type(aboutApi.setSetting) ~= "function" then
                 statusMessage = "Settings API is unavailable."
             else
@@ -732,9 +731,12 @@ return function(core, options)
             fullscreenModeChoice = "seamless"
         end
 
-        local browserDataDirValue = trim(tostring(params.browser_data_dir_value or params.settings_dir_value or ""))
+        local browserDataDirValue = ""
+        if type(aboutApi.getBrowserDataDir) == "function" then
+            browserDataDirValue = trim(tostring(aboutApi.getBrowserDataDir() or ""))
+        end
         if browserDataDirValue == "" then
-            browserDataDirValue = trim(tostring(settings.browser_data_dir or "/.data/"))
+            browserDataDirValue = trim(tostring(settings.browser_data_dir or "/src/browser/data"))
         end
         local downloadsDirValue = trim(tostring(params.downloads_dir_value or ""))
         if downloadsDirValue == "" then
