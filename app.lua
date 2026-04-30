@@ -2603,6 +2603,7 @@ function showSnackbar(message, durationMs)
     snackbar.startedAt = os.clock()
     snackbar.durationMs = math.max(100, math.floor(tonumber(durationMs) or SNACKBAR_DEFAULT_DURATION_MS))
     state.snackbar = snackbar
+    state.animationTimer = nil
     if scheduleAnimationTick then
         scheduleAnimationTick()
     end
