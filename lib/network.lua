@@ -6,7 +6,41 @@ return function(core, options)
     local escapeHtml = core.escapeHtml
     local trim = core.trim
 
-    local aboutPagesDir = options.aboutPagesDir or "/src/browser/about-pages"
+    local function resolveDefaultAboutPagesDir()
+        local candidates = {}
+        local function push(path)
+            if not path or path == "" then
+                return
+            end
+            candidates[#candidates + 1] = fs.combine(path, "about-pages")
+        end
+
+        if debug and type(debug.getinfo) == "function" then
+            local okInfo, info = pcall(debug.getinfo, 1, "S")
+            if okInfo and type(info) == "table" and type(info.source) == "string" then
+                local source = tostring(info.source or "")
+                if source:sub(1, 1) == "@" then
+                    push(fs.getDir(fs.getDir(source:sub(2))))
+                end
+            end
+        end
+
+        if shell and type(shell.dir) == "function" then
+            push(shell.dir())
+        end
+        push(".")
+        push("/")
+
+        for i = 1, #candidates do
+            local candidate = candidates[i]
+            if fs.exists(candidate) and fs.isDir(candidate) then
+                return candidate
+            end
+        end
+        return fs.combine(".", "about-pages")
+    end
+
+    local aboutPagesDir = options.aboutPagesDir or resolveDefaultAboutPagesDir()
     local aboutApi = options.aboutApi or {}
 
     local function makeErrorPage(url, message)
@@ -586,7 +620,10 @@ return function(core, options)
                 end
             elseif key == "browser_engine_level" then
                 local choice = trim(tostring(params.browser_engine_level_choice or "")):lower()
-                if choice == "text_only" or choice == "lite" or choice == "advanced" then
+                if choice == "lite" then
+                    choice = "standard"
+                end
+                if choice == "text_only" or choice == "standard" or choice == "advanced" then
                     value = choice
                 end
             elseif key == "default_bg_color" then
@@ -660,9 +697,12 @@ return function(core, options)
             fullscreenModeChoice = "seamless"
         end
 
-        local browserEngineLevelChoice = trim(tostring(settings.browser_engine_level or "advanced")):lower()
-        if browserEngineLevelChoice ~= "text_only" and browserEngineLevelChoice ~= "lite" and browserEngineLevelChoice ~= "advanced" then
-            browserEngineLevelChoice = "advanced"
+        local browserEngineLevelChoice = trim(tostring(settings.browser_engine_level or "standard")):lower()
+        if browserEngineLevelChoice == "lite" then
+            browserEngineLevelChoice = "standard"
+        end
+        if browserEngineLevelChoice ~= "text_only" and browserEngineLevelChoice ~= "standard" and browserEngineLevelChoice ~= "advanced" then
+            browserEngineLevelChoice = "standard"
         end
 
         local defaultBgColorValue = trim(tostring(settings.default_bg_color or "black")):lower()
@@ -708,7 +748,7 @@ return function(core, options)
             FULLSCREEN_MODE_RADIO_NORMAL_CHECKED = fullscreenModeChoice == "normal" and "checked" or "",
             FULLSCREEN_MODE_RADIO_SEAMLESS_CHECKED = fullscreenModeChoice == "seamless" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_TEXT_ONLY_CHECKED = browserEngineLevelChoice == "text_only" and "checked" or "",
-            BROWSER_ENGINE_LEVEL_RADIO_LITE_CHECKED = browserEngineLevelChoice == "lite" and "checked" or "",
+            BROWSER_ENGINE_LEVEL_RADIO_STANDARD_CHECKED = browserEngineLevelChoice == "standard" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED = browserEngineLevelChoice == "advanced" and "checked" or "",
             DEFAULT_BG_COLOR_VALUE = escapeHtml(defaultBgColorValue),
             DEFAULT_FG_COLOR_VALUE = escapeHtml(defaultFgColorValue),

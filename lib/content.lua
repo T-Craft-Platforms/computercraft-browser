@@ -158,8 +158,11 @@ return function(deps)
         if lowered == "text" or lowered == "textonly" then
             lowered = "text_only"
         end
-        if lowered ~= "text_only" and lowered ~= "lite" and lowered ~= "advanced" then
-            return "advanced"
+        if lowered == "lite" then
+            lowered = "standard"
+        end
+        if lowered ~= "text_only" and lowered ~= "standard" and lowered ~= "advanced" then
+            return "standard"
         end
         return lowered
     end
@@ -204,7 +207,7 @@ return function(deps)
     end
 
     local function resolveRenderOptions(baseUrl)
-        local engineLevel = normalizeEngineLevel(type(getEngineLevel) == "function" and getEngineLevel() or "advanced")
+        local engineLevel = normalizeEngineLevel(type(getEngineLevel) == "function" and getEngineLevel() or "standard")
         if isAboutPageUrl(baseUrl) then
             engineLevel = "advanced"
         end
@@ -220,7 +223,8 @@ return function(deps)
 
         return {
             engineLevel = engineLevel,
-            allowDocumentCss = engineLevel == "advanced",
+            allowDocumentCss = engineLevel ~= "text_only",
+            cssColorOnly = engineLevel == "standard",
             interactiveEnabled = engineLevel ~= "text_only",
             linksEnabled = engineLevel ~= "text_only",
             defaultBackground = defaultBg,
@@ -468,10 +472,20 @@ return function(deps)
         end
     end
 
-    local function applyDeclaration(style, property, value)
+    local function applyDeclaration(style, property, value, renderOptions)
         local prop = trim((property or ""):lower())
         local raw = trim(value or "")
         local lower = raw:lower()
+        local colorOnly = renderOptions and renderOptions.cssColorOnly == true
+        if colorOnly
+            and prop ~= "color"
+            and prop ~= "background-color"
+            and prop ~= "background"
+            and prop ~= "font-weight"
+            and prop ~= "text-transform" then
+            return
+        end
+
         local function parseOverflowValue(candidate)
             if candidate == "visible" or candidate == "hidden" or candidate == "scroll" or candidate == "auto" then
                 return candidate
@@ -605,7 +619,7 @@ return function(deps)
                         local current = appliedMeta[prop]
                         if (not current) or (specificity > current.specificity) or
                             (specificity == current.specificity and rule.order >= current.order) then
-                            applyDeclaration(style, prop, value)
+                            applyDeclaration(style, prop, value, renderOptions)
                             appliedMeta[prop] = {
                                 specificity = specificity,
                                 order = rule.order,
@@ -620,7 +634,7 @@ return function(deps)
             if node.attrs.style and (renderOptions == nil or renderOptions.allowDocumentCss ~= false) then
                 local inlineStyle = parseDeclarations(node.attrs.style .. ";")
                 for prop, value in pairs(inlineStyle) do
-                    applyDeclaration(style, prop, value)
+                    applyDeclaration(style, prop, value, renderOptions)
                 end
             end
             if node.attrs.color then

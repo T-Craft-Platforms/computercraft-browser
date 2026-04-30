@@ -2,26 +2,84 @@ APP_TITLE = "CC Browser"
 APP_VERSION = "0.1.0"
 APP_ICON = "[CC]"
 
+function normalizeScriptDir(path)
+    local normalized = fs.combine(tostring(path or ""), "")
+    if normalized ~= "/" and #normalized > 1 and normalized:sub(-1) == "/" then
+        normalized = normalized:sub(1, -2)
+    end
+    if normalized == "" then
+        normalized = "."
+    end
+    return normalized
+end
+
+function looksLikeBrowserRoot(path)
+    local root = normalizeScriptDir(path)
+    local corePath = fs.combine(root, "lib/core.lua")
+    local networkPath = fs.combine(root, "lib/network.lua")
+    local aboutPath = fs.combine(root, "about-pages")
+    return fs.exists(corePath) and not fs.isDir(corePath)
+        and fs.exists(networkPath) and not fs.isDir(networkPath)
+        and fs.exists(aboutPath) and fs.isDir(aboutPath)
+end
+
 function getScriptDir()
+    local candidates = {}
+    local function push(path)
+        if not path or path == "" then
+            return
+        end
+        candidates[#candidates + 1] = normalizeScriptDir(path)
+    end
+
+    if type(CC_BROWSER_BASE_DIR) == "string" and CC_BROWSER_BASE_DIR ~= "" then
+        push(CC_BROWSER_BASE_DIR)
+    end
+
+    if debug and type(debug.getinfo) == "function" then
+        local okInfo, info = pcall(debug.getinfo, 1, "S")
+        if okInfo and type(info) == "table" and type(info.source) == "string" then
+            local source = tostring(info.source or "")
+            if source:sub(1, 1) == "@" then
+                push(fs.getDir(source:sub(2)))
+            end
+        end
+    end
+
     if shell and shell.getRunningProgram and fs and fs.getDir then
         local running = shell.getRunningProgram()
         if running and running ~= "" then
+            push(fs.getDir(running))
             if shell and type(shell.resolve) == "function" then
                 local okResolve, resolved = pcall(shell.resolve, running)
                 if okResolve and resolved and resolved ~= "" then
-                    return fs.getDir(resolved)
+                    push(fs.getDir(resolved))
                 end
             end
-            return fs.getDir(running)
         end
     end
+
     if shell and type(shell.dir) == "function" then
-        local cwd = shell.dir()
-        if cwd and cwd ~= "" then
-            return cwd
+        push(shell.dir())
+    end
+    push(".")
+    push("/")
+
+    local seen = {}
+    for i = 1, #candidates do
+        local candidate = candidates[i]
+        if not seen[candidate] then
+            seen[candidate] = true
+            if looksLikeBrowserRoot(candidate) then
+                return candidate
+            end
         end
     end
-    return "/src/browser"
+
+    if shell and type(shell.dir) == "function" then
+        return normalizeScriptDir(shell.dir())
+    end
+    return "."
 end
 
 SCRIPT_DIR = getScriptDir()
@@ -39,11 +97,55 @@ createSandbox = loadModule("lib/sandbox.lua")
 createPrinting = loadModule("lib/printing.lua")
 createFormControls = loadModule("lib/form-controls.lua")
 local FIXED_BROWSER_DATA_DIR_CANDIDATES = {
-    "/.ccbrowser",
-    "/browser-data",
+    ".ccbrowser",
+    "browser-data",
 }
 
-local function pickBrowserDataDir()
+function pickBrowserDataDir()
+    local function appendUnique(paths, seen, path)
+        local normalized = normalizeScriptDir(path)
+        if normalized == "" or seen[normalized] then
+            return
+        end
+        seen[normalized] = true
+        paths[#paths + 1] = normalized
+    end
+
+    local function callHandleWrite(handle, payload)
+        local okWrite = pcall(function()
+            handle.write(payload)
+        end)
+        if not okWrite then
+            okWrite = pcall(function()
+                handle:write(payload)
+            end)
+        end
+        return okWrite
+    end
+
+    local function callHandleClose(handle)
+        local okClose = pcall(function()
+            handle.close()
+        end)
+        if not okClose then
+            okClose = pcall(function()
+                handle:close()
+            end)
+        end
+        return okClose
+    end
+
+    local function buildCandidates()
+        local candidates = {}
+        local seen = {}
+        for _, relativePath in ipairs(FIXED_BROWSER_DATA_DIR_CANDIDATES) do
+            appendUnique(candidates, seen, fs.combine(SCRIPT_DIR, relativePath))
+        end
+        appendUnique(candidates, seen, "/.ccbrowser")
+        appendUnique(candidates, seen, "/browser-data")
+        return candidates
+    end
+
     local function canWriteInDirectory(path)
         if not path or path == "" then
             return false
@@ -63,29 +165,28 @@ local function pickBrowserDataDir()
         if not probeHandle then
             return false
         end
-        local okWrite = pcall(function()
-            probeHandle.write("ok")
-        end)
-        local okClose = pcall(function()
-            probeHandle.close()
-        end)
+        local okWrite = callHandleWrite(probeHandle, "ok")
+        local okClose = callHandleClose(probeHandle)
         pcall(fs.delete, probePath)
         return okWrite and okClose
     end
 
-    for _, candidate in ipairs(FIXED_BROWSER_DATA_DIR_CANDIDATES) do
+    local candidates = buildCandidates()
+    for _, candidate in ipairs(candidates) do
         if canWriteInDirectory(candidate) then
             return candidate
         end
     end
-    return FIXED_BROWSER_DATA_DIR_CANDIDATES[1]
+    return candidates[1] or "/.ccbrowser"
 end
 
 local BROWSER_DATA_DIR = pickBrowserDataDir()
 local BROWSER_SETTINGS_DIR = fs.combine(BROWSER_DATA_DIR, "config")
 local BROWSER_DOWNLOADS_DIR = fs.combine(BROWSER_DATA_DIR, "downloads")
 local BROWSER_VFS_DIR = fs.combine(BROWSER_DATA_DIR, "vfs")
-local BROWSER_STATE_PATH = fs.combine(BROWSER_SETTINGS_DIR, "browser-state.tbl")
+local BROWSER_CONFIG_PATH = fs.combine(BROWSER_SETTINGS_DIR, "config.tbl")
+local BROWSER_HISTORY_PATH = fs.combine(BROWSER_SETTINGS_DIR, "history.tbl")
+local BROWSER_LEGACY_STATE_PATH = fs.combine(BROWSER_SETTINGS_DIR, "browser-state.tbl")
 
 local browserSettings = {
     home_page = "about:home",
@@ -94,7 +195,7 @@ local browserSettings = {
     usage_guard_enabled = "true",
     pause_inactive_applets = "true",
     fullscreen_mode = "normal",
-    browser_engine_level = "advanced",
+    browser_engine_level = "standard",
     default_bg_color = "black",
     default_fg_color = "white",
 }
@@ -107,13 +208,13 @@ local flushPausedAppletQueue
 local storageReady = false
 local lastStorageError = nil
 
-local function settingEnabledRaw(name, defaultEnabled)
+function settingEnabledRaw(name, defaultEnabled)
     local defaultText = defaultEnabled and "true" or "false"
     local raw = core.trim(tostring(browserSettings[name] or defaultText)):lower()
     return not (raw == "false" or raw == "0" or raw == "no" or raw == "off" or raw == "disabled")
 end
 
-local function normalizeSettingKey(key)
+function normalizeSettingKey(key)
     local normalized = tostring(key or ""):lower()
     normalized = normalized:gsub("[^%w_%-]", "_")
     normalized = normalized:gsub("_+", "_")
@@ -136,7 +237,7 @@ local function normalizeSettingKey(key)
     return normalized
 end
 
-local function normalizeFullscreenMode(value)
+function normalizeFullscreenMode(value)
     local lowered = core.trim(tostring(value or "")):lower()
     if lowered == "seamless" or lowered == "seemless" then
         return "seamless"
@@ -150,14 +251,17 @@ function parseBrowserEngineLevel(value)
     if lowered == "text" or lowered == "textonly" then
         lowered = "text_only"
     end
-    if lowered == "text_only" or lowered == "lite" or lowered == "advanced" then
+    if lowered == "lite" then
+        lowered = "standard"
+    end
+    if lowered == "text_only" or lowered == "standard" or lowered == "advanced" then
         return lowered
     end
     return nil
 end
 
 function normalizeBrowserEngineLevel(value)
-    return parseBrowserEngineLevel(value) or "advanced"
+    return parseBrowserEngineLevel(value) or "standard"
 end
 
 local SUPPORTED_SETTING_COLOR_VALUES = {
@@ -254,16 +358,16 @@ function normalizeSettingColorName(value, fallbackName)
     return fallbackName
 end
 
-local function settingColorValue(settingName, fallbackName)
+function settingColorValue(settingName, fallbackName)
     local colorName = normalizeSettingColorName(browserSettings[settingName], fallbackName)
     return SUPPORTED_SETTING_COLOR_VALUES[colorName] or SUPPORTED_SETTING_COLOR_VALUES[fallbackName] or colors.white
 end
 
-local function currentDefaultBackgroundColorValue()
+function currentDefaultBackgroundColorValue()
     return settingColorValue("default_bg_color", "black")
 end
 
-local function currentDefaultForegroundColorValue(background)
+function currentDefaultForegroundColorValue(background)
     local bg = background or currentDefaultBackgroundColorValue()
     local fg = settingColorValue("default_fg_color", "white")
     if fg == bg then
@@ -275,27 +379,35 @@ local function currentDefaultForegroundColorValue(background)
     return fg
 end
 
-local function currentBrowserDataDir()
+function currentBrowserDataDir()
     return BROWSER_DATA_DIR
 end
 
-local function currentSettingsDir()
+function currentSettingsDir()
     return BROWSER_SETTINGS_DIR
 end
 
-local function currentDownloadsDir()
+function currentDownloadsDir()
     return BROWSER_DOWNLOADS_DIR
 end
 
-local function currentVfsRoot()
+function currentVfsRoot()
     return BROWSER_VFS_DIR
 end
 
-local function browserStatePath()
-    return BROWSER_STATE_PATH
+function browserConfigPath()
+    return BROWSER_CONFIG_PATH
 end
 
-local function pathReadOnly(path)
+function browserHistoryPath()
+    return BROWSER_HISTORY_PATH
+end
+
+function legacyBrowserStatePath()
+    return BROWSER_LEGACY_STATE_PATH
+end
+
+function pathReadOnly(path)
     if not (fs and type(fs.isReadOnly) == "function") then
         return false
     end
@@ -306,7 +418,7 @@ local function pathReadOnly(path)
     return readOnly and true or false
 end
 
-local function ensureDirExists(path, label)
+function ensureDirExists(path, label)
     local name = tostring(label or "directory")
     if not path or path == "" then
         return false, name .. ": empty path"
@@ -339,7 +451,7 @@ local function ensureDirExists(path, label)
     return true, nil
 end
 
-local function ensureStoragePaths()
+function ensureStoragePaths()
     local okData, dataErr = ensureDirExists(currentBrowserDataDir(), "browser data directory")
     if not okData then
         storageReady = false
@@ -373,7 +485,7 @@ local function ensureStoragePaths()
     return true, nil
 end
 
-local function readHandleAll(handle)
+function readHandleAll(handle)
     local okRead, payloadOrErr = pcall(function()
         return handle.readAll() or ""
     end)
@@ -388,7 +500,7 @@ local function readHandleAll(handle)
     return tostring(payloadOrErr or ""), nil
 end
 
-local function writeHandleAll(handle, payload)
+function writeHandleAll(handle, payload)
     local text = tostring(payload or "")
     local okWrite, writeErr = pcall(function()
         handle.write(text)
@@ -404,7 +516,7 @@ local function writeHandleAll(handle, payload)
     return true, nil
 end
 
-local function closeHandle(handle)
+function closeHandle(handle)
     local okClose = pcall(function()
         handle.close()
     end)
@@ -416,7 +528,7 @@ local function closeHandle(handle)
     return okClose
 end
 
-local function readTextFile(path)
+function readTextFile(path)
     if not (fs and fs.exists and fs.open) then
         return nil, "Filesystem unavailable"
     end
@@ -440,7 +552,7 @@ local function readTextFile(path)
     return payload, nil
 end
 
-local function writeTextFile(path, payload)
+function writeTextFile(path, payload)
     if not (fs and fs.open) then
         return false, "Filesystem unavailable"
     end
@@ -473,13 +585,15 @@ local function writeTextFile(path, payload)
     return true, nil
 end
 
-local function listBrowserSettings()
+function listBrowserSettings()
     local copied = {}
     for key, value in pairs(browserSettings) do
         copied[key] = tostring(value)
     end
     copied.browser_data_dir = currentBrowserDataDir()
     copied.downloads_dir = currentDownloadsDir()
+    copied.config_path = browserConfigPath()
+    copied.history_path = browserHistoryPath()
     copied.storage_ready = storageReady and "true" or "false"
     copied.storage_last_error = tostring(lastStorageError or "")
     local freeSpace = "unknown"
@@ -489,20 +603,6 @@ local function listBrowserSettings()
     end
     copied.storage_free_space = freeSpace
     return copied
-end
-
-local function getBrowserSetting(key)
-    local normalized = normalizeSettingKey(key)
-    if normalized == "" then
-        return nil
-    end
-    if normalized == "browser_data_dir" then
-        return currentBrowserDataDir()
-    end
-    if normalized == "downloads_dir" then
-        return currentDownloadsDir()
-    end
-    return browserSettings[normalized]
 end
 
 local MUTABLE_SETTING_KEYS = {
@@ -517,7 +617,29 @@ local MUTABLE_SETTING_KEYS = {
     default_fg_color = true,
 }
 
-local function parseBooleanSetting(value)
+function persistedBrowserSettings()
+    local copied = {}
+    for key in pairs(MUTABLE_SETTING_KEYS) do
+        copied[key] = tostring(browserSettings[key] or "")
+    end
+    return copied
+end
+
+function getBrowserSetting(key)
+    local normalized = normalizeSettingKey(key)
+    if normalized == "" then
+        return nil
+    end
+    if normalized == "browser_data_dir" then
+        return currentBrowserDataDir()
+    end
+    if normalized == "downloads_dir" then
+        return currentDownloadsDir()
+    end
+    return browserSettings[normalized]
+end
+
+function parseBooleanSetting(value)
     local lowered = core.trim(tostring(value or "")):lower()
     if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
         return true
@@ -528,7 +650,7 @@ local function parseBooleanSetting(value)
     return nil
 end
 
-local function setBooleanBrowserSetting(key, value)
+function setBooleanBrowserSetting(key, value)
     local parsed = parseBooleanSetting(value)
     if parsed == nil then
         return false, "Invalid " .. key .. " value (expected true/false)"
@@ -540,7 +662,7 @@ local function setBooleanBrowserSetting(key, value)
     return true, nil
 end
 
-local function setBrowserSetting(key, value)
+function setBrowserSetting(key, value)
     local normalized = normalizeSettingKey(key)
     if normalized == "" then
         return false, "Invalid setting key"
@@ -621,7 +743,7 @@ local function setBrowserSetting(key, value)
     if normalized == "browser_engine_level" then
         local lowered = parseBrowserEngineLevel(value)
         if not lowered then
-            return false, "Invalid browser_engine_level value (expected text_only/lite/advanced)"
+            return false, "Invalid browser_engine_level value (expected text_only/standard/advanced)"
         end
         browserSettings[normalized] = lowered
         if persistBrowserState then
@@ -656,7 +778,7 @@ local function setBrowserSetting(key, value)
     return true, nil
 end
 
-local function listBrowserFavorites()
+function listBrowserFavorites()
     local copied = {}
     for i, item in ipairs(browserFavorites) do
         copied[i] = {
@@ -667,7 +789,7 @@ local function listBrowserFavorites()
     return copied
 end
 
-local function addBrowserFavorite(url, title)
+function addBrowserFavorite(url, title)
     local rawUrl = core.trim(tostring(url or ""))
     if rawUrl == "" then
         return false, "Missing favorite URL"
@@ -708,7 +830,7 @@ local function addBrowserFavorite(url, title)
     return true, nil
 end
 
-local function normalizeFavoriteUrl(url)
+function normalizeFavoriteUrl(url)
     local rawUrl = core.trim(tostring(url or ""))
     if rawUrl == "" then
         return ""
@@ -726,7 +848,7 @@ local function normalizeFavoriteUrl(url)
     return normalizedUrl
 end
 
-local function findFavoriteIndex(url)
+function findFavoriteIndex(url)
     local normalizedUrl = normalizeFavoriteUrl(url)
     if normalizedUrl == "" then
         return nil, ""
@@ -739,12 +861,12 @@ local function findFavoriteIndex(url)
     return nil, normalizedUrl
 end
 
-local function isFavoriteUrl(url)
+function isFavoriteUrl(url)
     local index = findFavoriteIndex(url)
     return index ~= nil
 end
 
-local function canFavoriteUrl(url)
+function canFavoriteUrl(url)
     local normalizedUrl = normalizeFavoriteUrl(url)
     if normalizedUrl == "" then
         return false
@@ -752,7 +874,7 @@ local function canFavoriteUrl(url)
     return not core.startsWith(normalizedUrl:lower(), "about:")
 end
 
-local function removeBrowserFavorite(url)
+function removeBrowserFavorite(url)
     local index = findFavoriteIndex(url)
     if not index then
         return false, "Not in favorites"
@@ -764,7 +886,7 @@ local function removeBrowserFavorite(url)
     return true, nil
 end
 
-local function historyTimestampParts()
+function historyTimestampParts()
     if os and type(os.date) == "function" then
         local okDate, dayText = pcall(os.date, "%Y-%m-%d")
         local okDateTime, dateTimeText = pcall(os.date, "%Y-%m-%d %H:%M:%S")
@@ -776,7 +898,7 @@ local function historyTimestampParts()
     return "Unknown", fallback
 end
 
-local function copyBrowserHistoryEntry(entry)
+function copyBrowserHistoryEntry(entry)
     return {
         id = tonumber(entry.id) or 0,
         url = tostring(entry.url or ""),
@@ -786,7 +908,7 @@ local function copyBrowserHistoryEntry(entry)
     }
 end
 
-local function listBrowserHistory()
+function listBrowserHistory()
     local copied = {}
     for i, entry in ipairs(browserHistory) do
         copied[i] = copyBrowserHistoryEntry(entry)
@@ -794,7 +916,7 @@ local function listBrowserHistory()
     return copied
 end
 
-local function removeBrowserHistoryEntry(entryId)
+function removeBrowserHistoryEntry(entryId)
     local wanted = tonumber(entryId)
     if not wanted then
         return false, "Missing history entry id"
@@ -813,7 +935,7 @@ local function removeBrowserHistoryEntry(entryId)
     return false, "History entry not found"
 end
 
-local function clearBrowserHistoryDay(day)
+function clearBrowserHistoryDay(day)
     local wanted = core.trim(tostring(day or ""))
     if wanted == "" then
         return false, "Missing history day"
@@ -840,7 +962,7 @@ local function clearBrowserHistoryDay(day)
     return true, nil
 end
 
-local function clearBrowserHistory()
+function clearBrowserHistory()
     browserHistory = {}
     if persistBrowserState then
         persistBrowserState()
@@ -848,7 +970,7 @@ local function clearBrowserHistory()
     return true, nil
 end
 
-local function shouldTrackNavigationInHistory(rawUrl)
+function shouldTrackNavigationInHistory(rawUrl)
     local normalizedUrl = core.trim(tostring(rawUrl or "")):lower()
     if normalizedUrl == "" then
         return false
@@ -862,7 +984,7 @@ local function shouldTrackNavigationInHistory(rawUrl)
     return true
 end
 
-local function addBrowserHistory(url, title)
+function addBrowserHistory(url, title)
     if not settingEnabledRaw("history_enabled", true) then
         return false
     end
@@ -894,31 +1016,7 @@ local function addBrowserHistory(url, title)
     return true
 end
 
-local function loadBrowserState()
-    if not (fs and fs.exists and fs.open) then
-        return false, "Filesystem unavailable"
-    end
-    if not (textutils and type(textutils.unserialize) == "function") then
-        return false, "Serializer unavailable"
-    end
-    local statePath = browserStatePath()
-    if not fs.exists(statePath) then
-        return false, "No saved state"
-    end
-
-    local payload, readErr = readTextFile(statePath)
-    if payload == nil then
-        return false, tostring(readErr or "Could not open saved state")
-    end
-    if payload == "" then
-        return false, "Saved state is empty"
-    end
-
-    local okParse, decoded = pcall(textutils.unserialize, payload)
-    if not okParse or type(decoded) ~= "table" then
-        return false, "Saved state is invalid"
-    end
-
+function applyDecodedConfig(decoded)
     if type(decoded.settings) == "table" then
         for key, rawValue in pairs(decoded.settings) do
             local normalized = normalizeSettingKey(key)
@@ -973,11 +1071,13 @@ local function loadBrowserState()
             end
         end
     end
+end
 
+function applyDecodedHistory(historyTable)
     browserHistory = {}
     local maxId = 0
-    if type(decoded.history) == "table" then
-        for _, item in ipairs(decoded.history) do
+    if type(historyTable) == "table" then
+        for _, item in ipairs(historyTable) do
             local url = core.trim(tostring(item and item.url or ""))
             if url ~= "" then
                 local id = tonumber(item.id)
@@ -1012,6 +1112,62 @@ local function loadBrowserState()
         end
     end
     nextBrowserHistoryId = math.max(maxId + 1, 1)
+end
+
+function readSerializedTable(path)
+    if not fs.exists(path) then
+        return nil, "File not found"
+    end
+    local payload, readErr = readTextFile(path)
+    if payload == nil then
+        return nil, tostring(readErr or "Could not read file")
+    end
+    if payload == "" then
+        return nil, "Saved data is empty"
+    end
+
+    local okParse, decoded = pcall(textutils.unserialize, payload)
+    if not okParse or type(decoded) ~= "table" then
+        return nil, "Saved data is invalid"
+    end
+    return decoded, nil
+end
+
+function loadBrowserState()
+    if not (fs and fs.exists and fs.open) then
+        return false, "Filesystem unavailable"
+    end
+    if not (textutils and type(textutils.unserialize) == "function") then
+        return false, "Serializer unavailable"
+    end
+
+    local loadedAny = false
+
+    local configDecoded = readSerializedTable(browserConfigPath())
+    if type(configDecoded) == "table" then
+        applyDecodedConfig(configDecoded)
+        loadedAny = true
+    end
+
+    local historyDecoded = readSerializedTable(browserHistoryPath())
+    if type(historyDecoded) == "table" then
+        applyDecodedHistory(type(historyDecoded.entries) == "table" and historyDecoded.entries or historyDecoded.history)
+        loadedAny = true
+    else
+        applyDecodedHistory({})
+    end
+
+    if loadedAny then
+        return true, nil
+    end
+
+    local legacyDecoded, legacyErr = readSerializedTable(legacyBrowserStatePath())
+    if not legacyDecoded then
+        return false, tostring(legacyErr or "No saved state")
+    end
+
+    applyDecodedConfig(legacyDecoded)
+    applyDecodedHistory(legacyDecoded.history)
     return true, nil
 end
 
@@ -1027,22 +1183,31 @@ persistBrowserState = function(_forceWrite)
         return false, tostring(storageErr or "Could not prepare storage paths")
     end
 
-    local snapshot = {
-        version = 2,
-        settings = listBrowserSettings(),
+    local configSnapshot = {
+        version = 3,
+        settings = persistedBrowserSettings(),
         favorites = listBrowserFavorites(),
-        history = listBrowserHistory(),
     }
-    local encoded = textutils.serialize(snapshot)
-    if not encoded then
+    local historySnapshot = {
+        version = 1,
+        entries = listBrowserHistory(),
+    }
+    local configEncoded = textutils.serialize(configSnapshot)
+    local historyEncoded = textutils.serialize(historySnapshot)
+    if not configEncoded or not historyEncoded then
         return false, "Failed to encode state"
     end
 
-    local targetPath = browserStatePath()
-    local okWrite, writeErr = writeTextFile(targetPath, encoded)
-    if not okWrite then
+    local okConfigWrite, configWriteErr = writeTextFile(browserConfigPath(), configEncoded)
+    if not okConfigWrite then
         storageReady = false
-        lastStorageError = tostring(writeErr or "Could not write state file")
+        lastStorageError = tostring(configWriteErr or "Could not write config file")
+        return false, lastStorageError
+    end
+    local okHistoryWrite, historyWriteErr = writeTextFile(browserHistoryPath(), historyEncoded)
+    if not okHistoryWrite then
+        storageReady = false
+        lastStorageError = tostring(historyWriteErr or "Could not write history file")
         return false, lastStorageError
     end
     storageReady = true
@@ -1053,7 +1218,7 @@ end
 local initialStorageReady = ensureStoragePaths()
 if initialStorageReady then
     loadBrowserState()
-    if not fs.exists(browserStatePath()) then
+    if not fs.exists(browserConfigPath()) or not fs.exists(browserHistoryPath()) then
         persistBrowserState(true)
     end
 else
@@ -1118,7 +1283,7 @@ local formControls = createFormControls({
     trim = trim,
 })
 
-local function homePageUrl()
+function homePageUrl()
     local homePage = trim(browserSettings.home_page or "about:home")
     if homePage == "" then
         homePage = "about:home"
@@ -1126,22 +1291,22 @@ local function homePageUrl()
     return homePage
 end
 
-local function turtleModeEnabled()
+function turtleModeEnabled()
     return settingEnabledRaw("turtle_mode", false)
 end
 
-local function usageGuardEnabled()
+function usageGuardEnabled()
     if turtleModeEnabled() then
         return false
     end
     return settingEnabledRaw("usage_guard_enabled", true)
 end
 
-local function pauseInactiveAppletsEnabled()
+function pauseInactiveAppletsEnabled()
     return settingEnabledRaw("pause_inactive_applets", true)
 end
 
-local function seamlessFullscreenSettingEnabled()
+function seamlessFullscreenSettingEnabled()
     return normalizeFullscreenMode(browserSettings.fullscreen_mode) == "seamless"
 end
 
@@ -1172,10 +1337,13 @@ end
 
 local TOP_BAR_ROWS = 2
 
-local function effectiveTopBarRows()
+function effectiveTopBarRows()
     return state.fullscreen and 0 or TOP_BAR_ROWS
 end
 local ANIMATION_TICK_SECONDS = 0.15
+local SNACKBAR_DEFAULT_DURATION_MS = 1000
+local SNACKBAR_ANIMATION_MS = 180
+local SNACKBAR_MAX_WIDTH = 48
 local PAUSED_APPLET_EVENT_MAX = 256
 local PAUSED_APPLET_FLUSH_PER_FRAME = 48
 local HIGH_USAGE_FRAME_THRESHOLD_MS = 750
@@ -1189,7 +1357,7 @@ local stopAppletForTab
 local activeAppletRunning
 local dispatchEventToActiveApplet
 
-local function parseAboutUpdateIntervalMs(headers)
+function parseAboutUpdateIntervalMs(headers)
     local raw = getHeader(headers, ABOUT_UPDATE_INTERVAL_HEADER)
     local intervalMs = tonumber(raw)
     if not intervalMs then
@@ -1202,7 +1370,7 @@ local function parseAboutUpdateIntervalMs(headers)
     return intervalMs
 end
 
-local function parseSettingsStatusMessage(headers, currentUrl)
+function parseSettingsStatusMessage(headers, currentUrl)
     local normalizedUrl = trim(tostring(currentUrl or "")):lower()
     if not startsWith(normalizedUrl, "about:settings") then
         return nil
@@ -1223,7 +1391,7 @@ function parseInteger(value, fallback)
     return math.floor(number)
 end
 
-local function createTab(initialUrl)
+function createTab(initialUrl)
     local startingUrl = initialUrl or homePageUrl()
     return {
         currentUrl = startingUrl,
@@ -1280,6 +1448,12 @@ state = {
     },
     tabTitleCarousel = nil,
     animationTimer = nil,
+    snackbar = {
+        active = false,
+        message = "",
+        startedAt = 0,
+        durationMs = SNACKBAR_DEFAULT_DURATION_MS,
+    },
     aboutUpdate = {
         timer = nil,
         tabIndex = nil,
@@ -1318,7 +1492,7 @@ state = {
     },
 }
 
-local function activeTab()
+function activeTab()
     if #state.tabs < 1 then
         state.tabs[1] = createTab(homePageUrl())
         state.activeTab = 1
@@ -1347,13 +1521,13 @@ function syncAppletWindowVisibility()
     end
 end
 
-local function clearUrlSelection(tab)
+function clearUrlSelection(tab)
     local target = tab or activeTab()
     target.urlSelStart = nil
     target.urlSelEnd = nil
 end
 
-local function getUrlSelection(tab)
+function getUrlSelection(tab)
     local target = tab or activeTab()
     if target.urlSelStart == nil or target.urlSelEnd == nil then
         return nil, nil
@@ -1371,7 +1545,7 @@ local function getUrlSelection(tab)
     return startPos, endPos
 end
 
-local function getSelectedUrlText(tab)
+function getSelectedUrlText(tab)
     local target = tab or activeTab()
     local startPos, endPos = getUrlSelection(target)
     if not startPos then
@@ -1380,7 +1554,7 @@ local function getSelectedUrlText(tab)
     return target.urlInput:sub(startPos, endPos - 1)
 end
 
-local function deleteUrlSelection(tab)
+function deleteUrlSelection(tab)
     local target = tab or activeTab()
     local startPos, endPos = getUrlSelection(target)
     if not startPos then
@@ -1395,17 +1569,17 @@ local function deleteUrlSelection(tab)
     return true
 end
 
-local function clearPageSelection(tab)
+function clearPageSelection(tab)
     local target = tab or activeTab()
     target.pageSelection = nil
 end
 
-local function bumpRenderRevision(tab)
+function bumpRenderRevision(tab)
     local target = tab or activeTab()
     target.renderRevision = (target.renderRevision or 0) + 1
 end
 
-local function pageLineCount(tab)
+function pageLineCount(tab)
     local target = tab or activeTab()
     local count = tonumber(target.pageContentHeight)
     if not count then
@@ -1414,7 +1588,7 @@ local function pageLineCount(tab)
     return math.max(1, math.floor(count or 1))
 end
 
-local function normalizedPageSelection(tab)
+function normalizedPageSelection(tab)
     local target = tab or activeTab()
     local selection = target.pageSelection
     if not selection then
@@ -1439,7 +1613,7 @@ local function normalizedPageSelection(tab)
     }
 end
 
-local function pageSelectionContains(selection, lineIndex, column)
+function pageSelectionContains(selection, lineIndex, column)
     if not selection then
         return false
     end
@@ -1455,7 +1629,7 @@ local function pageSelectionContains(selection, lineIndex, column)
     return true
 end
 
-local function setPageSelection(tab, startLine, startCol, endLine, endCol)
+function setPageSelection(tab, startLine, startCol, endLine, endCol)
     local target = tab or activeTab()
     local w = math.max(1, target.viewportWidth or 1)
     local maxLine = pageLineCount(target)
@@ -1468,7 +1642,7 @@ local function setPageSelection(tab, startLine, startCol, endLine, endCol)
     }
 end
 
-local function selectAllPageText(tab)
+function selectAllPageText(tab)
     local target = tab or activeTab()
     local totalLines = pageLineCount(target)
     if totalLines < 1 then
@@ -1480,7 +1654,7 @@ local function selectAllPageText(tab)
     setPageSelection(target, 1, 1, totalLines, width)
 end
 
-local function getSelectedPageText(tab)
+function getSelectedPageText(tab)
     local target = tab or activeTab()
     local selection = normalizedPageSelection(target)
     if not selection then
@@ -1535,18 +1709,18 @@ local function getSelectedPageText(tab)
     return table.concat(parts, "\n")
 end
 
-local function pageHeight()
+function pageHeight()
     local _, h = term.getSize()
     return math.max(1, h - effectiveTopBarRows())
 end
 
-local function pageContentWidth(tab)
+function pageContentWidth(tab)
     local target = tab or activeTab()
     local w, _ = term.getSize()
     return clamp(target.viewportWidth or w, 1, w)
 end
 
-local function pageOverflowY(tab)
+function pageOverflowY(tab)
     local target = tab or activeTab()
     local mode = target and target.document and target.document.pageOverflowY or "visible"
     if mode == "hidden" or mode == "scroll" or mode == "auto" then
@@ -1555,7 +1729,7 @@ local function pageOverflowY(tab)
     return "visible"
 end
 
-local function maxScroll(tab)
+function maxScroll(tab)
     local target = tab or activeTab()
     if pageOverflowY(target) == "hidden" then
         return 0
@@ -1563,22 +1737,22 @@ local function maxScroll(tab)
     return math.max(0, pageLineCount(target) - pageHeight())
 end
 
-local function setScroll(value, tab)
+function setScroll(value, tab)
     local target = tab or activeTab()
     target.scroll = clamp(value, 0, maxScroll(target))
 end
 
-local function canGoBack(tab)
+function canGoBack(tab)
     local target = tab or activeTab()
     return target.historyIndex > 1
 end
 
-local function canGoForward(tab)
+function canGoForward(tab)
     local target = tab or activeTab()
     return target.historyIndex > 0 and target.historyIndex < #target.history
 end
 
-local function pushHistory(tab, url)
+function pushHistory(tab, url)
     local target = tab or activeTab()
     for i = #target.history, target.historyIndex + 1, -1 do
         target.history[i] = nil
@@ -1587,11 +1761,11 @@ local function pushHistory(tab, url)
     target.historyIndex = #target.history
 end
 
-local function collapseExpandedTab()
+function collapseExpandedTab()
     state.expandedTabIndex = nil
 end
 
-local function toggleExpandedTab(index)
+function toggleExpandedTab(index)
     if state.expandedTabIndex == index then
         collapseExpandedTab()
     else
@@ -1599,7 +1773,7 @@ local function toggleExpandedTab(index)
     end
 end
 
-local function activateTab(index)
+function activateTab(index)
     if #state.tabs < 1 then
         return
     end
@@ -1616,7 +1790,7 @@ local function activateTab(index)
     end
 end
 
-local function moveTab(fromIndex, toIndex)
+function moveTab(fromIndex, toIndex)
     if fromIndex == toIndex then
         return
     end
@@ -1650,7 +1824,7 @@ local function moveTab(fromIndex, toIndex)
     end
 end
 
-local function newTab(initialUrl)
+function newTab(initialUrl)
     local tab = createTab(initialUrl or homePageUrl())
     table.insert(state.tabs, tab)
     collapseExpandedTab()
@@ -1658,7 +1832,7 @@ local function newTab(initialUrl)
     return tab
 end
 
-local function closeTab(index)
+function closeTab(index)
     local targetIndex = clamp(index or state.activeTab, 1, #state.tabs)
     if #state.tabs <= 1 then
         local tab = activeTab()
@@ -1728,11 +1902,11 @@ local function closeTab(index)
     end
 end
 
-local function closeActiveTab()
+function closeActiveTab()
     closeTab(state.activeTab)
 end
 
-local function cycleTabs(direction)
+function cycleTabs(direction)
     if #state.tabs <= 1 then
         return
     end
@@ -1770,7 +1944,7 @@ function runningAppletTitle(tab)
     return name
 end
 
-local function tabTitle(tab)
+function tabTitle(tab)
     local currentUrl = trim(tab.currentUrl or "")
     local inputUrl = trim(tab.urlInput or "")
 
@@ -1820,7 +1994,7 @@ local draw
 local navigate
 local scheduleAboutUpdateTimer
 
-local function renderDocument(tab)
+function renderDocument(tab)
     local target = tab or activeTab()
     local turtleMode = turtleModeEnabled()
     local w, h = term.getSize()
@@ -1984,7 +2158,7 @@ local function renderDocument(tab)
     target.lastRenderSignature = makeRenderSignature()
 end
 
-local function hitRegion(x, y, region)
+function hitRegion(x, y, region)
     if not region then
         return false
     end
@@ -1992,7 +2166,7 @@ local function hitRegion(x, y, region)
     return y == regionY and x >= region.x1 and x <= region.x2
 end
 
-local function verticalScrollbarMetrics(tab)
+function verticalScrollbarMetrics(tab)
     local target = tab or activeTab()
     local w, _ = term.getSize()
     if not target.showVerticalScrollbar or w < 2 then
@@ -2026,19 +2200,19 @@ local function verticalScrollbarMetrics(tab)
     }
 end
 
-local function rerenderAllTabs()
+function rerenderAllTabs()
     for _, tab in ipairs(state.tabs) do
         renderDocument(tab)
     end
 end
 
-local function clearModal()
+function clearModal()
     state.modal.open = false
     state.modal.spec = nil
     state.modal.layout = nil
 end
 
-local function openModal(spec)
+function openModal(spec)
     if type(spec) ~= "table" then
         return false
     end
@@ -2054,7 +2228,7 @@ local function openModal(spec)
     return true
 end
 
-local function modalButtons(spec)
+function modalButtons(spec)
     local source = (spec and spec.buttons) or {}
     local buttons = {}
     for index, item in ipairs(source) do
@@ -2189,7 +2363,7 @@ function withModalCursorMarker(text, cursor)
     return source:sub(1, cursorPos - 1) .. "|" .. source:sub(cursorPos), cursorPos
 end
 
-local function modalBuildBodyLines(spec)
+function modalBuildBodyLines(spec)
     local bodyLines = {}
     local sourceLines = spec and spec.lines or nil
     if type(sourceLines) == "table" then
@@ -2203,14 +2377,14 @@ local function modalBuildBodyLines(spec)
     return bodyLines
 end
 
-local function modalFillRow(x1, panelWidth, y, rowBackground, rowForeground)
+function modalFillRow(x1, panelWidth, y, rowBackground, rowForeground)
     term.setCursorPos(x1, y)
     term.setBackgroundColor(rowBackground)
     term.setTextColor(rowForeground)
     term.write(string.rep(" ", panelWidth))
 end
 
-local function modalWriteLine(x1, y1, y2, panelWidth, y, text, rowBackground, rowForeground)
+function modalWriteLine(x1, y1, y2, panelWidth, y, text, rowBackground, rowForeground)
     if y < y1 or y > y2 then
         return
     end
@@ -2226,7 +2400,7 @@ local function modalWriteLine(x1, y1, y2, panelWidth, y, text, rowBackground, ro
     term.write(content)
 end
 
-local function modalRenderInputLine(x1, y1, y2, panelWidth, inputY, input)
+function modalRenderInputLine(x1, y1, y2, panelWidth, inputY, input)
     if not inputY or inputY < y1 or inputY > y2 then
         return
     end
@@ -2263,7 +2437,7 @@ local function modalRenderInputLine(x1, y1, y2, panelWidth, inputY, input)
     term.write(displayed)
 end
 
-local function modalResolveButtonLabels(buttons, panelWidth)
+function modalResolveButtonLabels(buttons, panelWidth)
     local labels = {}
     local totalWidth = 0
     for index, button in ipairs(buttons) do
@@ -2288,7 +2462,7 @@ local function modalResolveButtonLabels(buttons, panelWidth)
     return labels, buttonGap, totalWidth
 end
 
-local function modalDrawButtons(x1, x2, buttonY, buttons, labels, buttonGap, totalWidth)
+function modalDrawButtons(x1, x2, buttonY, buttons, labels, buttonGap, totalWidth)
     local left = x1 + 1
     local right = x2 - 1
     local cursorX = left
@@ -2325,7 +2499,7 @@ local function modalDrawButtons(x1, x2, buttonY, buttons, labels, buttonGap, tot
     return layoutButtons
 end
 
-local function drawModal()
+function drawModal()
     local modal = state.modal
     if not modal.open then
         modal.layout = nil
@@ -2400,7 +2574,7 @@ local function drawModal()
     return true
 end
 
-local function drawActiveAppletOverlay()
+function drawActiveAppletOverlay()
     local tab = activeTab()
     local applet = tab and tab.applet or nil
     if not applet or not applet.running or not applet.window then
@@ -2418,13 +2592,77 @@ local function drawActiveAppletOverlay()
     end
 end
 
+function showSnackbar(message, durationMs)
+    local text = trim(tostring(message or ""))
+    if text == "" then
+        return
+    end
+    local snackbar = state.snackbar or {}
+    snackbar.active = true
+    snackbar.message = text
+    snackbar.startedAt = os.clock()
+    snackbar.durationMs = math.max(100, math.floor(tonumber(durationMs) or SNACKBAR_DEFAULT_DURATION_MS))
+    state.snackbar = snackbar
+    if scheduleAnimationTick then
+        scheduleAnimationTick()
+    end
+end
+
+function drawSnackbar()
+    local snackbar = state.snackbar
+    if not snackbar or not snackbar.active then
+        return
+    end
+
+    local elapsedMs = (os.clock() - (snackbar.startedAt or 0)) * 1000
+    local fadeMs = SNACKBAR_ANIMATION_MS
+    local holdMs = math.max(100, tonumber(snackbar.durationMs) or SNACKBAR_DEFAULT_DURATION_MS)
+    local totalMs = (fadeMs * 2) + holdMs
+    if elapsedMs >= totalMs then
+        snackbar.active = false
+        return
+    end
+
+    local progress = 1
+    if elapsedMs < fadeMs then
+        progress = elapsedMs / fadeMs
+    elseif elapsedMs > (fadeMs + holdMs) then
+        progress = (totalMs - elapsedMs) / fadeMs
+    end
+    progress = clamp(progress, 0, 1)
+
+    local w, h = term.getSize()
+    local banner = " " .. tostring(snackbar.message or "") .. " "
+    if #banner > SNACKBAR_MAX_WIDTH then
+        banner = banner:sub(1, SNACKBAR_MAX_WIDTH - 3) .. ".. "
+    end
+    if #banner > w then
+        banner = banner:sub(1, w)
+    end
+    if #banner <= 0 then
+        return
+    end
+
+    local x = math.max(1, math.floor((w - #banner) / 2) + 1)
+    local y = h + 2 - math.floor((progress * 2) + 0.5)
+    if y < 1 or y > h then
+        return
+    end
+
+    term.setCursorPos(x, y)
+    term.setTextColor(colors.black)
+    term.setBackgroundColor(colors.lime)
+    term.write(banner)
+end
+
 draw = function()
     drawBase()
     drawActiveAppletOverlay()
     drawModal()
+    drawSnackbar()
 end
 
-local function triggerModalButton(buttonId, source)
+function triggerModalButton(buttonId, source)
     local modal = state.modal
     if not modal.open then
         return false
@@ -2454,7 +2692,7 @@ local function triggerModalButton(buttonId, source)
     return true
 end
 
-local function dismissUsageGuard(continueBrowsing)
+function dismissUsageGuard(continueBrowsing)
     local guard = state.highUsage
     guard.frozen = false
     guard.overCount = 0
@@ -2476,7 +2714,7 @@ local function dismissUsageGuard(continueBrowsing)
     end
 end
 
-local function activateUsageGuard(frameMs)
+function activateUsageGuard(frameMs)
     local guard = state.highUsage
     if not usageGuardEnabled() or guard.frozen then
         return false
@@ -2541,7 +2779,7 @@ local function activateUsageGuard(frameMs)
     return true
 end
 
-local function handleModalEvent(event)
+function handleModalEvent(event)
     if not state.modal.open then
         return false
     end
@@ -2705,7 +2943,7 @@ local function handleModalEvent(event)
     return false
 end
 
-local function findFirstTabByUrlPrefix(prefix)
+function findFirstTabByUrlPrefix(prefix)
     local wanted = trim(prefix or "")
     if wanted == "" then
         return nil
@@ -2719,7 +2957,7 @@ local function findFirstTabByUrlPrefix(prefix)
     return nil
 end
 
-local function openOrFocusSettingsTab()
+function openOrFocusSettingsTab()
     local existingIndex = findFirstTabByUrlPrefix("about:settings")
     if existingIndex then
         activateTab(existingIndex)
@@ -2730,7 +2968,7 @@ local function openOrFocusSettingsTab()
     navigate("about:settings", true, false, tab)
 end
 
-local function openHelpTab()
+function openHelpTab()
     local existingIndex = findFirstTabByUrlPrefix("about:help")
     if existingIndex then
         activateTab(existingIndex)
@@ -2741,7 +2979,7 @@ local function openHelpTab()
     navigate("about:help", true, false, tab)
 end
 
-local function openOrFocusFavoritesTab()
+function openOrFocusFavoritesTab()
     local existingIndex = findFirstTabByUrlPrefix("about:favorites")
     if existingIndex then
         activateTab(existingIndex)
@@ -2752,7 +2990,7 @@ local function openOrFocusFavoritesTab()
     navigate("about:favorites", true, false, tab)
 end
 
-local function openOrFocusHistoryTab()
+function openOrFocusHistoryTab()
     local existingIndex = findFirstTabByUrlPrefix("about:history")
     if existingIndex then
         activateTab(existingIndex)
@@ -2763,7 +3001,7 @@ local function openOrFocusHistoryTab()
     navigate("about:history", true, false, tab)
 end
 
-local function pageLineToPrintableText(line, width)
+function pageLineToPrintableText(line, width)
     local limit = math.max(1, tonumber(width) or 1)
     local highest = 0
     local chars = (line and line.chars) or {}
@@ -2782,7 +3020,7 @@ local function pageLineToPrintableText(line, width)
     return table.concat(out)
 end
 
-local function printablePageLines(tab)
+function printablePageLines(tab)
     local target = tab or activeTab()
     local terminalWidth = term and term.getSize and term.getSize() or 1
     local width = math.max(1, tonumber(target.viewportWidth) or tonumber(terminalWidth) or 1)
@@ -2941,7 +3179,7 @@ function promptPrinterSelection(printerNames)
     return nil
 end
 
-local function printCurrentPage(tab)
+function printCurrentPage(tab)
     local target = tab or activeTab()
     local printers = listPrinterNames()
     if #printers == 0 then
@@ -2993,6 +3231,7 @@ local function printCurrentPage(tab)
 
     local pageCount = math.max(1, math.floor(tonumber(printedPages) or 0))
     target.status = ("Printed %d pages on %s"):format(pageCount, tostring(selectedPrinter))
+    showSnackbar(("Printed %d pages"):format(pageCount), 1200)
     return true
 end
 
@@ -3090,10 +3329,11 @@ function downloadCurrentPage(tab)
     end
 
     target.status = ("Downloaded %d bytes to %s"):format(#tostring(body or ""), tostring(savePath))
+    showSnackbar("Download complete", 1200)
     return true
 end
 
-local function toggleCurrentPageFavorite()
+function toggleCurrentPageFavorite()
     local tab = activeTab()
     local currentUrl = trim(tab.currentUrl or "")
     if not canFavoriteUrl(currentUrl) then
@@ -3106,7 +3346,7 @@ local function toggleCurrentPageFavorite()
     return addBrowserFavorite(currentUrl, title)
 end
 
-local function toggleFullscreen(forceExitSeamless)
+function toggleFullscreen(forceExitSeamless)
     if state.fullscreen then
         if state.seamlessAppletFullscreen and not forceExitSeamless then
             activeTab().status = "Seamless fullscreen active (press Ctrl+K to exit)"
@@ -3127,7 +3367,7 @@ local function toggleFullscreen(forceExitSeamless)
     return true
 end
 
-local function hitMenuPanel(x, y)
+function hitMenuPanel(x, y)
     local menu = state.ui.menu
     local panel = menu and menu.panel or nil
     if not panel then
@@ -3136,7 +3376,7 @@ local function hitMenuPanel(x, y)
     return x >= panel.x1 and x <= panel.x2 and y >= panel.y1 and y <= panel.y2
 end
 
-local function handleMenuClick(x, y)
+function handleMenuClick(x, y)
     local menu = state.ui.menu
     if not menu then
         return false
@@ -3194,14 +3434,14 @@ local function handleMenuClick(x, y)
     return true
 end
 
-local function urlEncode(value)
+function urlEncode(value)
     local source = tostring(value or "")
     return (source:gsub("([^%w%-_%.~])", function(ch)
         return ("%%%02X"):format(string.byte(ch))
     end))
 end
 
-local function encodeFormFields(fields)
+function encodeFormFields(fields)
     local parts = {}
     for _, field in ipairs(fields or {}) do
         local name = urlEncode(field.name or "")
@@ -3211,7 +3451,7 @@ local function encodeFormFields(fields)
     return table.concat(parts, "&")
 end
 
-local function appendQuery(url, query)
+function appendQuery(url, query)
     local base = tostring(url or "")
     local extra = tostring(query or "")
     if extra == "" then
@@ -3229,7 +3469,7 @@ local function appendQuery(url, query)
     return base .. sep .. extra .. fragment
 end
 
-local function formControl(tab, key)
+function formControl(tab, key)
     local target = tab or activeTab()
     local meta = target.formMeta or {}
     local controls = meta.controlsByKey or {}
@@ -3246,7 +3486,7 @@ local function formControl(tab, key)
     return control, stateEntry
 end
 
-local function isEditableFormControl(control)
+function isEditableFormControl(control)
     if not control or control.disabled or control.readonly then
         return false
     end
@@ -3270,7 +3510,7 @@ local function isEditableFormControl(control)
     return true
 end
 
-local function setFocusedFormControl(tab, key)
+function setFocusedFormControl(tab, key)
     local target = tab or activeTab()
     local changed = target.focusedFormControl ~= key or target.urlFocus
     target.focusedFormControl = key
@@ -3287,7 +3527,7 @@ local removeFromFormControl = formControls.remove
 
 copyControlDefaults = formControls.copyControlDefaults
 
-local function resetForm(tab, formId)
+function resetForm(tab, formId)
     local target = tab or activeTab()
     return formControls.resetForm(target, formId, bumpRenderRevision)
 end
@@ -3379,66 +3619,67 @@ end
 
 function submitForm(tab, formId, submitterKey)
     local target = tab or activeTab()
-    local meta = target.formMeta or {}
-    local forms = meta.formsById or {}
-    local controls = meta.controlsByKey or {}
-    local form = forms[formId]
-    if not form then
+    local ctx = {
+        target = target,
+        meta = target.formMeta or {},
+    }
+    ctx.forms = ctx.meta.formsById or {}
+    ctx.controls = ctx.meta.controlsByKey or {}
+    ctx.form = ctx.forms[formId]
+    if not ctx.form then
         return false
     end
 
-    local submitter = submitterKey and controls[submitterKey] or nil
-    local rawMethod = submitter and trim(submitter.formMethod or "") or ""
-    if rawMethod == "" then
-        rawMethod = trim(form.method or "")
+    ctx.submitter = submitterKey and ctx.controls[submitterKey] or nil
+    ctx.method = ctx.submitter and trim(ctx.submitter.formMethod or "") or ""
+    if ctx.method == "" then
+        ctx.method = trim(ctx.form.method or "")
     end
-    rawMethod = rawMethod:lower()
-    if rawMethod ~= "post" then
-        rawMethod = "get"
+    ctx.method = ctx.method:lower()
+    if ctx.method ~= "post" then
+        ctx.method = "get"
     end
 
-    local action = submitter and trim(submitter.formAction or "") or ""
-    if action == "" then
-        action = trim(form.action or "")
+    ctx.action = ctx.submitter and trim(ctx.submitter.formAction or "") or ""
+    if ctx.action == "" then
+        ctx.action = trim(ctx.form.action or "")
     end
-    if action == "" then
-        action = target.currentUrl or "about:blank"
+    if ctx.action == "" then
+        ctx.action = ctx.target.currentUrl or "about:blank"
     end
-    action = core.resolveRelativeUrl(target.currentUrl or action, action)
+    ctx.action = core.resolveRelativeUrl(ctx.target.currentUrl or ctx.action, ctx.action)
 
-    local fields = collectFormFields(target, formId, submitterKey)
-    local encoded = encodeFormFields(fields)
-    local requestUrl = action
-    local requestOptions = {
-        method = rawMethod:upper(),
+    ctx.encoded = encodeFormFields(collectFormFields(ctx.target, formId, submitterKey))
+    ctx.requestUrl = ctx.action
+    ctx.requestOptions = {
+        method = ctx.method:upper(),
     }
 
-    if rawMethod == "post" then
-        local enctype = submitter and trim(submitter.formEnctype or "") or ""
-        if enctype == "" then
-            enctype = trim(form.enctype or "")
+    if ctx.method == "post" then
+        ctx.enctype = ctx.submitter and trim(ctx.submitter.formEnctype or "") or ""
+        if ctx.enctype == "" then
+            ctx.enctype = trim(ctx.form.enctype or "")
         end
-        if enctype == "" then
-            enctype = "application/x-www-form-urlencoded"
+        if ctx.enctype == "" then
+            ctx.enctype = "application/x-www-form-urlencoded"
         end
-
-        requestOptions.headers = {
-            ["Content-Type"] = enctype,
+        ctx.requestOptions.headers = {
+            ["Content-Type"] = ctx.enctype,
         }
-        requestOptions.body = encoded
+        ctx.requestOptions.body = ctx.encoded
     else
-        requestUrl = appendQuery(action, encoded)
+        ctx.requestUrl = appendQuery(ctx.action, ctx.encoded)
     end
 
-    local err = select(4, fetchTextResource(requestUrl, true, requestOptions))
-    if err then
-        target.status = "Form submit failed: " .. tostring(err)
+    ctx.err = select(4, fetchTextResource(ctx.requestUrl, true, ctx.requestOptions))
+    if ctx.err then
+        ctx.target.status = "Form submit failed: " .. tostring(ctx.err)
         return false
     end
 
-    target.status = "Form submitted"
-    if startsWith(trim(target.currentUrl or ""):lower(), "about:") then
-        refreshCurrentDocumentWithoutNavigation(target)
+    ctx.target.status = "Form submitted"
+    if startsWith(trim(ctx.target.currentUrl or ""):lower(), "about:") then
+        refreshCurrentDocumentWithoutNavigation(ctx.target)
     end
     return true
 end
@@ -3493,6 +3734,78 @@ function cycleColorInput(tab, control, stateEntry, direction)
     return true
 end
 
+function activateRadioGroup(target, control, key, stateEntry)
+    local formId = control.formId
+    local name = trim(tostring(control.name or ""))
+    if not formId or name == "" then
+        stateEntry.checked = true
+        return
+    end
+
+    local formMeta = target.formMeta or {}
+    local form = formMeta.formsById and formMeta.formsById[formId] or nil
+    local controls = formMeta.controlsByKey or {}
+    for _, candidateKey in ipairs(form and form.controlKeys or {}) do
+        local candidate = controls[candidateKey]
+        if candidate
+            and candidate.tag == "input"
+            and tostring(candidate.inputType or ""):lower() == "radio"
+            and trim(tostring(candidate.name or "")) == name then
+            local candidateState = target.formState[candidateKey] or {}
+            candidateState.checked = candidateKey == key
+            target.formState[candidateKey] = candidateState
+        end
+    end
+end
+
+function activateInputControl(target, control, stateEntry, key)
+    local inputType = tostring(control.inputType or "text"):lower()
+    if inputType == "checkbox" then
+        stateEntry.checked = not not stateEntry.checked
+        bumpRenderRevision(target)
+        return true
+    end
+    if inputType == "radio" then
+        activateRadioGroup(target, control, key, stateEntry)
+        bumpRenderRevision(target)
+        return true
+    end
+    if inputType == "submit" or inputType == "image" then
+        if control.formId then
+            return submitForm(target, control.formId, key)
+        end
+        return true
+    end
+    if inputType == "color" then
+        return cycleColorInput(target, control, stateEntry, 1)
+    end
+    if inputType == "reset" then
+        if control.formId then
+            return resetForm(target, control.formId)
+        end
+        return true
+    end
+
+    stateEntry.cursor = #tostring(stateEntry.value or "") + 1
+    bumpRenderRevision(target)
+    return true
+end
+
+function activateButtonControl(target, control, key)
+    local buttonType = tostring(control.buttonType or "submit"):lower()
+    if buttonType == "reset" then
+        if control.formId then
+            return resetForm(target, control.formId)
+        end
+        return true
+    end
+    if buttonType == "submit" and control.formId then
+        return submitForm(target, control.formId, key)
+    end
+    bumpRenderRevision(target)
+    return true
+end
+
 function activateFormControl(tab, key)
     local target = tab or activeTab()
     local control, stateEntry = formControl(target, key)
@@ -3503,53 +3816,7 @@ function activateFormControl(tab, key)
     setFocusedFormControl(target, key)
 
     if control.tag == "input" then
-        local inputType = tostring(control.inputType or "text"):lower()
-        if inputType == "checkbox" then
-            stateEntry.checked = not not stateEntry.checked
-            bumpRenderRevision(target)
-            return true
-        end
-        if inputType == "radio" then
-            local formId = control.formId
-            local name = trim(tostring(control.name or ""))
-            if formId and name ~= "" then
-                local form = target.formMeta and target.formMeta.formsById and target.formMeta.formsById[formId] or nil
-                local controls = target.formMeta and target.formMeta.controlsByKey or {}
-                for _, candidateKey in ipairs(form and form.controlKeys or {}) do
-                    local candidate = controls[candidateKey]
-                    if candidate
-                        and candidate.tag == "input"
-                        and tostring(candidate.inputType or ""):lower() == "radio"
-                        and trim(tostring(candidate.name or "")) == name then
-                        local candidateState = target.formState[candidateKey] or {}
-                        candidateState.checked = candidateKey == key
-                        target.formState[candidateKey] = candidateState
-                    end
-                end
-            else
-                stateEntry.checked = true
-            end
-            bumpRenderRevision(target)
-            return true
-        end
-        if inputType == "submit" or inputType == "image" then
-            if control.formId then
-                return submitForm(target, control.formId, key)
-            end
-            return true
-        end
-        if inputType == "color" then
-            return cycleColorInput(target, control, stateEntry, 1)
-        end
-        if inputType == "reset" then
-            if control.formId then
-                return resetForm(target, control.formId)
-            end
-            return true
-        end
-        stateEntry.cursor = #tostring(stateEntry.value or "") + 1
-        bumpRenderRevision(target)
-        return true
+        return activateInputControl(target, control, stateEntry, key)
     end
 
     if control.tag == "textarea" then
@@ -3563,18 +3830,7 @@ function activateFormControl(tab, key)
     end
 
     if control.tag == "button" then
-        local buttonType = tostring(control.buttonType or "submit"):lower()
-        if buttonType == "reset" then
-            if control.formId then
-                return resetForm(target, control.formId)
-            end
-            return true
-        end
-        if buttonType == "submit" and control.formId then
-            return submitForm(target, control.formId, key)
-        end
-        bumpRenderRevision(target)
-        return true
+        return activateButtonControl(target, control, key)
     end
 
     return false
