@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Logs</title>
+    <style>
+      h1 {
+        color: yellow;
+        margin-top: 0;
+        margin-bottom: 1em;
+      }
+
+      h2 {
+        color: orange;
+        margin-top: 1em;
+        margin-bottom: 0;
+      }
+
+      p {
+        margin-top: 0;
+        margin-bottom: 1em;
+      }
+
+      code,
+      pre {
+        background-color: gray;
+        color: white;
+      }
+
+      a {
+        color: lightblue;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>{{APP_ICON}} {{APP_TITLE}} Logs</h1>
+    <p>Version: <code>{{APP_VERSION}}</code></p>
+    <p><code>{{CURRENT_URL}}</code></p>
+
+    <h2>Status</h2>
+    <p><code>{{STATUS_MESSAGE}}</code></p>
+    <p>Source: <code>{{LOG_SOURCE}}</code></p>
+    <p>File sink path: <code>{{LOG_PATH}}</code></p>
+    <p>Bytes available: <code>{{LOG_TOTAL_BYTES}}</code> | Characters shown: <code>{{LOG_SHOWN_CHARS}}</code> | Lines shown: <code>{{LOG_SHOWN_LINES}}</code></p>
+    <p>{{LOG_TRUNCATED_HINT}}</p>
+
+    <h2>Log Output</h2>
+    <pre>{{LOG_CONTENT}}</pre>
+
+    <p><a href="about:logs">Refresh</a> | <a href="about:settings">Settings</a> | <a href="about:home">Home</a></p>
+  </body>
+</html>

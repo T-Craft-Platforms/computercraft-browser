@@ -195,5 +195,20 @@
 
       <button id="set-default-colors-submit" name="submit_set_default_colors" type="submit" value="1">Save Colors</button>
     </form>
+
+    <form id="set-verbose-log-form" class="settings-form" name="set_verbose_log" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="verbose_log">
+
+      <label for="verbose-log-enabled">Verbose log (writes log.txt next to main.lua)</label><br>
+      <input id="verbose-log-enabled" name="verbose_log_choice" type="radio" value="enabled" {{VERBOSE_LOG_RADIO_ENABLED_CHECKED}}>
+      <label for="verbose-log-enabled">Enabled</label><br>
+
+      <input id="verbose-log-disabled" name="verbose_log_choice" type="radio" value="disabled" {{VERBOSE_LOG_RADIO_DISABLED_CHECKED}}>
+      <label for="verbose-log-disabled">Disabled (Default)</label><br>
+
+      <button id="set-verbose-log-submit" name="submit_set_verbose_log" type="submit" value="1">Save</button>
+    </form>
+    <p><code>Verbose log</code> records I/O activity and errors to <code>log.txt</code> in the browser directory.</p>
   </body>
 </html>

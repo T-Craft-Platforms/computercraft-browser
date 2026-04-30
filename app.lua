@@ -38,6 +38,7 @@ createUi = loadModule("ui/view.lua")
 createSandbox = loadModule("lib/sandbox.lua")
 createPrinting = loadModule("lib/printing.lua")
 createFormControls = loadModule("lib/form-controls.lua")
+createLogger = loadModule("lib/logger.lua")
 
 local function normalizeStorageRoot(path)
     local normalized = tostring(path or "")
@@ -117,6 +118,15 @@ local function settingEnabledRaw(name, defaultEnabled)
     local raw = core.trim(tostring(browserSettings[name] or defaultText)):lower()
     return not (raw == "false" or raw == "0" or raw == "no" or raw == "off" or raw == "disabled")
 end
+
+-- Verbose logger — writes to log.txt next to main.lua when verbose_log is enabled.
+local VERBOSE_LOG_PATH = fs.combine(SCRIPT_DIR, "log.txt")
+local logger = createLogger({
+    logPath = VERBOSE_LOG_PATH,
+    isEnabled = function()
+        return settingEnabledRaw("verbose_log", false)
+    end,
+})
 
 local function normalizeSettingKey(key)
     local normalized = tostring(key or ""):lower()
@@ -490,8 +500,10 @@ local function readTextFile(path)
         return nil, "File not found"
     end
 
+    logger.io("readTextFile: " .. tostring(path))
     local handle = fs.open(path, "r")
     if not handle then
+        logger.error("readTextFile open failed: " .. tostring(path))
         return nil, "Could not open file"
     end
 
@@ -514,6 +526,7 @@ local function readTextFile(path)
     end
 
     if not okRead then
+        logger.error("readTextFile read error [" .. tostring(path) .. "]: " .. tostring(payloadOrErr))
         return nil, tostring(payloadOrErr or "Failed reading file")
     end
     return tostring(payloadOrErr or ""), nil
@@ -533,8 +546,10 @@ local function writeTextFile(path, payload)
         return false, "Could not prepare directory"
     end
 
+    logger.io("writeTextFile: " .. target)
     local handle = fs.open(target, "w")
     if not handle then
+        logger.error("writeTextFile open failed: " .. target)
         return false, "Could not open file for writing"
     end
 
@@ -557,6 +572,7 @@ local function writeTextFile(path, payload)
     end
 
     if not okWrite then
+        logger.error("writeTextFile write error [" .. target .. "]: " .. tostring(writeErr))
         return false, tostring(writeErr or "Failed writing file")
     end
     return true, nil
@@ -1231,6 +1247,8 @@ ensureWritableStoragePaths()
 browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
 browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
 browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
+
+logger.info(APP_TITLE .. " " .. APP_VERSION .. " starting (log: " .. VERBOSE_LOG_PATH .. ")")
 if fs.exists("/.vfs") then
     local targetVfsRoot = currentVfsRoot()
     local vfsParent = fs.getDir(targetVfsRoot)
@@ -1248,11 +1266,21 @@ end
 
 local network = createNetwork(core, {
     aboutPagesDir = fs.combine(SCRIPT_DIR, "about-pages"),
+    logger = logger,
     aboutApi = {
         appTitle = APP_TITLE,
         appVersion = APP_VERSION,
         appIcon = APP_ICON,
         getBrowserDataDir = currentBrowserDataDir,
+        readVerboseLogBuffer = function()
+            if logger and type(logger.readBuffer) == "function" then
+                return logger.readBuffer()
+            end
+            return "", "Logger buffer unavailable"
+        end,
+        getVerboseLogPath = function()
+            return VERBOSE_LOG_PATH
+        end,
         listSettings = listBrowserSettings,
         getSetting = getBrowserSetting,
         setSetting = setBrowserSetting,
@@ -3700,7 +3728,7 @@ function submitForm(tab, formId, submitterKey)
         requestUrl = appendQuery(action, encoded)
     end
 
-    local _, _, _, err = fetchTextResource(requestUrl, true, requestOptions)
+    local err = select(4, fetchTextResource(requestUrl, true, requestOptions))
     if err then
         target.status = "Form submit failed: " .. tostring(err)
         return false

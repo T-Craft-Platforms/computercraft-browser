@@ -10,6 +10,12 @@ return function(core, options)
     local aboutPagesDir = options.aboutPagesDir or "/src/browser/about-pages"
     local aboutApi = options.aboutApi or {}
 
+    -- Logger helpers (no-op when logger not provided or verbose_log disabled)
+    local _logger = options.logger or nil
+    local function logIO(msg)    if _logger then _logger.io(msg) end end
+    local function logError(msg) if _logger then _logger.error(msg) end end
+    local function logInfo(msg)  if _logger then _logger.info(msg) end end
+
     local function makeErrorPage(url, message)
         local safeUrl = escapeHtml(url or "unknown")
         local safeError = escapeHtml(message or "Unknown error")
@@ -21,10 +27,13 @@ return function(core, options)
             return nil, "Empty file path"
         end
         if not fs.exists(path) then
+            logError("readLocalFile not found: " .. tostring(path))
             return nil, "File not found: " .. path
         end
+        logIO("readLocalFile: " .. tostring(path))
         local handle = fs.open(path, "r")
         if not handle then
+            logError("readLocalFile open failed: " .. tostring(path))
             return nil, "Could not open file: " .. path
         end
         local content = handle.readAll() or ""
@@ -41,19 +50,24 @@ return function(core, options)
         local headers = requestOptions and requestOptions.headers or nil
         local body = requestOptions and requestOptions.body or nil
 
+        logIO("HTTP " .. method .. ": " .. tostring(url))
+
         local ok, response, err
         if method == "GET" then
             ok, response, err = pcall(http.get, url, headers, true)
         elseif method == "POST" then
             ok, response, err = pcall(http.post, url, tostring(body or ""), headers, true)
         else
+            logError("HTTP unsupported method [" .. tostring(url) .. "]: " .. method)
             return nil, nil, ("Unsupported HTTP method: %s"):format(method)
         end
 
         if not ok then
+            logError("HTTP " .. method .. " pcall error [" .. tostring(url) .. "]: " .. tostring(response))
             return nil, nil, tostring(response)
         end
         if not response then
+            logError("HTTP " .. method .. " failed [" .. tostring(url) .. "]: " .. tostring(err or "Request failed"))
             return nil, nil, err or "Request failed"
         end
 
@@ -69,6 +83,7 @@ return function(core, options)
             pcall(response.close)
         end
 
+        logIO("HTTP " .. method .. " OK: " .. tostring(url) .. " (" .. tostring(#body) .. " bytes)")
         return body, headers, nil
     end
 
@@ -571,6 +586,13 @@ return function(core, options)
                 if choice == "text_only" or choice == "lite" or choice == "advanced" then
                     value = choice
                 end
+            elseif key == "verbose_log" then
+                local choice = tostring(params.verbose_log_choice or ""):lower()
+                if choice == "enabled" then
+                    value = "true"
+                elseif choice == "disabled" then
+                    value = "false"
+                end
             elseif key == "default_bg_color" then
                 value = tostring(params.default_bg_color or value or "")
             elseif key == "default_fg_color" or key == "default_text_color" or key == "default_foreground_color" then
@@ -758,6 +780,17 @@ return function(core, options)
             defaultFgColorValue = trim(tostring(settings.default_fg_color or settings.default_text_color or "white")):lower()
         end
 
+        local verboseLogValue = tostring(settings.verbose_log or "false"):lower()
+        local verboseLogChoice = tostring(params.verbose_log_choice or ""):lower()
+        if verboseLogChoice ~= "enabled" and verboseLogChoice ~= "disabled" then
+            if verboseLogValue == "false" or verboseLogValue == "0" or verboseLogValue == "off"
+                or verboseLogValue == "no" or verboseLogValue == "disabled" then
+                verboseLogChoice = "disabled"
+            else
+                verboseLogChoice = "enabled"
+            end
+        end
+
         local tokenValues = {
             APP_TITLE = escapeHtml(tostring(aboutApi.appTitle or "CC Browser")),
             APP_VERSION = escapeHtml(tostring(aboutApi.appVersion or "0.0.0")),
@@ -786,6 +819,8 @@ return function(core, options)
             DOWNLOADS_DIR_VALUE = escapeHtml(downloadsDirValue),
             DEFAULT_BG_COLOR_VALUE = escapeHtml(defaultBgColorValue),
             DEFAULT_FG_COLOR_VALUE = escapeHtml(defaultFgColorValue),
+            VERBOSE_LOG_RADIO_ENABLED_CHECKED = verboseLogChoice == "enabled" and "checked" or "",
+            VERBOSE_LOG_RADIO_DISABLED_CHECKED = verboseLogChoice == "disabled" and "checked" or "",
             SETTINGS_LIST = table.concat(settingsItems),
             PARAMS_LIST = table.concat(paramItems),
         }
@@ -796,6 +831,7 @@ return function(core, options)
     local function fetchTextResource(url, allowHttpFallback, requestOptions)
         local request = requestOptions or {}
         local method = tostring(request.method or "GET"):upper()
+        logInfo("fetchTextResource [" .. method .. "]: " .. tostring(url))
         local parsed = parseUrl(url)
         if parsed and parsed.scheme == "about" then
             if url == "about:blank" then
@@ -812,11 +848,13 @@ return function(core, options)
                 end
             end
             if not isValidAboutPageName(pageName) then
+                logError("fetchTextResource unsupported about page: " .. tostring(url))
                 return nil, url, nil, "Unsupported about page: " .. url
             end
 
             local body, err = loadAboutPage(pageName)
             if not body then
+                logError("fetchTextResource about page load failed [" .. tostring(url) .. "]: " .. tostring(err))
                 return nil, url, nil, "Unsupported about page: " .. url
             end
             local aboutUpdateMs = nil
@@ -858,6 +896,7 @@ return function(core, options)
             end
             local body, err = readLocalFile(path)
             if not body then
+                logError("fetchTextResource file read error [" .. tostring(url) .. "]: " .. tostring(err))
                 return nil, url, nil, err
             end
             return body, url, { ["Content-Type"] = "text/plain" }, nil
@@ -871,9 +910,11 @@ return function(core, options)
                 if fallbackBody then
                     return fallbackBody, fallbackUrl, fallbackHeaders, nil
                 end
+                logError("fetchTextResource HTTP fallback error [" .. tostring(url) .. "]: " .. tostring(fallbackErr or err))
                 return nil, url, nil, fallbackErr or err
             end
             if not body then
+                logError("fetchTextResource HTTP error [" .. tostring(url) .. "]: " .. tostring(err))
                 return nil, url, nil, err
             end
             return body, url, headers, nil
@@ -882,11 +923,13 @@ return function(core, options)
         if fs.exists(url) then
             local body, err = readLocalFile(url)
             if not body then
+                logError("fetchTextResource fs fallback error [" .. tostring(url) .. "]: " .. tostring(err))
                 return nil, url, nil, err
             end
             return body, "file://" .. url, { ["Content-Type"] = "text/plain" }, nil
         end
 
+        logError("fetchTextResource unsupported scheme: " .. tostring(url))
         return nil, url, nil, "Unsupported URL scheme"
     end
 
