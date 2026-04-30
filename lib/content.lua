@@ -211,6 +211,9 @@ return function(deps)
         if isAboutPageUrl(baseUrl) then
             engineLevel = "advanced"
         end
+        local isTextOnly = engineLevel == "text_only"
+        local isStandard = engineLevel == "standard"
+        local isAdvanced = engineLevel == "advanced"
         local defaultBg = parseConfiguredColorValue(
             type(getDefaultBackgroundColor) == "function" and getDefaultBackgroundColor() or "black",
             colors.black
@@ -223,10 +226,16 @@ return function(deps)
 
         return {
             engineLevel = engineLevel,
-            allowDocumentCss = engineLevel ~= "text_only",
-            cssColorOnly = engineLevel == "standard",
-            interactiveEnabled = engineLevel ~= "text_only",
-            linksEnabled = engineLevel ~= "text_only",
+            allowDocumentCss = isStandard or isAdvanced,
+            allowExternalCss = isStandard or isAdvanced,
+            cssColorOnly = isStandard,
+            allowPresentationalColors = isStandard or isAdvanced,
+            allowSemanticLinkColor = isStandard or isAdvanced,
+            interactiveEnabled = not isTextOnly,
+            linksEnabled = not isTextOnly,
+            componentsEnabled = not isTextOnly,
+            monochromeText = isTextOnly,
+            advancedUncapped = isAdvanced,
             defaultBackground = defaultBg,
             defaultForeground = defaultFg,
         }
@@ -437,12 +446,12 @@ return function(deps)
         return true
     end
 
-    local function applyTagDefaults(style, tag)
+    local function applyTagDefaults(style, tag, renderOptions)
         if BLOCK_TAGS[tag] then
             style.display = "block"
         end
 
-        if tag == "a" then
+        if tag == "a" and (renderOptions == nil or renderOptions.allowSemanticLinkColor ~= false) then
             style.fg = colors.lightBlue
         elseif tag == "strong" or tag == "b" then
             style.bold = true
@@ -607,7 +616,7 @@ return function(deps)
 
     local function computeStyle(node, parentStyle, rules, renderOptions)
         local style = newComputedStyle(parentStyle)
-        applyTagDefaults(style, node.tag)
+        applyTagDefaults(style, node.tag, renderOptions)
         local appliedMeta = {}
         for _, rule in ipairs(rules) do
             maybeYield()
@@ -637,10 +646,10 @@ return function(deps)
                     applyDeclaration(style, prop, value, renderOptions)
                 end
             end
-            if node.attrs.color then
+            if node.attrs.color and (renderOptions == nil or renderOptions.allowPresentationalColors ~= false) then
                 style.fg = parseCssColor(node.attrs.color, style.fg)
             end
-            if node.attrs.bgcolor then
+            if node.attrs.bgcolor and (renderOptions == nil or renderOptions.allowPresentationalColors ~= false) then
                 style.bg = parseCssColor(node.attrs.bgcolor, style.bg)
             end
         end
@@ -677,6 +686,7 @@ return function(deps)
         local writer = {
             width = math.max(1, width),
             pageBackground = pageBackground or colors.black,
+            monochromeForeground = config.monochromeForeground,
             lines = {},
             x = 1,
             y = 1,
@@ -783,6 +793,10 @@ return function(deps)
             if line then
                 local bg = style.bg or self.pageBackground
                 local fg = ensureContrastingForeground(style.fg, bg)
+                if self.monochromeForeground then
+                    bg = self.pageBackground
+                    fg = self.monochromeForeground
+                end
                 line.chars[self.x] = ch
                 line.fg[self.x] = fg
                 line.bg[self.x] = bg
@@ -1582,6 +1596,9 @@ return function(deps)
         end
 
         if tag == "hr" then
+            if context.componentsEnabled == false then
+                return
+            end
             local previousIndent = writer:beginBlock(style)
             for _ = writer.indent + 1, writer.width do
                 writer:putChar("-", style, nil)
@@ -1595,26 +1612,30 @@ return function(deps)
             if node.attrs then
                 alt = node.attrs.alt or node.attrs.title or alt
             end
+            if context.componentsEnabled == false then
+                writer:writeText(alt, style, nil, false)
+                return
+            end
             writer:writeText("[" .. alt .. "]", style, nil, false)
             return
         end
 
-        if tag == "input" then
+        if tag == "input" and context.componentsEnabled ~= false then
             renderInputControl(node, style, writer, context)
             return
         end
 
-        if tag == "select" then
+        if tag == "select" and context.componentsEnabled ~= false then
             renderSelectControl(node, style, writer, context)
             return
         end
 
-        if tag == "textarea" then
+        if tag == "textarea" and context.componentsEnabled ~= false then
             renderTextAreaControl(node, style, writer, context)
             return
         end
 
-        if tag == "button" then
+        if tag == "button" and context.componentsEnabled ~= false then
             renderButtonControl(node, style, writer, context)
             return
         end
@@ -1755,28 +1776,32 @@ input, textarea, select, button, option { display: inline; }
 a { color: lightblue; }
 style, script, head, meta, link, title { display: none; }
 ]]
-        addCss(defaults)
+        if renderOptions.allowDocumentCss then
+            addCss(defaults)
+        end
 
         if renderOptions.allowDocumentCss then
             for _, css in ipairs(cssBlocks) do
                 addCss(css)
             end
 
-            local maxExternalStylesheets = 6
-            local loaded = 0
-            local seen = {}
-            for _, href in ipairs(cssLinks) do
-                maybeYield()
-                if loaded >= maxExternalStylesheets then
-                    break
-                end
-                local cssUrl = resolveRelativeUrl(baseUrl, href)
-                if cssUrl and not seen[cssUrl] then
-                    seen[cssUrl] = true
-                    local cssBody, _, _, err = fetchTextResource(cssUrl, false)
-                    if cssBody and not err then
-                        addCss(cssBody)
-                        loaded = loaded + 1
+            if renderOptions.allowExternalCss then
+                local maxExternalStylesheets = renderOptions.advancedUncapped and nil or 6
+                local loaded = 0
+                local seen = {}
+                for _, href in ipairs(cssLinks) do
+                    maybeYield()
+                    if maxExternalStylesheets and loaded >= maxExternalStylesheets then
+                        break
+                    end
+                    local cssUrl = resolveRelativeUrl(baseUrl, href)
+                    if cssUrl and not seen[cssUrl] then
+                        seen[cssUrl] = true
+                        local cssBody, _, _, err = fetchTextResource(cssUrl, false)
+                        if cssBody and not err then
+                            addCss(cssBody)
+                            loaded = loaded + 1
+                        end
                     end
                 end
             end
@@ -1862,12 +1887,15 @@ style, script, head, meta, link, title { display: none; }
             baseStyle.bg = bodyStyle.bg or baseStyle.bg
         end
 
-        local writerOptions = nil
+        local writerOptions = {}
         if useWindow then
             writerOptions = {
                 windowStartLine = startLine,
                 windowEndLine = startLine + lineCount - 1,
             }
+        end
+        if renderOptions.monochromeText then
+            writerOptions.monochromeForeground = document.defaultForeground or renderOptions.defaultForeground or colors.white
         end
         local pageBackground = document.defaultBackground or renderOptions.defaultBackground or colors.black
         local writer = createWriter(contentWidth, pageBackground, writerOptions)
@@ -1884,6 +1912,7 @@ style, script, head, meta, link, title { display: none; }
             focusControlKey = focusControlKey,
             interactiveEnabled = renderOptions.interactiveEnabled ~= false,
             linksEnabled = renderOptions.linksEnabled ~= false,
+            componentsEnabled = renderOptions.componentsEnabled ~= false,
         }
         local renderRoot = bodyNode or findFirstTag(document.root, "html") or document.root
         renderNode(renderRoot, baseStyle, document.rules, writer, context, document.baseUrl, renderOptions)

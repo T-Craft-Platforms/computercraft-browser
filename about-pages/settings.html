@@ -157,13 +157,13 @@
 
       <label for="browser-engine-level">Rendering engine</label><br>
       <input id="browser-engine-level-text-only" name="browser_engine_level_choice" type="radio" value="text_only" {{BROWSER_ENGINE_LEVEL_RADIO_TEXT_ONLY_CHECKED}}>
-      <label for="browser-engine-level-text-only">Text only</label><br>
+      <label for="browser-engine-level-text-only">Text only (plain text only, no components, single text color)</label><br>
 
-      <input id="browser-engine-level-lite" name="browser_engine_level_choice" type="radio" value="lite" {{BROWSER_ENGINE_LEVEL_RADIO_LITE_CHECKED}}>
-      <label for="browser-engine-level-lite">Lite</label><br>
+      <input id="browser-engine-level-standard" name="browser_engine_level_choice" type="radio" value="standard" {{BROWSER_ENGINE_LEVEL_RADIO_STANDARD_CHECKED}}>
+      <label for="browser-engine-level-standard">Standard (default: components + CSS colors, no CSS layout)</label><br>
 
       <input id="browser-engine-level-advanced" name="browser_engine_level_choice" type="radio" value="advanced" {{BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED}}>
-      <label for="browser-engine-level-advanced">Advanced</label><br>
+      <label for="browser-engine-level-advanced">Advanced (uncapped)</label><br>
 
       <button id="set-browser-engine-level-submit" name="submit_set_browser_engine_level" type="submit" value="1">Save</button>
     </form>
@@ -180,7 +180,7 @@
       <button id="set-default-colors-submit" name="submit_set_default_colors" type="submit" value="1">Save Colors</button>
     </form>
 
-    <h2>Storage (Fixed)</h2>
+    <h2>Storage</h2>
     <p>Browser data directory:<br><code>{{BROWSER_DATA_DIR_VALUE}}</code></p>
     <p>Downloads directory:<br><code>{{DOWNLOADS_DIR_VALUE}}</code></p>
     <p>Applet I/O directory:<br><code>{{APPLET_VFS_DIR_VALUE}}</code></p>

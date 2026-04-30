@@ -701,7 +701,9 @@ return function(core, options)
         if browserEngineLevelChoice == "lite" then
             browserEngineLevelChoice = "standard"
         end
-        if browserEngineLevelChoice ~= "text_only" and browserEngineLevelChoice ~= "standard" and browserEngineLevelChoice ~= "advanced" then
+        if browserEngineLevelChoice ~= "text_only"
+            and browserEngineLevelChoice ~= "standard"
+            and browserEngineLevelChoice ~= "advanced" then
             browserEngineLevelChoice = "standard"
         end
 
