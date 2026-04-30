@@ -39,7 +39,6 @@
       .settings-status {
         position: sticky;
         top: 0;
-        right: 0;
         margin-top: 0;
         margin-bottom: 1em;
       }
@@ -63,21 +62,20 @@
     <p>Version: <code>{{APP_VERSION}}</code></p>
     <p class="settings-status"><code>{{STATUS_MESSAGE@500}}</code></p>
 
-    <h2>Settings</h2>
+    <h2>Behavior</h2>
     <form id="set-home-page-form" class="settings-form" name="set_home_page" method="get" action="about:settings">
       <input name="action" type="hidden" value="set">
       <input name="key" type="hidden" value="home_page">
 
-      <label for="home-page-home">Home page value</label><br>
+      <label for="home-page-home">Home page</label><br>
       <input id="home-page-home" name="home_page_choice" type="radio" value="about:home" {{HOME_PAGE_RADIO_HOME_CHECKED}}>
       <label for="home-page-home">about:home</label><br>
 
       <input id="home-page-blank" name="home_page_choice" type="radio" value="about:blank" {{HOME_PAGE_RADIO_BLANK_CHECKED}}>
       <label for="home-page-blank">about:blank</label><br>
-      
+
       <input id="home-page-custom" name="home_page_choice" type="radio" value="custom" {{HOME_PAGE_RADIO_CUSTOM_CHECKED}}>
-      <input id="home-page-custom-value" class="setting-value" name="home_page_custom" type="text" value="{{HOME_PAGE_CUSTOM_VALUE}}" size="32" maxlength="128">
-      <br>
+      <input id="home-page-custom-value" class="setting-value" name="home_page_custom" type="text" value="{{HOME_PAGE_CUSTOM_VALUE}}" size="32" maxlength="128"><br>
 
       <button id="set-home-page-submit" name="submit_set_home_page" type="submit" value="1">Save</button>
     </form>
@@ -91,19 +89,18 @@
       <label for="turtle-mode-enabled">Enabled</label><br>
 
       <input id="turtle-mode-disabled" name="turtle_mode_choice" type="radio" value="disabled" {{TURTLE_MODE_RADIO_DISABLED_CHECKED}}>
-      <label for="turtle-mode-disabled">Disabled (Recommended)</label><br>
+      <label for="turtle-mode-disabled">Disabled</label><br>
 
       <button id="set-turtle-mode-submit" name="submit_set_turtle_mode" type="submit" value="1">Save</button>
     </form>
-    <p><code>Turtle mode</code> is very stable, but usually much slower.</p>
 
     <form id="set-usage-guard-form" class="settings-form" name="set_usage_guard" method="get" action="about:settings">
       <input name="action" type="hidden" value="set">
       <input name="key" type="hidden" value="usage_guard_enabled">
 
-      <label for="usage-guard-enabled">High-usage crash guard (requires turtle mode disabled)</label><br>
+      <label for="usage-guard-enabled">High-usage guard</label><br>
       <input id="usage-guard-enabled" name="usage_guard_choice" type="radio" value="enabled" {{USAGE_GUARD_RADIO_ENABLED_CHECKED}}>
-      <label for="usage-guard-enabled">Enabled (freeze + prompt)</label><br>
+      <label for="usage-guard-enabled">Enabled</label><br>
 
       <input id="usage-guard-disabled" name="usage_guard_choice" type="radio" value="disabled" {{USAGE_GUARD_RADIO_DISABLED_CHECKED}}>
       <label for="usage-guard-disabled">Disabled</label><br>
@@ -115,9 +112,9 @@
       <input name="action" type="hidden" value="set">
       <input name="key" type="hidden" value="history_enabled">
 
-      <label for="history-enabled">Browsing history tracking</label><br>
+      <label for="history-enabled">History tracking</label><br>
       <input id="history-enabled" name="history_choice" type="radio" value="enabled" {{HISTORY_RADIO_ENABLED_CHECKED}}>
-      <label for="history-enabled">Enabled (Recommended)</label><br>
+      <label for="history-enabled">Enabled</label><br>
 
       <input id="history-disabled" name="history_choice" type="radio" value="disabled" {{HISTORY_RADIO_DISABLED_CHECKED}}>
       <label for="history-disabled">Disabled</label><br>
@@ -125,59 +122,48 @@
       <button id="set-history-submit" name="submit_set_history" type="submit" value="1">Save</button>
     </form>
 
-    <form id="set-persistence-form" class="settings-form" name="set_persistence_enabled" method="get" action="about:settings">
+    <form id="set-pause-applets-form" class="settings-form" name="set_pause_applets" method="get" action="about:settings">
       <input name="action" type="hidden" value="set">
-      <input name="key" type="hidden" value="persistence_enabled">
+      <input name="key" type="hidden" value="pause_inactive_applets">
 
-      <label for="persistence-enabled">Persist browser data</label><br>
-      <input id="persistence-enabled" name="persistence_choice" type="radio" value="enabled" {{PERSISTENCE_RADIO_ENABLED_CHECKED}}>
-      <label for="persistence-enabled">Enabled (Recommended)</label><br>
+      <label for="pause-applets-enabled">Pause inactive applets</label><br>
+      <input id="pause-applets-enabled" name="pause_applets_choice" type="radio" value="enabled" {{PAUSE_APPLETS_RADIO_ENABLED_CHECKED}}>
+      <label for="pause-applets-enabled">Enabled</label><br>
 
-      <input id="persistence-disabled" name="persistence_choice" type="radio" value="disabled" {{PERSISTENCE_RADIO_DISABLED_CHECKED}}>
-      <label for="persistence-disabled">Disabled</label><br>
+      <input id="pause-applets-disabled" name="pause_applets_choice" type="radio" value="disabled" {{PAUSE_APPLETS_RADIO_DISABLED_CHECKED}}>
+      <label for="pause-applets-disabled">Disabled</label><br>
 
-      <button id="set-persistence-submit" name="submit_set_persistence" type="submit" value="1">Save</button>
+      <button id="set-pause-applets-submit" name="submit_set_pause_applets" type="submit" value="1">Save</button>
     </form>
 
+    <h2>Display</h2>
     <form id="set-fullscreen-mode-form" class="settings-form" name="set_fullscreen_mode" method="get" action="about:settings">
       <input name="action" type="hidden" value="set">
       <input name="key" type="hidden" value="fullscreen_mode">
 
       <label for="fullscreen-mode-normal">Fullscreen mode</label><br>
       <input id="fullscreen-mode-normal" name="fullscreen_mode_choice" type="radio" value="normal" {{FULLSCREEN_MODE_RADIO_NORMAL_CHECKED}}>
-      <label for="fullscreen-mode-normal">Normal (browser menu available)</label><br>
+      <label for="fullscreen-mode-normal">Normal</label><br>
 
       <input id="fullscreen-mode-seamless" name="fullscreen_mode_choice" type="radio" value="seamless" {{FULLSCREEN_MODE_RADIO_SEAMLESS_CHECKED}}>
-      <label for="fullscreen-mode-seamless">Seamless (no "=" button, exit with Ctrl+K only)</label><br>
+      <label for="fullscreen-mode-seamless">Seamless</label><br>
 
       <button id="set-fullscreen-mode-submit" name="submit_set_fullscreen_mode" type="submit" value="1">Save</button>
-    </form>
-
-    <p><label>Browser data directory (fixed; relative to main.lua)</label><br><code>{{BROWSER_DATA_DIR_VALUE}}</code></p>
-
-    <form id="set-downloads-dir-form" class="settings-form" name="set_downloads_dir" method="get" action="about:settings">
-      <input name="action" type="hidden" value="set">
-      <input name="key" type="hidden" value="downloads_dir">
-
-      <label for="downloads-dir-value">Default downloads directory</label><br>
-      <input id="downloads-dir-value" class="setting-value" name="downloads_dir_value" type="text" value="{{DOWNLOADS_DIR_VALUE}}" size="32" maxlength="255"><br>
-
-      <button id="set-downloads-dir-submit" name="submit_set_downloads_dir" type="submit" value="1">Save</button>
     </form>
 
     <form id="set-browser-engine-level-form" class="settings-form" name="set_browser_engine_level" method="get" action="about:settings">
       <input name="action" type="hidden" value="set">
       <input name="key" type="hidden" value="browser_engine_level">
 
-      <label for="browser-engine-level">Browser rendering engine level</label><br>
+      <label for="browser-engine-level">Rendering engine</label><br>
       <input id="browser-engine-level-text-only" name="browser_engine_level_choice" type="radio" value="text_only" {{BROWSER_ENGINE_LEVEL_RADIO_TEXT_ONLY_CHECKED}}>
-      <label for="browser-engine-level-text-only">Text only (no CSS, no interactive elements)</label><br>
+      <label for="browser-engine-level-text-only">Text only</label><br>
 
       <input id="browser-engine-level-lite" name="browser_engine_level_choice" type="radio" value="lite" {{BROWSER_ENGINE_LEVEL_RADIO_LITE_CHECKED}}>
-      <label for="browser-engine-level-lite">Lite (no CSS, interactive elements enabled)</label><br>
+      <label for="browser-engine-level-lite">Lite</label><br>
 
       <input id="browser-engine-level-advanced" name="browser_engine_level_choice" type="radio" value="advanced" {{BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED}}>
-      <label for="browser-engine-level-advanced">Advanced (full features, default)</label><br>
+      <label for="browser-engine-level-advanced">Advanced</label><br>
 
       <button id="set-browser-engine-level-submit" name="submit_set_browser_engine_level" type="submit" value="1">Save</button>
     </form>
@@ -185,30 +171,23 @@
     <form id="set-default-colors-form" class="settings-form" name="set_default_colors" method="get" action="about:settings">
       <input name="action" type="hidden" value="set_colors">
 
-      <label for="default-bg-color">Default background color (when not specified by page)</label><br>
-      <input id="default-bg-color" class="setting-value" name="default_bg_color" type="color" value="{{DEFAULT_BG_COLOR_VALUE}}" size="16"><br>
+      <label for="default-bg-color">Default background color</label><br>
+      <input id="default-bg-color" class="setting-value" name="default_bg_color" type="text" value="{{DEFAULT_BG_COLOR_VALUE}}" size="16"><br>
 
-      <label for="default-fg-color">Default foreground color (when not specified by page)</label><br>
-      <input id="default-fg-color" class="setting-value" name="default_fg_color" type="color" value="{{DEFAULT_FG_COLOR_VALUE}}" size="16"><br>
-
-      <br>
+      <label for="default-fg-color">Default foreground color</label><br>
+      <input id="default-fg-color" class="setting-value" name="default_fg_color" type="text" value="{{DEFAULT_FG_COLOR_VALUE}}" size="16"><br><br>
 
       <button id="set-default-colors-submit" name="submit_set_default_colors" type="submit" value="1">Save Colors</button>
     </form>
 
-    <form id="set-verbose-log-form" class="settings-form" name="set_verbose_log" method="get" action="about:settings">
-      <input name="action" type="hidden" value="set">
-      <input name="key" type="hidden" value="verbose_log">
+    <h2>Storage (Fixed)</h2>
+    <p>Browser data directory:<br><code>{{BROWSER_DATA_DIR_VALUE}}</code></p>
+    <p>Downloads directory:<br><code>{{DOWNLOADS_DIR_VALUE}}</code></p>
+    <p>Applet I/O directory:<br><code>{{APPLET_VFS_DIR_VALUE}}</code></p>
 
-      <label for="verbose-log-enabled">Verbose log (writes log.txt next to main.lua)</label><br>
-      <input id="verbose-log-enabled" name="verbose_log_choice" type="radio" value="enabled" {{VERBOSE_LOG_RADIO_ENABLED_CHECKED}}>
-      <label for="verbose-log-enabled">Enabled</label><br>
-
-      <input id="verbose-log-disabled" name="verbose_log_choice" type="radio" value="disabled" {{VERBOSE_LOG_RADIO_DISABLED_CHECKED}}>
-      <label for="verbose-log-disabled">Disabled (Default)</label><br>
-
-      <button id="set-verbose-log-submit" name="submit_set_verbose_log" type="submit" value="1">Save</button>
-    </form>
-    <p><code>Verbose log</code> records I/O activity and errors to <code>log.txt</code> in the browser directory.</p>
+    <h2>Current Settings</h2>
+    <ul>
+      {{SETTINGS_LIST}}
+    </ul>
   </body>
 </html>

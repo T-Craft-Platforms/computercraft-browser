@@ -1,15 +1,13 @@
--- sandbox.lua: Lua applet execution with sandboxed or full-access modes
--- Applet output is restricted to a content-area window object.
+-- sandbox.lua: isolated Lua applet runtime with private per-session filesystem.
 
 return function(deps)
     local core = deps.core
     local getVfsRoot = deps.getVfsRoot
-    local VFS_ROOT = deps.vfsRoot or "/.vfs"
-    local LEGACY_VFS_ROOT = "/.vfs"
-    local legacyVfsMigrationAttempted = false
-
+    local DEFAULT_VFS_ROOT = deps.vfsRoot or "/.vfs"
     local trim = core.trim
     local unpackValues = table.unpack or unpack
+    local sessionCounter = 0
+
     local function packValues(...)
         return {
             n = select("#", ...),
@@ -24,388 +22,254 @@ return function(deps)
                 return root
             end
         end
-        return VFS_ROOT
-    end
-
-    local URL_GUID_MAP_FILE = "url-guid-map.tbl"
-    local randomSeeded = false
-
-    local function seedRandom()
-        if randomSeeded then
-            return
-        end
-        randomSeeded = true
-
-        local seed = 0
-        if os and type(os.epoch) == "function" then
-            local okEpoch, epochValue = pcall(os.epoch, "utc")
-            if okEpoch and type(epochValue) == "number" then
-                seed = seed + epochValue
-            end
-        end
-        if os and type(os.clock) == "function" then
-            seed = seed + math.floor(os.clock() * 1000000)
-        end
-        local addr = 0
-        local addrHex = tostring({}):match("0x(%x+)")
-        if addrHex then
-            addr = tonumber(addrHex, 16) or 0
-        end
-        seed = (seed + addr) % 2147483647
-        if seed <= 0 then
-            seed = 1
-        end
-
-        math.randomseed(seed)
-        math.random()
-        math.random()
-        math.random()
-    end
-
-    local function randomHex(count)
-        local out = {}
-        for i = 1, count do
-            out[i] = ("%x"):format(math.random(0, 15))
-        end
-        return table.concat(out)
-    end
-
-    local function generateGuid()
-        seedRandom()
-        local variant = ({ "8", "9", "a", "b" })[math.random(1, 4)]
-        return table.concat({
-            randomHex(8),
-            randomHex(4),
-            "4" .. randomHex(3),
-            variant .. randomHex(3),
-            randomHex(12),
-        }, "-")
-    end
-
-    local function isGuid(value)
-        local text = trim(tostring(value or "")):lower()
-        return text:match(
-            "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-4%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
-        ) ~= nil
-    end
-
-    local function normalizeVfsUrlKey(sourceUrl)
-        local raw = trim(tostring(sourceUrl or ""))
-        if raw == "" then
-            return "about:blank"
-        end
-
-        local parsed = core.parseUrl and core.parseUrl(raw) or nil
-        if parsed and (parsed.scheme == "http" or parsed.scheme == "https") and parsed.authority then
-            local scheme = trim(tostring(parsed.scheme or "")):lower()
-            local authority = trim(tostring(parsed.authority or "")):lower()
-            local path = tostring(parsed.path or "/")
-            path = path:gsub("[?#].*$", "")
-            if path == "" then
-                path = "/"
-            end
-            return scheme .. "://" .. authority .. path
-        end
-
-        if parsed and parsed.scheme == "file" then
-            local path = tostring(parsed.path or "")
-            if parsed.authority and parsed.authority ~= "" then
-                if path == "" or path == "/" then
-                    path = parsed.authority
-                else
-                    path = parsed.authority .. path
-                end
-            end
-            path = path:gsub("[?#].*$", "")
-            if path == "" then
-                path = "/"
-            end
-            return "file://" .. path
-        end
-
-        if parsed and parsed.scheme then
-            local path = tostring(parsed.path or ""):gsub("[?#].*$", "")
-            return tostring(parsed.scheme):lower() .. ":" .. path
-        end
-
-        return raw:gsub("[?#].*$", "")
-    end
-
-    local function loadUrlGuidMap(mappingPath)
-        if not (textutils and type(textutils.unserialize) == "function") then
-            return {}
-        end
-        if not fs.exists(mappingPath) then
-            return {}
-        end
-
-        local handle = fs.open(mappingPath, "r")
-        if not handle then
-            return {}
-        end
-
-        local payload = ""
-        local okRead = pcall(function()
-            payload = handle.readAll() or ""
-        end)
-        if not okRead then
-            okRead = pcall(function()
-                payload = handle:readAll() or ""
-            end)
-        end
-        pcall(function()
-            handle.close()
-        end)
-        pcall(function()
-            handle:close()
-        end)
-        if not okRead or payload == "" then
-            return {}
-        end
-
-        local okDecode, decoded = pcall(textutils.unserialize, payload)
-        if not okDecode or type(decoded) ~= "table" then
-            return {}
-        end
-
-        local cleaned = {}
-        for key, value in pairs(decoded) do
-            local normalizedKey = trim(tostring(key or ""))
-            local guid = trim(tostring(value or "")):lower()
-            if normalizedKey ~= "" and isGuid(guid) then
-                cleaned[normalizedKey] = guid
-            end
-        end
-        return cleaned
-    end
-
-    local function saveUrlGuidMap(mappingPath, mapping)
-        if not (textutils and type(textutils.serialize) == "function") then
-            return false
-        end
-
-        local encoded = textutils.serialize(mapping or {})
-        if not encoded then
-            return false
-        end
-
-        local handle = fs.open(mappingPath, "w")
-        if not handle then
-            return false
-        end
-
-        local okWrite = pcall(function()
-            handle.write(encoded)
-        end)
-        if not okWrite then
-            okWrite = pcall(function()
-                handle:write(encoded)
-            end)
-        end
-        local okClose = pcall(function()
-            handle.close()
-        end)
-        if not okClose then
-            okClose = pcall(function()
-                handle:close()
-            end)
-        end
-
-        return okWrite and okClose
-    end
-
-    local function guidInMapping(mapping, guid)
-        local needle = trim(tostring(guid or "")):lower()
-        if needle == "" then
-            return false
-        end
-        for _, existing in pairs(mapping or {}) do
-            if trim(tostring(existing or "")):lower() == needle then
-                return true
-            end
-        end
-        return false
+        return DEFAULT_VFS_ROOT
     end
 
     local function ensureDir(path)
         if fs.exists(path) then
             return fs.isDir(path)
         end
-        local ok = pcall(fs.makeDir, path)
-        return ok and fs.exists(path) and fs.isDir(path)
+        local okMake = pcall(fs.makeDir, path)
+        return okMake and fs.exists(path) and fs.isDir(path)
     end
 
-    local function migrateLegacyVfsRoot(targetRoot)
-        if legacyVfsMigrationAttempted then
-            return
+    local function nextSessionId()
+        sessionCounter = sessionCounter + 1
+        local epochPart = 0
+        if os and type(os.epoch) == "function" then
+            local okEpoch, epochValue = pcall(os.epoch, "utc")
+            if okEpoch and type(epochValue) == "number" then
+                epochPart = math.floor(epochValue)
+            end
         end
-        legacyVfsMigrationAttempted = true
-        if targetRoot == LEGACY_VFS_ROOT then
-            return
+        local clockPart = 0
+        if os and type(os.clock) == "function" then
+            clockPart = math.floor(os.clock() * 1000000)
         end
-        if not fs.exists(LEGACY_VFS_ROOT) or not fs.isDir(LEGACY_VFS_ROOT) then
-            return
+        local entropy = tostring({}):gsub("[^%x]", ""):sub(-8)
+        if entropy == "" then
+            entropy = tostring(sessionCounter)
         end
-        local targetParent = fs.getDir(targetRoot)
-        if targetParent and targetParent ~= "" then
-            ensureDir(targetParent)
-        end
-        if not fs.exists(targetRoot) then
-            ensureDir(targetRoot)
-        end
-        local importPath = fs.combine(targetRoot, "_legacy_root")
-        if not fs.exists(importPath) then
-            pcall(fs.move, LEGACY_VFS_ROOT, importPath)
-        end
+        return ("session-%d-%d-%d-%s"):format(epochPart, clockPart, sessionCounter, entropy)
     end
 
-    -- Virtual filesystem: all reads/writes go under VFS_ROOT
-    local function createVirtualFs(sourceUrl)
+    local function normalizeRootPrefix(path)
+        local normalized = fs.combine(path, "")
+        if #normalized > 1 and normalized:sub(-1) == "/" then
+            normalized = normalized:sub(1, -2)
+        end
+        local prefix = normalized
+        if prefix:sub(-1) ~= "/" then
+            prefix = prefix .. "/"
+        end
+        return normalized, prefix
+    end
+
+    local function isPathInside(root, candidate)
+        local normalizedRoot, rootPrefix = normalizeRootPrefix(root)
+        if candidate == normalizedRoot then
+            return true
+        end
+        return candidate:sub(1, #rootPrefix) == rootPrefix
+    end
+
+    local function createVirtualFs(_sourceUrl, sessionId)
         local sharedRoot = activeVfsRoot()
-        migrateLegacyVfsRoot(sharedRoot)
-        ensureDir(sharedRoot)
-
-        local mapPath = fs.combine(sharedRoot, URL_GUID_MAP_FILE)
-        local key = normalizeVfsUrlKey(sourceUrl)
-        local urlGuidMap = loadUrlGuidMap(mapPath)
-
-        local guid = trim(tostring(urlGuidMap[key] or "")):lower()
-        if not isGuid(guid) then
-            repeat
-                guid = generateGuid()
-            until not guidInMapping(urlGuidMap, guid)
-            urlGuidMap[key] = guid
-            saveUrlGuidMap(mapPath, urlGuidMap)
+        if not ensureDir(sharedRoot) then
+            return nil, "Could not prepare applet storage root"
         end
 
-        local vfsRoot = fs.combine(sharedRoot, guid)
-        ensureDir(vfsRoot)
+        local safeSessionId = trim(tostring(sessionId or nextSessionId()))
+        safeSessionId = safeSessionId:gsub("[^%w%._%-]", "_")
+        if safeSessionId == "" then
+            safeSessionId = nextSessionId()
+        end
 
-        local vfs = {}
+        local sessionRoot = fs.combine(sharedRoot, safeSessionId)
+        if not ensureDir(sessionRoot) then
+            return nil, "Could not prepare applet session storage"
+        end
 
         local function resolve(path)
             local cleaned = tostring(path or "")
             cleaned = cleaned:gsub("\\", "/")
-            -- Use fs.combine to normalize the path, then verify it stays within VFS_ROOT
-            local combined = fs.combine(vfsRoot, cleaned)
-            -- Ensure the resolved path is exactly root or a child path.
-            local normalizedRoot = fs.combine(vfsRoot, "")
-            if #normalizedRoot > 1 and normalizedRoot:sub(-1) == "/" then
-                normalizedRoot = normalizedRoot:sub(1, -2)
-            end
-            local rootPrefix = normalizedRoot
-            if rootPrefix:sub(-1) ~= "/" then
-                rootPrefix = rootPrefix .. "/"
-            end
-            if combined ~= normalizedRoot and combined:sub(1, #rootPrefix) ~= rootPrefix then
-                return fs.combine(vfsRoot, "blocked")
+            local combined = fs.combine(sessionRoot, cleaned)
+            if not isPathInside(sessionRoot, combined) then
+                return nil
             end
             return combined
         end
 
+        local vfs = {}
+
         function vfs.open(path, mode)
-            return fs.open(resolve(path), mode)
+            local resolved = resolve(path)
+            if not resolved then
+                return nil
+            end
+            return fs.open(resolved, mode)
         end
+
         function vfs.exists(path)
-            return fs.exists(resolve(path))
+            local resolved = resolve(path)
+            return resolved ~= nil and fs.exists(resolved) or false
         end
+
         function vfs.isDir(path)
-            return fs.isDir(resolve(path))
+            local resolved = resolve(path)
+            return resolved ~= nil and fs.isDir(resolved) or false
         end
+
         function vfs.list(path)
             local resolved = resolve(path)
-            if not fs.exists(resolved) then
+            if not resolved or not fs.exists(resolved) or not fs.isDir(resolved) then
                 return {}
             end
-            local items = fs.list(resolved)
-            -- Return enhanced list with full paths and file type information
-            local result = {}
-            for i, name in ipairs(items) do
-                local itemPath = fs.combine(path or "", name)
-                local fullPath = fs.combine(resolved, name)
-                local isDir = fs.isDir(fullPath)
-                local size = isDir and "-" or tostring(fs.getSize(fullPath))
-                -- Escape special characters in path for safe display
-                local escapedPath = itemPath:gsub("[\\\"'%c]", function(c)
-                    return string.format("\\x%02X", string.byte(c))
-                end)
-                local escapedName = name:gsub("[\\\"'%c]", function(c)
-                    return string.format("\\x%02X", string.byte(c))
-                end)
-                result[i] = {
-                    name = name,
-                    path = itemPath,
-                    fullPath = fullPath,
-                    isDir = isDir,
-                    size = size,
-                    displayName = (isDir and "[DIR] " or "[FILE] ") .. escapedName,
-                    displayPath = escapedPath,
-                }
-            end
-            -- Also return the simple list for backward compatibility
-            local simpleList = {}
-            for i, item in ipairs(result) do
-                simpleList[i] = item.name
-            end
-            return simpleList, result
+            return fs.list(resolved)
         end
+
         function vfs.makeDir(path)
-            return fs.makeDir(resolve(path))
+            local resolved = resolve(path)
+            if not resolved then
+                return false
+            end
+            if fs.exists(resolved) then
+                return fs.isDir(resolved)
+            end
+            local parent = fs.getDir(resolved)
+            if parent and parent ~= "" then
+                ensureDir(parent)
+            end
+            local okMake = pcall(fs.makeDir, resolved)
+            return okMake and fs.exists(resolved) and fs.isDir(resolved)
         end
+
         function vfs.delete(path)
-            return fs.delete(resolve(path))
+            local resolved = resolve(path)
+            if not resolved or resolved == sessionRoot then
+                return false
+            end
+            return pcall(fs.delete, resolved)
         end
+
         function vfs.move(from, to)
-            return fs.move(resolve(from), resolve(to))
+            local fromResolved = resolve(from)
+            local toResolved = resolve(to)
+            if not fromResolved or not toResolved then
+                return false
+            end
+            local toParent = fs.getDir(toResolved)
+            if toParent and toParent ~= "" then
+                ensureDir(toParent)
+            end
+            return pcall(fs.move, fromResolved, toResolved)
         end
+
         function vfs.copy(from, to)
-            return fs.copy(resolve(from), resolve(to))
+            local fromResolved = resolve(from)
+            local toResolved = resolve(to)
+            if not fromResolved or not toResolved then
+                return false
+            end
+            local toParent = fs.getDir(toResolved)
+            if toParent and toParent ~= "" then
+                ensureDir(toParent)
+            end
+            return pcall(fs.copy, fromResolved, toResolved)
         end
+
         function vfs.getSize(path)
-            return fs.getSize(resolve(path))
+            local resolved = resolve(path)
+            if not resolved or not fs.exists(resolved) then
+                return 0
+            end
+            return fs.getSize(resolved)
         end
+
         function vfs.getFreeSpace(path)
-            return fs.getFreeSpace(resolve(path))
+            local resolved = resolve(path)
+            if not resolved then
+                return 0
+            end
+            return fs.getFreeSpace(resolved)
         end
+
         function vfs.getName(path)
             return fs.getName(tostring(path or ""))
         end
+
         function vfs.getDir(path)
             return fs.getDir(tostring(path or ""))
         end
+
         function vfs.combine(base, child)
             return fs.combine(tostring(base or ""), tostring(child or ""))
         end
-        function vfs.complete(partial, path, includeFiles, includeSlashes)
+
+        function vfs.complete(_partial, _path, _includeFiles, _includeSlashes)
             return {}
         end
-        function vfs.find(wildcard)
+
+        function vfs.find(_wildcard)
             return {}
         end
-        function vfs.isDriveRoot(path)
+
+        function vfs.isDriveRoot(_path)
             return false
         end
-        function vfs.getDrive(path)
-            return "vfs"
+
+        function vfs.getDrive(_path)
+            return "applet-vfs"
         end
+
         function vfs.attributes(path)
             local resolved = resolve(path)
+            if not resolved then
+                return nil
+            end
             if type(fs.attributes) == "function" then
                 return fs.attributes(resolved)
             end
-            return { size = 0, isDir = fs.isDir(resolved), isReadOnly = false }
+            return {
+                size = fs.exists(resolved) and fs.getSize(resolved) or 0,
+                isDir = fs.exists(resolved) and fs.isDir(resolved) or false,
+                isReadOnly = false,
+            }
         end
 
-        return vfs
+        vfs.__sessionRoot = sessionRoot
+        return vfs, nil
     end
 
-    -- Build a sandboxed environment for the applet
-    local function buildSandboxEnv(contentWindow, luaSource, sourceUrl)
-        local vfs = createVirtualFs(sourceUrl)
+    local function writeToContentWindow(contentWindow, text)
+        contentWindow.write(tostring(text or ""))
+    end
+
+    local function printToContentWindow(contentWindow, ...)
+        local args = { ... }
+        local parts = {}
+        for i = 1, #args do
+            parts[i] = tostring(args[i])
+        end
+        writeToContentWindow(contentWindow, table.concat(parts, "\t"))
+        local _, cy = contentWindow.getCursorPos()
+        local _, ch = contentWindow.getSize()
+        if cy >= ch then
+            contentWindow.scroll(1)
+            contentWindow.setCursorPos(1, cy)
+        else
+            contentWindow.setCursorPos(1, cy + 1)
+        end
+    end
+
+    local function buildSandboxEnv(contentWindow, sourceUrl, sessionId)
+        local vfs, vfsErr = createVirtualFs(sourceUrl, sessionId)
+        if not vfs then
+            return nil, vfsErr
+        end
 
         local env = {}
 
-        -- Safe globals
         env._VERSION = _VERSION
         env.type = type
         env.tostring = tostring
@@ -425,88 +289,72 @@ return function(deps)
         env.rawlen = rawlen
         env.setmetatable = setmetatable
         env.getmetatable = getmetatable
-
-        -- String, table, math
         env.string = string
         env.table = table
         env.math = math
         env.bit32 = bit32
         env.utf8 = utf8
 
-        -- OS (safe subset)
         env.os = {
-            clock = os.clock,
-            time = os.time,
-            day = os.day,
-            epoch = os.epoch,
-            date = os.date,
-            startTimer = os.startTimer,
-            cancelTimer = os.cancelTimer,
-            setAlarm = os.setAlarm,
-            cancelAlarm = os.cancelAlarm,
-            queueEvent = os.queueEvent,
+            clock = os and os.clock or nil,
+            time = os and os.time or nil,
+            day = os and os.day or nil,
+            epoch = os and os.epoch or nil,
+            date = os and os.date or nil,
+            startTimer = os and os.startTimer or nil,
+            cancelTimer = os and os.cancelTimer or nil,
+            setAlarm = os and os.setAlarm or nil,
+            cancelAlarm = os and os.cancelAlarm or nil,
+            queueEvent = os and os.queueEvent or nil,
         }
 
-        -- Textutils
         if textutils then
             env.textutils = textutils
         end
-
-        -- Colors
         if colors then
             env.colors = colors
         end
         if colours then
             env.colours = colours
         end
-
-        -- Keys
         if keys then
             env.keys = keys
         end
+        if parallel then
+            env.parallel = parallel
+        end
+        if paintutils then
+            env.paintutils = paintutils
+        end
 
-        -- Print to content window
         env.print = function(...)
-            local args = { ... }
-            local parts = {}
-            for i = 1, #args do
-                parts[i] = tostring(args[i])
-            end
-            local text = table.concat(parts, "\t")
-            contentWindow.write(text)
-            local cx, cy = contentWindow.getCursorPos()
-            local cw, ch = contentWindow.getSize()
-            if cy >= ch then
-                contentWindow.scroll(1)
-                contentWindow.setCursorPos(1, cy)
-            else
-                contentWindow.setCursorPos(1, cy + 1)
-            end
+            printToContentWindow(contentWindow, ...)
         end
-
         env.write = function(text)
-            contentWindow.write(tostring(text or ""))
+            writeToContentWindow(contentWindow, text)
         end
 
-        -- Term redirected to content window
         env.term = {}
         for k, v in pairs(contentWindow) do
             if type(v) == "function" then
                 env.term[k] = v
             end
         end
-        -- Also provide term.native and term.current pointing to contentWindow
         env.term.native = function() return contentWindow end
         env.term.current = function() return contentWindow end
-        env.term.redirect = function(target)
-            -- No-op in sandbox: applet cannot redirect outside content area
+        env.term.redirect = function(_target)
             return contentWindow
         end
 
-        -- Sandboxed filesystem
-        env.fs = vfs
+        if window then
+            env.window = {
+                create = function(_parent, x, y, w, h, visible)
+                    return window.create(contentWindow, x, y, w, h, visible)
+                end,
+            }
+        end
 
-        -- No HTTP, no shell, no peripheral, no redstone, no turtle, no commands
+        env.fs = vfs
         env.http = nil
         env.shell = nil
         env.peripheral = nil
@@ -521,83 +369,9 @@ return function(deps)
         env.rednet = nil
         env.modem = nil
 
-        -- Parallel support
-        if parallel then
-            env.parallel = parallel
-        end
-
-        -- Paintutils (safe, visual)
-        if paintutils then
-            env.paintutils = paintutils
-        end
-
-        -- Window API (so applets can create sub-windows within the content area)
-        if window then
-            env.window = {
-                create = function(parent, x, y, w, h, visible)
-                    -- Force parent to be contentWindow
-                    return window.create(contentWindow, x, y, w, h, visible)
-                end,
-            }
-        end
-
-        -- Load/dofile restricted to virtual fs
         env.loadstring = loadstring
         env.load = load
-
-        return env
-    end
-
-    -- Build a full-access environment for the applet
-    local function buildFullAccessEnv(contentWindow, luaSource, sourceUrl)
-        local env = {}
-
-        -- Copy the full global environment
-        for k, v in pairs(_G) do
-            env[k] = v
-        end
-        env.os = {}
-        for k, v in pairs(os or {}) do
-            env.os[k] = v
-        end
-
-        -- Override term to point to content window
-        env.term = {}
-        for k, v in pairs(contentWindow) do
-            if type(v) == "function" then
-                env.term[k] = v
-            end
-        end
-        env.term.native = function() return contentWindow end
-        env.term.current = function() return contentWindow end
-        env.term.redirect = function(target)
-            return contentWindow
-        end
-
-        -- Print/write to content window
-        env.print = function(...)
-            local args = { ... }
-            local parts = {}
-            for i = 1, #args do
-                parts[i] = tostring(args[i])
-            end
-            local text = table.concat(parts, "\t")
-            contentWindow.write(text)
-            local cx, cy = contentWindow.getCursorPos()
-            local cw, ch = contentWindow.getSize()
-            if cy >= ch then
-                contentWindow.scroll(1)
-                contentWindow.setCursorPos(1, cy)
-            else
-                contentWindow.setCursorPos(1, cy + 1)
-            end
-        end
-
-        env.write = function(text)
-            contentWindow.write(tostring(text or ""))
-        end
-
-        return env
+        return env, nil
     end
 
     local function installEventBridge(env)
@@ -645,19 +419,14 @@ return function(deps)
         env.os.sleep = env.sleep
     end
 
-    local function buildAppletEnv(luaSource, sourceUrl, mode, contentWindow)
-        local env
-        if mode == "sandboxed" then
-            env = buildSandboxEnv(contentWindow, luaSource, sourceUrl)
-        else
-            env = buildFullAccessEnv(contentWindow, luaSource, sourceUrl)
+    local function createAppletSession(luaSource, sourceUrl, _mode, contentWindow)
+        local sessionId = nextSessionId()
+        local env, envErr = buildSandboxEnv(contentWindow, sourceUrl, sessionId)
+        if not env then
+            return nil, tostring(envErr or "Could not create sandbox environment")
         end
         installEventBridge(env)
-        return env
-    end
 
-    local function createAppletSession(luaSource, sourceUrl, mode, contentWindow)
-        local env = buildAppletEnv(luaSource, sourceUrl, mode, contentWindow)
         local fn, compileErr = load(luaSource, "=" .. (sourceUrl or "applet"), "t", env)
         if not fn then
             return nil, "Compile error: " .. tostring(compileErr)
@@ -671,6 +440,8 @@ return function(deps)
             waitingFilter = nil,
             waitingRaw = false,
             started = false,
+            mode = "sandboxed",
+            sessionId = sessionId,
         }
 
         local appletCoroutine = coroutine.create(function()
@@ -773,9 +544,6 @@ return function(deps)
         return session, nil
     end
 
-    -- Execute a Lua applet within the content window area.
-    -- mode: "sandboxed" or "full"
-    -- Returns: ok (boolean), error message (string or nil)
     local function executeApplet(luaSource, sourceUrl, mode, contentWindow)
         local session, sessionErr = createAppletSession(luaSource, sourceUrl, mode, contentWindow)
         if not session then

@@ -1,7 +1,6 @@
 return function(core, options)
     options = options or {}
 
-    local startsWith = core.startsWith
     local parseUrl = core.parseUrl
     local decodeUrlPath = core.decodeUrlPath
     local escapeHtml = core.escapeHtml
@@ -9,12 +8,6 @@ return function(core, options)
 
     local aboutPagesDir = options.aboutPagesDir or "/src/browser/about-pages"
     local aboutApi = options.aboutApi or {}
-
-    -- Logger helpers (no-op when logger not provided or verbose_log disabled)
-    local _logger = options.logger or nil
-    local function logIO(msg)    if _logger then _logger.io(msg) end end
-    local function logError(msg) if _logger then _logger.error(msg) end end
-    local function logInfo(msg)  if _logger then _logger.info(msg) end end
 
     local function makeErrorPage(url, message)
         local safeUrl = escapeHtml(url or "unknown")
@@ -27,13 +20,10 @@ return function(core, options)
             return nil, "Empty file path"
         end
         if not fs.exists(path) then
-            logError("readLocalFile not found: " .. tostring(path))
             return nil, "File not found: " .. path
         end
-        logIO("readLocalFile: " .. tostring(path))
         local handle = fs.open(path, "r")
         if not handle then
-            logError("readLocalFile open failed: " .. tostring(path))
             return nil, "Could not open file: " .. path
         end
         local content = handle.readAll() or ""
@@ -50,24 +40,19 @@ return function(core, options)
         local headers = requestOptions and requestOptions.headers or nil
         local body = requestOptions and requestOptions.body or nil
 
-        logIO("HTTP " .. method .. ": " .. tostring(url))
-
         local ok, response, err
         if method == "GET" then
             ok, response, err = pcall(http.get, url, headers, true)
         elseif method == "POST" then
             ok, response, err = pcall(http.post, url, tostring(body or ""), headers, true)
         else
-            logError("HTTP unsupported method [" .. tostring(url) .. "]: " .. method)
             return nil, nil, ("Unsupported HTTP method: %s"):format(method)
         end
 
         if not ok then
-            logError("HTTP " .. method .. " pcall error [" .. tostring(url) .. "]: " .. tostring(response))
             return nil, nil, tostring(response)
         end
         if not response then
-            logError("HTTP " .. method .. " failed [" .. tostring(url) .. "]: " .. tostring(err or "Request failed"))
             return nil, nil, err or "Request failed"
         end
 
@@ -83,7 +68,6 @@ return function(core, options)
             pcall(response.close)
         end
 
-        logIO("HTTP " .. method .. " OK: " .. tostring(url) .. " (" .. tostring(#body) .. " bytes)")
         return body, headers, nil
     end
 
@@ -494,48 +478,70 @@ return function(core, options)
 
     local function renderSettingsPage(template, url, params)
         local statusMessage = activeSettingsStatus() or "Ready."
-        local action = (params.action or ""):lower()
+        local action = trim(tostring(params.action or "")):lower()
+
+        local function isEnabled(raw, defaultEnabled)
+            local value = trim(tostring(raw or (defaultEnabled and "true" or "false"))):lower()
+            return not (value == "false" or value == "0" or value == "off" or value == "no" or value == "disabled")
+        end
+
+        local function loadSettings()
+            local settings = {}
+            if type(aboutApi.listSettings) == "function" then
+                local listed = aboutApi.listSettings()
+                if type(listed) == "table" then
+                    settings = listed
+                end
+            end
+            return settings
+        end
+
+        local function saveSetting(key, value)
+            if type(aboutApi.setSetting) ~= "function" then
+                return false, "Settings API is unavailable."
+            end
+            if key == "" then
+                return false, "Missing setting key."
+            end
+            return aboutApi.setSetting(key, value)
+        end
 
         if action == "set_colors" then
-            if type(aboutApi.setSetting) ~= "function" then
-                statusMessage = "Settings API is unavailable."
-            else
-                local bgColor = trim(tostring(params.default_bg_color or ""))
-                local fgColor = trim(tostring(params.default_fg_color or params.default_text_color or ""))
-                local savedCount = 0
-                local errors = {}
+            local bgColor = trim(tostring(params.default_bg_color or ""))
+            local fgColor = trim(tostring(params.default_fg_color or params.default_text_color or ""))
+            local saved = 0
+            local errors = {}
 
-                if bgColor ~= "" then
-                    local okBg, errBg = aboutApi.setSetting("default_bg_color", bgColor)
-                    if okBg then
-                        savedCount = savedCount + 1
-                    else
-                        errors[#errors + 1] = tostring(errBg or "Could not save default_bg_color")
-                    end
-                end
-                if fgColor ~= "" then
-                    local okFg, errFg = aboutApi.setSetting("default_fg_color", fgColor)
-                    if okFg then
-                        savedCount = savedCount + 1
-                    else
-                        errors[#errors + 1] = tostring(errFg or "Could not save default_fg_color")
-                    end
-                end
-
-                if #errors > 0 then
-                    statusMessage = table.concat(errors, "; ")
-                elseif savedCount > 0 then
-                    statusMessage = "Colors saved."
+            if bgColor ~= "" then
+                local okBg, errBg = saveSetting("default_bg_color", bgColor)
+                if okBg then
+                    saved = saved + 1
                 else
-                    statusMessage = "Missing color values."
+                    errors[#errors + 1] = tostring(errBg or "Could not save default_bg_color")
                 end
+            end
+            if fgColor ~= "" then
+                local okFg, errFg = saveSetting("default_fg_color", fgColor)
+                if okFg then
+                    saved = saved + 1
+                else
+                    errors[#errors + 1] = tostring(errFg or "Could not save default_fg_color")
+                end
+            end
+
+            if #errors > 0 then
+                statusMessage = table.concat(errors, "; ")
+            elseif saved > 0 then
+                statusMessage = "Colors saved."
+            else
+                statusMessage = "Missing color values."
             end
             setSettingsStatus(statusMessage, 3)
         elseif action == "set" then
-            local key = params.key or ""
-            local value = params.value or ""
+            local key = trim(tostring(params.key or ""))
+            local value = tostring(params.value or "")
             if key == "home_page" then
-                local choice = tostring(params.home_page_choice or ""):lower()
+                local choice = trim(tostring(params.home_page_choice or "")):lower()
                 if choice == "about:home" then
                     value = "about:home"
                 elseif choice == "about:blank" then
@@ -543,55 +549,45 @@ return function(core, options)
                 elseif choice == "custom" then
                     value = tostring(params.home_page_custom or "")
                 end
-            elseif key == "turtle_mode" or key == "virtual_views" then
-                key = "turtle_mode"
-                local choice = tostring(params.turtle_mode_choice or params.virtual_views_choice or ""):lower()
+            elseif key == "turtle_mode" then
+                local choice = trim(tostring(params.turtle_mode_choice or "")):lower()
                 if choice == "enabled" then
                     value = "true"
                 elseif choice == "disabled" then
                     value = "false"
                 end
             elseif key == "usage_guard_enabled" then
-                local choice = tostring(params.usage_guard_choice or ""):lower()
+                local choice = trim(tostring(params.usage_guard_choice or "")):lower()
                 if choice == "enabled" then
                     value = "true"
                 elseif choice == "disabled" then
                     value = "false"
                 end
             elseif key == "history_enabled" then
-                local choice = tostring(params.history_choice or ""):lower()
+                local choice = trim(tostring(params.history_choice or "")):lower()
                 if choice == "enabled" then
                     value = "true"
                 elseif choice == "disabled" then
                     value = "false"
                 end
-            elseif key == "persistence_enabled" then
-                local choice = tostring(params.persistence_choice or ""):lower()
+            elseif key == "pause_inactive_applets" then
+                local choice = trim(tostring(params.pause_applets_choice or "")):lower()
                 if choice == "enabled" then
                     value = "true"
                 elseif choice == "disabled" then
                     value = "false"
                 end
-            elseif key == "downloads_dir" then
-                value = tostring(params.downloads_dir_value or value or "")
             elseif key == "fullscreen_mode" then
-                local choice = tostring(params.fullscreen_mode_choice or ""):lower()
+                local choice = trim(tostring(params.fullscreen_mode_choice or "")):lower()
                 if choice == "seamless" or choice == "seemless" then
                     value = "seamless"
                 elseif choice == "normal" then
                     value = "normal"
                 end
             elseif key == "browser_engine_level" then
-                local choice = tostring(params.browser_engine_level_choice or ""):lower()
+                local choice = trim(tostring(params.browser_engine_level_choice or "")):lower()
                 if choice == "text_only" or choice == "lite" or choice == "advanced" then
                     value = choice
-                end
-            elseif key == "verbose_log" then
-                local choice = tostring(params.verbose_log_choice or ""):lower()
-                if choice == "enabled" then
-                    value = "true"
-                elseif choice == "disabled" then
-                    value = "false"
                 end
             elseif key == "default_bg_color" then
                 value = tostring(params.default_bg_color or value or "")
@@ -599,18 +595,11 @@ return function(core, options)
                 key = "default_fg_color"
                 value = tostring(params.default_fg_color or params.default_text_color or value or "")
             end
-            if key == "" then
-                statusMessage = "Missing setting key."
-            elseif key == "home_page" and trim(tostring(value or "")) == "" then
+
+            if key == "home_page" and trim(tostring(value or "")) == "" then
                 statusMessage = "Missing home page value."
-            elseif key == "downloads_dir" and trim(tostring(value or "")) == "" then
-                statusMessage = ("Missing %s value."):format(key)
-            elseif key == "browser_data_dir" or key == "settings_dir" then
-                statusMessage = "browser_data_dir is fixed and cannot be changed."
-            elseif type(aboutApi.setSetting) ~= "function" then
-                statusMessage = "Settings API is unavailable."
             else
-                local ok, err = aboutApi.setSetting(key, value)
+                local ok, err = saveSetting(key, value)
                 if ok then
                     statusMessage = ("Saved %s = %s"):format(key, value)
                 else
@@ -619,7 +608,7 @@ return function(core, options)
             end
             setSettingsStatus(statusMessage, 3)
         elseif action == "get" then
-            local key = params.key or ""
+            local key = trim(tostring(params.key or ""))
             if key == "" then
                 statusMessage = "Missing setting key."
             elseif type(aboutApi.getSetting) ~= "function" then
@@ -634,39 +623,9 @@ return function(core, options)
             end
         end
 
-        local settings = {}
-        if type(aboutApi.listSettings) == "function" then
-            local listed = aboutApi.listSettings()
-            if type(listed) == "table" then
-                settings = listed
-            end
-        end
-
-        local settingsItems = {}
-        local settingKeys = sortTableKeys(settings)
-        if #settingKeys == 0 then
-            settingsItems[#settingsItems + 1] = "<li><i>No settings yet.</i></li>"
-        else
-            for _, key in ipairs(settingKeys) do
-                local value = tostring(settings[key] or "")
-                settingsItems[#settingsItems + 1] = ("<li><b>%s</b> = <code>%s</code></li>")
-                    :format(escapeHtml(key), escapeHtml(value))
-            end
-        end
-
-        local paramItems = {}
-        local paramKeys = sortTableKeys(params)
-        if #paramKeys == 0 then
-            paramItems[#paramItems + 1] = "<li><i>No query parameters.</i></li>"
-        else
-            for _, key in ipairs(paramKeys) do
-                paramItems[#paramItems + 1] = ("<li><code>%s</code> = <code>%s</code></li>")
-                    :format(escapeHtml(key), escapeHtml(tostring(params[key] or "")))
-            end
-        end
-
+        local settings = loadSettings()
         local homePageValue = tostring(settings.home_page or "about:home")
-        local selectedChoice = tostring(params.home_page_choice or ""):lower()
+        local selectedChoice = trim(tostring(params.home_page_choice or "")):lower()
         if selectedChoice ~= "about:home" and selectedChoice ~= "about:blank" and selectedChoice ~= "custom" then
             if homePageValue == "about:home" then
                 selectedChoice = "about:home"
@@ -676,118 +635,54 @@ return function(core, options)
                 selectedChoice = "custom"
             end
         end
-
         local customValue = ""
         if selectedChoice == "custom" then
             customValue = tostring(params.home_page_custom or "")
-            if customValue == "" then
-                if homePageValue ~= "about:home" and homePageValue ~= "about:blank" then
-                    customValue = homePageValue
-                end
+            if customValue == "" and homePageValue ~= "about:home" and homePageValue ~= "about:blank" then
+                customValue = homePageValue
             end
         elseif homePageValue ~= "about:home" and homePageValue ~= "about:blank" then
             customValue = homePageValue
         end
 
-        local turtleModeValue = tostring(settings.turtle_mode or settings.virtual_views or "false"):lower()
-        local turtleModeChoice = tostring(params.turtle_mode_choice or params.virtual_views_choice or ""):lower()
-        if turtleModeChoice ~= "enabled" and turtleModeChoice ~= "disabled" then
-            if turtleModeValue == "false" or turtleModeValue == "0" or turtleModeValue == "off"
-                or turtleModeValue == "no" or turtleModeValue == "disabled" then
-                turtleModeChoice = "disabled"
-            else
-                turtleModeChoice = "enabled"
-            end
+        local turtleModeEnabled = isEnabled(settings.turtle_mode, false)
+        local historyEnabled = isEnabled(settings.history_enabled, true)
+        local usageGuardEnabled = isEnabled(settings.usage_guard_enabled, true)
+        local pauseAppletsEnabled = isEnabled(settings.pause_inactive_applets, true)
+        if turtleModeEnabled then
+            usageGuardEnabled = false
         end
 
-        local usageGuardValue = tostring(settings.usage_guard_enabled or "true"):lower()
-        local usageGuardChoice = tostring(params.usage_guard_choice or ""):lower()
-        if usageGuardChoice ~= "enabled" and usageGuardChoice ~= "disabled" then
-            if usageGuardValue == "false" or usageGuardValue == "0" or usageGuardValue == "off"
-                or usageGuardValue == "no" or usageGuardValue == "disabled" then
-                usageGuardChoice = "disabled"
-            else
-                usageGuardChoice = "enabled"
-            end
-        end
-        local turtleModeEnabled = turtleModeChoice == "enabled"
-        if turtleModeEnabled and usageGuardChoice ~= "disabled" then
-            usageGuardChoice = "disabled"
-            if action == "set" and tostring(params.key or ""):lower() == "usage_guard_enabled" then
-                statusMessage = "High-usage crash guard is unavailable while turtle mode is enabled."
-                setSettingsStatus(statusMessage, 3)
-            end
-        end
-
-        local historyValue = tostring(settings.history_enabled or "true"):lower()
-        local historyChoice = tostring(params.history_choice or ""):lower()
-        if historyChoice ~= "enabled" and historyChoice ~= "disabled" then
-            if historyValue == "false" or historyValue == "0" or historyValue == "off"
-                or historyValue == "no" or historyValue == "disabled" then
-                historyChoice = "disabled"
-            else
-                historyChoice = "enabled"
-            end
-        end
-
-        local persistenceValue = tostring(settings.persistence_enabled or "true"):lower()
-        local persistenceChoice = tostring(params.persistence_choice or ""):lower()
-        if persistenceChoice ~= "enabled" and persistenceChoice ~= "disabled" then
-            if persistenceValue == "false" or persistenceValue == "0" or persistenceValue == "off"
-                or persistenceValue == "no" or persistenceValue == "disabled" then
-                persistenceChoice = "disabled"
-            else
-                persistenceChoice = "enabled"
-            end
-        end
-
-        local fullscreenModeValue = tostring(settings.fullscreen_mode or "normal"):lower()
-        local fullscreenModeChoice = tostring(params.fullscreen_mode_choice or ""):lower()
-        if fullscreenModeChoice ~= "normal" and fullscreenModeChoice ~= "seamless" and fullscreenModeChoice ~= "seemless" then
-            if fullscreenModeValue == "seamless" or fullscreenModeValue == "seemless" then
-                fullscreenModeChoice = "seamless"
-            else
-                fullscreenModeChoice = "normal"
-            end
-        elseif fullscreenModeChoice == "seemless" then
+        local fullscreenModeChoice = trim(tostring(settings.fullscreen_mode or "normal")):lower()
+        if fullscreenModeChoice ~= "seamless" and fullscreenModeChoice ~= "seemless" then
+            fullscreenModeChoice = "normal"
+        else
             fullscreenModeChoice = "seamless"
         end
 
-        local browserDataDirValue = ""
-        if type(aboutApi.getBrowserDataDir) == "function" then
+        local browserEngineLevelChoice = trim(tostring(settings.browser_engine_level or "advanced")):lower()
+        if browserEngineLevelChoice ~= "text_only" and browserEngineLevelChoice ~= "lite" and browserEngineLevelChoice ~= "advanced" then
+            browserEngineLevelChoice = "advanced"
+        end
+
+        local defaultBgColorValue = trim(tostring(settings.default_bg_color or "black")):lower()
+        local defaultFgColorValue = trim(tostring(settings.default_fg_color or settings.default_text_color or "white")):lower()
+
+        local browserDataDirValue = trim(tostring(settings.browser_data_dir or ""))
+        if browserDataDirValue == "" and type(aboutApi.getBrowserDataDir) == "function" then
             browserDataDirValue = trim(tostring(aboutApi.getBrowserDataDir() or ""))
         end
-        if browserDataDirValue == "" then
-            browserDataDirValue = trim(tostring(settings.browser_data_dir or "/src/browser/data"))
-        end
-        local downloadsDirValue = trim(tostring(params.downloads_dir_value or ""))
-        if downloadsDirValue == "" then
-            downloadsDirValue = trim(tostring(settings.downloads_dir or "/downloads/"))
-        end
+        local downloadsDirValue = trim(tostring(settings.downloads_dir or ""))
+        local appletVfsDirValue = browserDataDirValue ~= "" and fs.combine(browserDataDirValue, "vfs") or ""
 
-        local browserEngineLevelValue = tostring(settings.browser_engine_level or "advanced"):lower()
-        local browserEngineLevelChoice = tostring(params.browser_engine_level_choice or ""):lower()
-        if browserEngineLevelChoice ~= "text_only" and browserEngineLevelChoice ~= "lite" and browserEngineLevelChoice ~= "advanced" then
-            browserEngineLevelChoice = browserEngineLevelValue
-        end
-
-        local defaultBgColorValue = trim(tostring(params.default_bg_color or "")):lower()
-        if defaultBgColorValue == "" then
-            defaultBgColorValue = trim(tostring(settings.default_bg_color or "black")):lower()
-        end
-        local defaultFgColorValue = trim(tostring(params.default_fg_color or params.default_text_color or "")):lower()
-        if defaultFgColorValue == "" then
-            defaultFgColorValue = trim(tostring(settings.default_fg_color or settings.default_text_color or "white")):lower()
-        end
-
-        local verboseLogValue = tostring(settings.verbose_log or "false"):lower()
-        local verboseLogChoice = tostring(params.verbose_log_choice or ""):lower()
-        if verboseLogChoice ~= "enabled" and verboseLogChoice ~= "disabled" then
-            if verboseLogValue == "false" or verboseLogValue == "0" or verboseLogValue == "off"
-                or verboseLogValue == "no" or verboseLogValue == "disabled" then
-                verboseLogChoice = "disabled"
-            else
-                verboseLogChoice = "enabled"
+        local settingsItems = {}
+        local settingKeys = sortTableKeys(settings)
+        if #settingKeys == 0 then
+            settingsItems[#settingsItems + 1] = "<li><i>No settings yet.</i></li>"
+        else
+            for _, key in ipairs(settingKeys) do
+                settingsItems[#settingsItems + 1] = ("<li><b>%s</b> = <code>%s</code></li>")
+                    :format(escapeHtml(key), escapeHtml(tostring(settings[key] or "")))
             end
         end
 
@@ -801,28 +696,26 @@ return function(core, options)
             HOME_PAGE_RADIO_HOME_CHECKED = selectedChoice == "about:home" and "checked" or "",
             HOME_PAGE_RADIO_BLANK_CHECKED = selectedChoice == "about:blank" and "checked" or "",
             HOME_PAGE_RADIO_CUSTOM_CHECKED = selectedChoice == "custom" and "checked" or "",
-            TURTLE_MODE_RADIO_ENABLED_CHECKED = turtleModeChoice == "enabled" and "checked" or "",
-            TURTLE_MODE_RADIO_DISABLED_CHECKED = turtleModeChoice == "disabled" and "checked" or "",
-            USAGE_GUARD_RADIO_ENABLED_CHECKED = usageGuardChoice == "enabled" and "checked" or "",
-            USAGE_GUARD_RADIO_DISABLED_CHECKED = usageGuardChoice == "disabled" and "checked" or "",
-            HISTORY_RADIO_ENABLED_CHECKED = historyChoice == "enabled" and "checked" or "",
-            HISTORY_RADIO_DISABLED_CHECKED = historyChoice == "disabled" and "checked" or "",
-            PERSISTENCE_RADIO_ENABLED_CHECKED = persistenceChoice == "enabled" and "checked" or "",
-            PERSISTENCE_RADIO_DISABLED_CHECKED = persistenceChoice == "disabled" and "checked" or "",
+            HOME_PAGE_CUSTOM_VALUE = escapeHtml(customValue),
+            TURTLE_MODE_RADIO_ENABLED_CHECKED = turtleModeEnabled and "checked" or "",
+            TURTLE_MODE_RADIO_DISABLED_CHECKED = turtleModeEnabled and "" or "checked",
+            HISTORY_RADIO_ENABLED_CHECKED = historyEnabled and "checked" or "",
+            HISTORY_RADIO_DISABLED_CHECKED = historyEnabled and "" or "checked",
+            USAGE_GUARD_RADIO_ENABLED_CHECKED = usageGuardEnabled and "checked" or "",
+            USAGE_GUARD_RADIO_DISABLED_CHECKED = usageGuardEnabled and "" or "checked",
+            PAUSE_APPLETS_RADIO_ENABLED_CHECKED = pauseAppletsEnabled and "checked" or "",
+            PAUSE_APPLETS_RADIO_DISABLED_CHECKED = pauseAppletsEnabled and "" or "checked",
             FULLSCREEN_MODE_RADIO_NORMAL_CHECKED = fullscreenModeChoice == "normal" and "checked" or "",
             FULLSCREEN_MODE_RADIO_SEAMLESS_CHECKED = fullscreenModeChoice == "seamless" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_TEXT_ONLY_CHECKED = browserEngineLevelChoice == "text_only" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_LITE_CHECKED = browserEngineLevelChoice == "lite" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED = browserEngineLevelChoice == "advanced" and "checked" or "",
-            HOME_PAGE_CUSTOM_VALUE = escapeHtml(customValue),
-            BROWSER_DATA_DIR_VALUE = escapeHtml(browserDataDirValue),
-            DOWNLOADS_DIR_VALUE = escapeHtml(downloadsDirValue),
             DEFAULT_BG_COLOR_VALUE = escapeHtml(defaultBgColorValue),
             DEFAULT_FG_COLOR_VALUE = escapeHtml(defaultFgColorValue),
-            VERBOSE_LOG_RADIO_ENABLED_CHECKED = verboseLogChoice == "enabled" and "checked" or "",
-            VERBOSE_LOG_RADIO_DISABLED_CHECKED = verboseLogChoice == "disabled" and "checked" or "",
+            BROWSER_DATA_DIR_VALUE = escapeHtml(browserDataDirValue),
+            DOWNLOADS_DIR_VALUE = escapeHtml(downloadsDirValue),
+            APPLET_VFS_DIR_VALUE = escapeHtml(appletVfsDirValue),
             SETTINGS_LIST = table.concat(settingsItems),
-            PARAMS_LIST = table.concat(paramItems),
         }
         local body, minUpdateMs = applyTemplateTokens(template, tokenValues)
         return body, minUpdateMs, statusMessage
@@ -831,7 +724,6 @@ return function(core, options)
     local function fetchTextResource(url, allowHttpFallback, requestOptions)
         local request = requestOptions or {}
         local method = tostring(request.method or "GET"):upper()
-        logInfo("fetchTextResource [" .. method .. "]: " .. tostring(url))
         local parsed = parseUrl(url)
         if parsed and parsed.scheme == "about" then
             if url == "about:blank" then
@@ -848,13 +740,11 @@ return function(core, options)
                 end
             end
             if not isValidAboutPageName(pageName) then
-                logError("fetchTextResource unsupported about page: " .. tostring(url))
                 return nil, url, nil, "Unsupported about page: " .. url
             end
 
             local body, err = loadAboutPage(pageName)
             if not body then
-                logError("fetchTextResource about page load failed [" .. tostring(url) .. "]: " .. tostring(err))
                 return nil, url, nil, "Unsupported about page: " .. url
             end
             local aboutUpdateMs = nil
@@ -896,7 +786,6 @@ return function(core, options)
             end
             local body, err = readLocalFile(path)
             if not body then
-                logError("fetchTextResource file read error [" .. tostring(url) .. "]: " .. tostring(err))
                 return nil, url, nil, err
             end
             return body, url, { ["Content-Type"] = "text/plain" }, nil
@@ -910,11 +799,9 @@ return function(core, options)
                 if fallbackBody then
                     return fallbackBody, fallbackUrl, fallbackHeaders, nil
                 end
-                logError("fetchTextResource HTTP fallback error [" .. tostring(url) .. "]: " .. tostring(fallbackErr or err))
                 return nil, url, nil, fallbackErr or err
             end
             if not body then
-                logError("fetchTextResource HTTP error [" .. tostring(url) .. "]: " .. tostring(err))
                 return nil, url, nil, err
             end
             return body, url, headers, nil
@@ -923,13 +810,11 @@ return function(core, options)
         if fs.exists(url) then
             local body, err = readLocalFile(url)
             if not body then
-                logError("fetchTextResource fs fallback error [" .. tostring(url) .. "]: " .. tostring(err))
                 return nil, url, nil, err
             end
             return body, "file://" .. url, { ["Content-Type"] = "text/plain" }, nil
         end
 
-        logError("fetchTextResource unsupported scheme: " .. tostring(url))
         return nil, url, nil, "Unsupported URL scheme"
     end
 

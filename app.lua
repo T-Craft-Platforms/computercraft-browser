@@ -38,67 +38,61 @@ createUi = loadModule("ui/view.lua")
 createSandbox = loadModule("lib/sandbox.lua")
 createPrinting = loadModule("lib/printing.lua")
 createFormControls = loadModule("lib/form-controls.lua")
-createLogger = loadModule("lib/logger.lua")
+local FIXED_BROWSER_DATA_DIR_CANDIDATES = {
+    "/.ccbrowser",
+    "/browser-data",
+}
 
-local function normalizeStorageRoot(path)
-    local normalized = tostring(path or "")
-    normalized = normalized:gsub("\\", "/")
-    normalized = normalized:gsub("/+", "/")
-    if normalized == "" then
-        normalized = "/"
-    end
-    if normalized:sub(1, 1) ~= "/" then
-        normalized = "/" .. normalized
-    end
-    if #normalized > 1 and normalized:sub(-1) == "/" then
-        normalized = normalized:sub(1, -2)
-    end
-    return normalized
-end
+local function pickBrowserDataDir()
+    local function canWriteInDirectory(path)
+        if not path or path == "" then
+            return false
+        end
+        if fs.exists(path) and not fs.isDir(path) then
+            return false
+        end
+        if not fs.exists(path) then
+            local okMake = pcall(fs.makeDir, path)
+            if not okMake or not fs.exists(path) or not fs.isDir(path) then
+                return false
+            end
+        end
 
-local function resolveScriptStorageRoot()
-    local scriptBase = SCRIPT_DIR
-    if (not scriptBase or scriptBase == "") and shell and type(shell.dir) == "function" then
-        scriptBase = shell.dir()
+        local probePath = fs.combine(path, ".ccbrowser-write-probe")
+        local probeHandle = fs.open(probePath, "w")
+        if not probeHandle then
+            return false
+        end
+        local okWrite = pcall(function()
+            probeHandle.write("ok")
+        end)
+        local okClose = pcall(function()
+            probeHandle.close()
+        end)
+        pcall(fs.delete, probePath)
+        return okWrite and okClose
     end
-    if scriptBase == nil then
-        scriptBase = "/"
-    end
-    local combined = fs.combine(scriptBase, "data")
-    if shell and type(shell.resolve) == "function" then
-        local okResolve, resolved = pcall(shell.resolve, combined)
-        if okResolve and resolved and resolved ~= "" then
-            combined = resolved
+
+    for _, candidate in ipairs(FIXED_BROWSER_DATA_DIR_CANDIDATES) do
+        if canWriteInDirectory(candidate) then
+            return candidate
         end
     end
-    return normalizeStorageRoot(combined)
+    return FIXED_BROWSER_DATA_DIR_CANDIDATES[1]
 end
 
-local SCRIPT_STORAGE_ROOT = resolveScriptStorageRoot()
-DEFAULT_BROWSER_DATA_DIR = SCRIPT_STORAGE_ROOT
-DEFAULT_BROWSER_DOWNLOADS_DIR = fs.combine(DEFAULT_BROWSER_DATA_DIR, "downloads")
-LEGACY_DEFAULT_BROWSER_DATA_DIR = "/cc-browser-data"
-LEGACY_DEFAULT_BROWSER_DOWNLOADS_DIR = fs.combine(LEGACY_DEFAULT_BROWSER_DATA_DIR, "downloads")
-LEGACY_BROWSER_DATA_DIR = "/cc-browser"
-LEGACY_BROWSER_DOWNLOADS_DIR = fs.combine(LEGACY_BROWSER_DATA_DIR, "downloads")
-LEGACY_ROOT_DOWNLOADS_DIR = "/downloads"
-LEGACY_SCRIPT_BROWSER_DATA_DIR = normalizeStorageRoot(fs.combine((SCRIPT_DIR ~= "" and SCRIPT_DIR or "/"), ".data"))
-LEGACY_BROWSER_STATE_PATH = fs.combine(SCRIPT_DIR, "browser-state.tbl")
-LEGACY_DEFAULT_DATA_BROWSER_STATE_PATH = fs.combine(fs.combine(LEGACY_DEFAULT_BROWSER_DATA_DIR, "config"), "browser-state.tbl")
-LEGACY_DATA_BROWSER_STATE_PATH = fs.combine(fs.combine(LEGACY_BROWSER_DATA_DIR, "config"), "browser-state.tbl")
-local LEGACY_RELATIVE_BROWSER_STATE_PATH = fs.combine(fs.combine("cc-browser", "config"), "browser-state.tbl")
-local LEGACY_DEFAULT_PATH_SETTINGS_PATH = fs.combine(fs.combine(LEGACY_DEFAULT_BROWSER_DATA_DIR, "config"), "paths.tbl")
-local LEGACY_PATH_SETTINGS_PATH = fs.combine(fs.combine(LEGACY_BROWSER_DATA_DIR, "config"), "paths.tbl")
-local LEGACY_RELATIVE_PATH_SETTINGS_PATH = fs.combine(fs.combine("cc-browser", "config"), "paths.tbl")
+local BROWSER_DATA_DIR = pickBrowserDataDir()
+local BROWSER_SETTINGS_DIR = fs.combine(BROWSER_DATA_DIR, "config")
+local BROWSER_DOWNLOADS_DIR = fs.combine(BROWSER_DATA_DIR, "downloads")
+local BROWSER_VFS_DIR = fs.combine(BROWSER_DATA_DIR, "vfs")
+local BROWSER_STATE_PATH = fs.combine(BROWSER_SETTINGS_DIR, "browser-state.tbl")
 
 local browserSettings = {
     home_page = "about:home",
     turtle_mode = "false",
     history_enabled = "true",
-    persistence_enabled = "true",
     usage_guard_enabled = "true",
     pause_inactive_applets = "true",
-    downloads_dir = DEFAULT_BROWSER_DOWNLOADS_DIR,
     fullscreen_mode = "normal",
     browser_engine_level = "advanced",
     default_bg_color = "black",
@@ -107,11 +101,11 @@ local browserSettings = {
 local browserFavorites = {}
 local browserHistory = {}
 local nextBrowserHistoryId = 1
-local activeBrowserStatePath = nil
 local persistBrowserState
-local persistPathSettings
 local state
 local flushPausedAppletQueue
+local storageReady = false
+local lastStorageError = nil
 
 local function settingEnabledRaw(name, defaultEnabled)
     local defaultText = defaultEnabled and "true" or "false"
@@ -119,59 +113,27 @@ local function settingEnabledRaw(name, defaultEnabled)
     return not (raw == "false" or raw == "0" or raw == "no" or raw == "off" or raw == "disabled")
 end
 
--- Verbose logger — writes to log.txt next to main.lua when verbose_log is enabled.
-local VERBOSE_LOG_PATH = fs.combine(SCRIPT_DIR, "log.txt")
-local logger = createLogger({
-    logPath = VERBOSE_LOG_PATH,
-    isEnabled = function()
-        return settingEnabledRaw("verbose_log", false)
-    end,
-})
-
 local function normalizeSettingKey(key)
     local normalized = tostring(key or ""):lower()
     normalized = normalized:gsub("[^%w_%-]", "_")
     normalized = normalized:gsub("_+", "_")
     if normalized == "virtual_views" then
-        normalized = "turtle_mode"
-    elseif normalized == "download_path" or normalized == "default_download_path"
+        return "turtle_mode"
+    end
+    if normalized == "fullscreen" then
+        return "fullscreen_mode"
+    end
+    if normalized == "default_text_color" or normalized == "default_foreground_color" then
+        return "default_fg_color"
+    end
+    if normalized == "config_dir" or normalized == "settings_path" or normalized == "settings_dir" then
+        return "browser_data_dir"
+    end
+    if normalized == "download_path" or normalized == "default_download_path"
         or normalized == "download_location" or normalized == "default_download_location" then
-        normalized = "downloads_dir"
-    elseif normalized == "config_dir" or normalized == "settings_path" or normalized == "settings_dir" then
-        normalized = "browser_data_dir"
-    elseif normalized == "fullscreen" then
-        normalized = "fullscreen_mode"
-    elseif normalized == "default_text_color" or normalized == "default_foreground_color" then
-        normalized = "default_fg_color"
+        return "downloads_dir"
     end
     return normalized
-end
-
-local function normalizeAbsolutePath(rawPath, fallback)
-    local candidate = core.trim(tostring(rawPath or ""))
-    if candidate == "" then
-        candidate = core.trim(tostring(fallback or ""))
-    end
-    if candidate == "" then
-        return ""
-    end
-    candidate = candidate:gsub("\\", "/")
-    candidate = candidate:gsub("/+", "/")
-    if candidate:sub(1, 1) ~= "/" then
-        candidate = "/" .. candidate
-    end
-    if #candidate > 1 and candidate:sub(-1) == "/" then
-        candidate = candidate:sub(1, -2)
-    end
-    return candidate
-end
-
-local function normalizeDirSettingPath(rawPath, fallback)
-    local candidate = normalizeAbsolutePath(rawPath, fallback)
-    if candidate == "" then
-        return normalizeAbsolutePath(fallback, "")
-    end
-    return candidate
 end
 
 local function normalizeFullscreenMode(value)
@@ -314,182 +276,144 @@ local function currentDefaultForegroundColorValue(background)
 end
 
 local function currentBrowserDataDir()
-    return DEFAULT_BROWSER_DATA_DIR
+    return BROWSER_DATA_DIR
 end
 
 local function currentSettingsDir()
-    return fs.combine(currentBrowserDataDir(), "config")
+    return BROWSER_SETTINGS_DIR
 end
 
 local function currentDownloadsDir()
-    return normalizeDirSettingPath(browserSettings.downloads_dir, DEFAULT_BROWSER_DOWNLOADS_DIR)
-end
-
-local function currentPathSettingsPath()
-    return fs.combine(currentSettingsDir(), "paths.tbl")
+    return BROWSER_DOWNLOADS_DIR
 end
 
 local function currentVfsRoot()
-    return fs.combine(currentBrowserDataDir(), "vfs")
+    return BROWSER_VFS_DIR
 end
 
 local function browserStatePath()
-    return fs.combine(currentSettingsDir(), "browser-state.tbl")
+    return BROWSER_STATE_PATH
 end
 
-local function migrateLegacyBrowserDataDirIfNeeded()
-    local changedSettings = false
-
-    local currentDownloads = currentDownloadsDir()
-    if currentDownloads == LEGACY_DEFAULT_BROWSER_DOWNLOADS_DIR
-        or currentDownloads == LEGACY_BROWSER_DOWNLOADS_DIR
-        or currentDownloads == LEGACY_ROOT_DOWNLOADS_DIR then
-        browserSettings.downloads_dir = DEFAULT_BROWSER_DOWNLOADS_DIR
-        changedSettings = true
-    end
-
-    local targetDataDir = currentBrowserDataDir()
-    if not fs.exists(targetDataDir) then
-        local migrationSources = {
-            LEGACY_DEFAULT_BROWSER_DATA_DIR,
-            LEGACY_BROWSER_DATA_DIR,
-            LEGACY_SCRIPT_BROWSER_DATA_DIR,
-        }
-        for _, sourceDir in ipairs(migrationSources) do
-            local sourcePath = normalizeAbsolutePath(sourceDir, "")
-            if sourcePath ~= ""
-                and sourcePath ~= targetDataDir
-                and fs.exists(sourcePath)
-                and fs.isDir(sourcePath) then
-                local targetParent = fs.getDir(targetDataDir)
-                if targetParent and targetParent ~= "" and not fs.exists(targetParent) then
-                    pcall(fs.makeDir, targetParent)
-                end
-                local okMove = pcall(fs.move, sourcePath, targetDataDir)
-                if okMove and fs.exists(targetDataDir) then
-                    break
-                end
-            end
-        end
-    end
-
-    if changedSettings and persistPathSettings then
-        persistPathSettings()
-    end
-    if changedSettings and persistBrowserState then
-        persistBrowserState(true)
-    end
-end
-
-local function ensureDirExists(path)
-    if not path or path == "" then
+local function pathReadOnly(path)
+    if not (fs and type(fs.isReadOnly) == "function") then
         return false
+    end
+    local okReadOnly, readOnly = pcall(fs.isReadOnly, path)
+    if not okReadOnly then
+        return false
+    end
+    return readOnly and true or false
+end
+
+local function ensureDirExists(path, label)
+    local name = tostring(label or "directory")
+    if not path or path == "" then
+        return false, name .. ": empty path"
     end
     if fs.exists(path) then
-        return fs.isDir(path)
+        if not fs.isDir(path) then
+            return false, name .. ": exists as file (" .. tostring(path) .. ")"
+        end
+        if pathReadOnly(path) then
+            return false, name .. ": read-only (" .. tostring(path) .. ")"
+        end
+        return true, nil
     end
-    local okMake = pcall(fs.makeDir, path)
+
+    local parent = fs.getDir(path)
+    if parent and parent ~= "" and fs.exists(parent) and pathReadOnly(parent) then
+        return false, name .. ": parent is read-only (" .. tostring(parent) .. ")"
+    end
+
+    local okMake, makeErr = pcall(fs.makeDir, path)
     if not okMake then
-        return false
+        return false, name .. ": makeDir failed (" .. tostring(makeErr) .. ")"
     end
-    return fs.exists(path) and fs.isDir(path)
+    if not fs.exists(path) or not fs.isDir(path) then
+        return false, name .. ": makeDir did not create directory (" .. tostring(path) .. ")"
+    end
+    if pathReadOnly(path) then
+        return false, name .. ": created but read-only (" .. tostring(path) .. ")"
+    end
+    return true, nil
 end
 
-function canWriteToDirectory(path)
-    local target = normalizeAbsolutePath(path, "")
-    if target == "" then
-        return false
-    end
-    if not ensureDirExists(target) then
-        return false
-    end
-
-    local probePath = fs.combine(target, "__cc_browser_write_probe.tmp")
-    local handle = fs.open(probePath, "w")
-    if not handle then
-        return false
+local function ensureStoragePaths()
+    local okData, dataErr = ensureDirExists(currentBrowserDataDir(), "browser data directory")
+    if not okData then
+        storageReady = false
+        lastStorageError = tostring(dataErr or "Could not prepare browser data directory")
+        return false, lastStorageError
     end
 
-    local okWrite = pcall(function()
-        handle.write("ok")
+    local okSettings, settingsErr = ensureDirExists(currentSettingsDir(), "browser settings directory")
+    if not okSettings then
+        storageReady = false
+        lastStorageError = tostring(settingsErr or "Could not prepare browser settings directory")
+        return false, lastStorageError
+    end
+
+    local okDownloads, downloadsErr = ensureDirExists(currentDownloadsDir(), "browser downloads directory")
+    if not okDownloads then
+        storageReady = false
+        lastStorageError = tostring(downloadsErr or "Could not prepare browser downloads directory")
+        return false, lastStorageError
+    end
+
+    local okVfs, vfsErr = ensureDirExists(currentVfsRoot(), "browser applet directory")
+    if not okVfs then
+        storageReady = false
+        lastStorageError = tostring(vfsErr or "Could not prepare browser applet directory")
+        return false, lastStorageError
+    end
+
+    storageReady = true
+    lastStorageError = nil
+    return true, nil
+end
+
+local function readHandleAll(handle)
+    local okRead, payloadOrErr = pcall(function()
+        return handle.readAll() or ""
     end)
-    if not okWrite then
-        okWrite = pcall(function()
-            handle:write("ok")
+    if not okRead then
+        okRead, payloadOrErr = pcall(function()
+            return handle:readAll() or ""
         end)
     end
+    if not okRead then
+        return nil, tostring(payloadOrErr or "Failed reading file")
+    end
+    return tostring(payloadOrErr or ""), nil
+end
 
+local function writeHandleAll(handle, payload)
+    local text = tostring(payload or "")
+    local okWrite, writeErr = pcall(function()
+        handle.write(text)
+    end)
+    if not okWrite then
+        okWrite, writeErr = pcall(function()
+            handle:write(text)
+        end)
+    end
+    if not okWrite then
+        return false, tostring(writeErr or "Failed writing file")
+    end
+    return true, nil
+end
+
+local function closeHandle(handle)
     local okClose = pcall(function()
         handle.close()
     end)
     if not okClose then
-        pcall(function()
+        okClose = pcall(function()
             handle:close()
         end)
     end
-
-    pcall(function()
-        if fs.exists(probePath) then
-            fs.delete(probePath)
-        end
-    end)
-    return okWrite and okClose
-end
-
-function chooseWritableDirectory(candidates, fallback)
-    for _, candidate in ipairs(candidates or {}) do
-        local normalized = normalizeAbsolutePath(candidate, "")
-        if normalized ~= "" and canWriteToDirectory(normalized) then
-            return normalized
-        end
-    end
-    local fallbackPath = normalizeAbsolutePath(fallback, "")
-    if fallbackPath ~= "" and canWriteToDirectory(fallbackPath) then
-        return fallbackPath
-    end
-    return ""
-end
-
-function ensureWritableStoragePaths()
-    local changed = false
-    local dataPath = currentBrowserDataDir()
-    ensureDirExists(dataPath)
-    ensureDirExists(currentSettingsDir())
-    ensureDirExists(currentVfsRoot())
-
-    local downloadsPath = chooseWritableDirectory({
-        currentDownloadsDir(),
-        fs.combine(dataPath, "downloads"),
-        LEGACY_DEFAULT_BROWSER_DOWNLOADS_DIR,
-        DEFAULT_BROWSER_DOWNLOADS_DIR,
-        LEGACY_BROWSER_DOWNLOADS_DIR,
-        LEGACY_ROOT_DOWNLOADS_DIR,
-    }, DEFAULT_BROWSER_DOWNLOADS_DIR)
-    if downloadsPath ~= "" and downloadsPath ~= currentDownloadsDir() then
-        browserSettings.downloads_dir = downloadsPath
-        changed = true
-    end
-
-    if changed then
-        if persistPathSettings then
-            persistPathSettings()
-        end
-        if persistBrowserState then
-            persistBrowserState(true)
-        end
-    end
-end
-
-local function appendUniquePath(list, seen, path)
-    local normalized = normalizeAbsolutePath(path, "")
-    if normalized == "" then
-        return
-    end
-    if seen[normalized] then
-        return
-    end
-    seen[normalized] = true
-    list[#list + 1] = normalized
+    return okClose
 end
 
 local function readTextFile(path)
@@ -500,36 +424,20 @@ local function readTextFile(path)
         return nil, "File not found"
     end
 
-    logger.io("readTextFile: " .. tostring(path))
     local handle = fs.open(path, "r")
     if not handle then
-        logger.error("readTextFile open failed: " .. tostring(path))
         return nil, "Could not open file"
     end
 
-    local okRead, payloadOrErr = pcall(function()
-        return handle.readAll() or ""
-    end)
-    if not okRead then
-        okRead, payloadOrErr = pcall(function()
-            return handle:readAll() or ""
-        end)
+    local payload, readErr = readHandleAll(handle)
+    if not closeHandle(handle) then
+        return nil, "Could not close file"
     end
 
-    local okClose = pcall(function()
-        handle.close()
-    end)
-    if not okClose then
-        pcall(function()
-            handle:close()
-        end)
+    if payload == nil then
+        return nil, tostring(readErr or "Failed reading file")
     end
-
-    if not okRead then
-        logger.error("readTextFile read error [" .. tostring(path) .. "]: " .. tostring(payloadOrErr))
-        return nil, tostring(payloadOrErr or "Failed reading file")
-    end
-    return tostring(payloadOrErr or ""), nil
+    return payload, nil
 end
 
 local function writeTextFile(path, payload)
@@ -542,37 +450,24 @@ local function writeTextFile(path, payload)
     end
 
     local targetDir = fs.getDir(target)
-    if targetDir and targetDir ~= "" and not ensureDirExists(targetDir) then
-        return false, "Could not prepare directory"
+    if targetDir and targetDir ~= "" then
+        local okDir, dirErr = ensureDirExists(targetDir, "target directory")
+        if not okDir then
+            return false, tostring(dirErr or "Could not prepare directory")
+        end
     end
 
-    logger.io("writeTextFile: " .. target)
     local handle = fs.open(target, "w")
     if not handle then
-        logger.error("writeTextFile open failed: " .. target)
         return false, "Could not open file for writing"
     end
 
-    local okWrite, writeErr = pcall(function()
-        handle.write(tostring(payload or ""))
-    end)
-    if not okWrite then
-        okWrite, writeErr = pcall(function()
-            handle:write(tostring(payload or ""))
-        end)
-    end
-
-    local okClose = pcall(function()
-        handle.close()
-    end)
-    if not okClose then
-        pcall(function()
-            handle:close()
-        end)
+    local okWrite, writeErr = writeHandleAll(handle, payload)
+    if not closeHandle(handle) then
+        return false, "Could not close file"
     end
 
     if not okWrite then
-        logger.error("writeTextFile write error [" .. target .. "]: " .. tostring(writeErr))
         return false, tostring(writeErr or "Failed writing file")
     end
     return true, nil
@@ -584,6 +479,15 @@ local function listBrowserSettings()
         copied[key] = tostring(value)
     end
     copied.browser_data_dir = currentBrowserDataDir()
+    copied.downloads_dir = currentDownloadsDir()
+    copied.storage_ready = storageReady and "true" or "false"
+    copied.storage_last_error = tostring(lastStorageError or "")
+    local freeSpace = "unknown"
+    local okFree, freeOrErr = pcall(fs.getFreeSpace, currentBrowserDataDir())
+    if okFree then
+        freeSpace = tostring(freeOrErr)
+    end
+    copied.storage_free_space = freeSpace
     return copied
 end
 
@@ -595,72 +499,43 @@ local function getBrowserSetting(key)
     if normalized == "browser_data_dir" then
         return currentBrowserDataDir()
     end
+    if normalized == "downloads_dir" then
+        return currentDownloadsDir()
+    end
     return browserSettings[normalized]
 end
 
-local function loadPathSettings()
-    if not (fs and fs.exists and fs.open) then
-        return false, "Filesystem unavailable"
-    end
-    if not (textutils and type(textutils.unserialize) == "function") then
-        return false, "Serializer unavailable"
-    end
+local MUTABLE_SETTING_KEYS = {
+    home_page = true,
+    turtle_mode = true,
+    history_enabled = true,
+    usage_guard_enabled = true,
+    pause_inactive_applets = true,
+    fullscreen_mode = true,
+    browser_engine_level = true,
+    default_bg_color = true,
+    default_fg_color = true,
+}
 
-    local candidates = {}
-    local seen = {}
-    appendUniquePath(candidates, seen, currentPathSettingsPath())
-    appendUniquePath(candidates, seen, LEGACY_DEFAULT_PATH_SETTINGS_PATH)
-    appendUniquePath(candidates, seen, LEGACY_PATH_SETTINGS_PATH)
-    appendUniquePath(candidates, seen, LEGACY_RELATIVE_PATH_SETTINGS_PATH)
-
-    local lastErr = "No saved path settings"
-    for _, path in ipairs(candidates) do
-        if fs.exists(path) then
-            local payload, readErr = readTextFile(path)
-            if payload == nil then
-                lastErr = tostring(readErr or "Could not read path settings")
-            elseif payload == "" then
-                lastErr = "Path settings are empty"
-            else
-                local okParse, decoded = pcall(textutils.unserialize, payload)
-                if okParse and type(decoded) == "table" then
-                    local downloadsPath = decoded.downloads_dir
-                    if downloadsPath == nil then
-                        downloadsPath = decoded.download_path
-                    end
-                    if downloadsPath == nil then
-                        downloadsPath = decoded.default_download_path
-                    end
-                    if downloadsPath ~= nil then
-                        browserSettings.downloads_dir = normalizeDirSettingPath(downloadsPath, DEFAULT_BROWSER_DOWNLOADS_DIR)
-                    end
-                    return true, nil
-                end
-                lastErr = "Path settings are invalid"
-            end
-        end
+local function parseBooleanSetting(value)
+    local lowered = core.trim(tostring(value or "")):lower()
+    if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
+        return true
     end
-    return false, lastErr
+    if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
+        return false
+    end
+    return nil
 end
 
-persistPathSettings = function()
-    if not (fs and fs.open) then
-        return false, "Filesystem unavailable"
+local function setBooleanBrowserSetting(key, value)
+    local parsed = parseBooleanSetting(value)
+    if parsed == nil then
+        return false, "Invalid " .. key .. " value (expected true/false)"
     end
-    if not (textutils and type(textutils.serialize) == "function") then
-        return false, "Serializer unavailable"
-    end
-    local snapshot = {
-        downloads_dir = currentDownloadsDir(),
-    }
-    local encoded = textutils.serialize(snapshot)
-    if not encoded then
-        return false, "Failed to encode path settings"
-    end
-
-    local okWrite, writeErr = writeTextFile(currentPathSettingsPath(), encoded)
-    if not okWrite then
-        return false, tostring(writeErr or "Failed to write path settings")
+    browserSettings[key] = parsed and "true" or "false"
+    if persistBrowserState then
+        persistBrowserState()
     end
     return true, nil
 end
@@ -673,120 +548,59 @@ local function setBrowserSetting(key, value)
     if value == nil then
         return false, "Missing setting value"
     end
+    if normalized == "browser_data_dir" then
+        return false, "browser_data_dir is fixed to " .. currentBrowserDataDir()
+    end
+    if normalized == "downloads_dir" then
+        return false, "downloads_dir is fixed to " .. currentDownloadsDir()
+    end
+    if not MUTABLE_SETTING_KEYS[normalized] then
+        return false, "Unsupported setting key"
+    end
     if normalized == "turtle_mode" then
-        local lowered = core.trim(tostring(value)):lower()
-        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
-            browserSettings[normalized] = "true"
+        local parsed = parseBooleanSetting(value)
+        if parsed == nil then
+            return false, "Invalid turtle_mode value (expected true/false)"
+        end
+        browserSettings[normalized] = parsed and "true" or "false"
+        if parsed then
             browserSettings.usage_guard_enabled = "false"
-            if persistBrowserState then
-                persistBrowserState()
-            end
-            return true, nil
         end
-        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
-            browserSettings[normalized] = "false"
-            if persistBrowserState then
-                persistBrowserState()
-            end
-            return true, nil
+        if persistBrowserState then
+            persistBrowserState()
         end
-        return false, "Invalid turtle_mode value (expected true/false)"
+        return true, nil
     end
     if normalized == "history_enabled" then
-        local lowered = core.trim(tostring(value)):lower()
-        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
-            browserSettings[normalized] = "true"
-            if persistBrowserState then
-                persistBrowserState()
-            end
-            return true, nil
-        end
-        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
-            browserSettings[normalized] = "false"
-            if persistBrowserState then
-                persistBrowserState()
-            end
-            return true, nil
-        end
-        return false, "Invalid history_enabled value (expected true/false)"
-    end
-    if normalized == "persistence_enabled" then
-        local lowered = core.trim(tostring(value)):lower()
-        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
-            browserSettings[normalized] = "true"
-            if persistBrowserState then
-                persistBrowserState(true)
-            end
-            return true, nil
-        end
-        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
-            browserSettings[normalized] = "false"
-            if persistBrowserState then
-                persistBrowserState(true)
-            end
-            return true, nil
-        end
-        return false, "Invalid persistence_enabled value (expected true/false)"
+        return setBooleanBrowserSetting(normalized, value)
     end
     if normalized == "usage_guard_enabled" then
-        local lowered = core.trim(tostring(value)):lower()
-        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
-            if settingEnabledRaw("turtle_mode", false) then
-                browserSettings[normalized] = "false"
-                return false, "usage_guard_enabled cannot be enabled while turtle_mode is enabled"
-            end
-            browserSettings[normalized] = "true"
-            if persistBrowserState then
-                persistBrowserState()
-            end
-            return true, nil
+        local parsed = parseBooleanSetting(value)
+        if parsed == nil then
+            return false, "Invalid usage_guard_enabled value (expected true/false)"
         end
-        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
+        if parsed and settingEnabledRaw("turtle_mode", false) then
             browserSettings[normalized] = "false"
-            if persistBrowserState then
-                persistBrowserState()
-            end
-            return true, nil
+            return false, "usage_guard_enabled cannot be enabled while turtle_mode is enabled"
         end
-        return false, "Invalid usage_guard_enabled value (expected true/false)"
+        browserSettings[normalized] = parsed and "true" or "false"
+        if persistBrowserState then
+            persistBrowserState()
+        end
+        return true, nil
     end
     if normalized == "pause_inactive_applets" then
-        local lowered = core.trim(tostring(value)):lower()
-        if lowered == "true" or lowered == "1" or lowered == "yes" or lowered == "on" or lowered == "enabled" then
-            browserSettings[normalized] = "true"
-            if persistBrowserState then
-                persistBrowserState()
-            end
-            return true, nil
+        local parsed = parseBooleanSetting(value)
+        if parsed == nil then
+            return false, "Invalid pause_inactive_applets value (expected true/false)"
         end
-        if lowered == "false" or lowered == "0" or lowered == "no" or lowered == "off" or lowered == "disabled" then
-            browserSettings[normalized] = "false"
+        browserSettings[normalized] = parsed and "true" or "false"
+        if not parsed then
             if state and type(state.tabs) == "table" and flushPausedAppletQueue then
                 for i = 1, #state.tabs do
                     flushPausedAppletQueue(state.tabs[i], 256)
                 end
             end
-            if persistBrowserState then
-                persistBrowserState()
-            end
-            return true, nil
-        end
-        return false, "Invalid pause_inactive_applets value (expected true/false)"
-    end
-    if normalized == "browser_data_dir" then
-        return false, "browser_data_dir is fixed to " .. currentBrowserDataDir()
-    end
-    if normalized == "downloads_dir" then
-        local path = normalizeDirSettingPath(value, DEFAULT_BROWSER_DOWNLOADS_DIR)
-        if path == "" then
-            return false, "Invalid downloads_dir value (path cannot be empty)"
-        end
-        if not canWriteToDirectory(path) then
-            return false, "Invalid downloads_dir value (path is not writable)"
-        end
-        browserSettings[normalized] = path
-        if persistPathSettings then
-            persistPathSettings()
         end
         if persistBrowserState then
             persistBrowserState()
@@ -827,7 +641,15 @@ local function setBrowserSetting(key, value)
         end
         return true, nil
     end
-    browserSettings[normalized] = tostring(value)
+    if normalized == "home_page" then
+        local homePage = core.trim(tostring(value or ""))
+        if homePage == "" then
+            return false, "Missing home page value"
+        end
+        browserSettings[normalized] = homePage
+    else
+        browserSettings[normalized] = tostring(value)
+    end
     if persistBrowserState then
         persistBrowserState()
     end
@@ -1079,62 +901,61 @@ local function loadBrowserState()
     if not (textutils and type(textutils.unserialize) == "function") then
         return false, "Serializer unavailable"
     end
-
-    local candidates = {}
-    local seen = {}
-    appendUniquePath(candidates, seen, browserStatePath())
-    appendUniquePath(candidates, seen, LEGACY_DEFAULT_DATA_BROWSER_STATE_PATH)
-    appendUniquePath(candidates, seen, LEGACY_DATA_BROWSER_STATE_PATH)
-    appendUniquePath(candidates, seen, LEGACY_RELATIVE_BROWSER_STATE_PATH)
-    appendUniquePath(candidates, seen, LEGACY_BROWSER_STATE_PATH)
-
-    local decoded = nil
-    local statePath = nil
-    local lastErr = "No saved state"
-    for _, candidate in ipairs(candidates) do
-        if fs.exists(candidate) then
-            local payload, readErr = readTextFile(candidate)
-            if payload == nil then
-                lastErr = tostring(readErr or "Could not open saved state")
-            elseif payload == "" then
-                lastErr = "Saved state is empty"
-            else
-                local okParse, parsed = pcall(textutils.unserialize, payload)
-                if okParse and type(parsed) == "table" then
-                    decoded = parsed
-                    statePath = candidate
-                    break
-                end
-                lastErr = "Saved state is invalid"
-            end
-        end
+    local statePath = browserStatePath()
+    if not fs.exists(statePath) then
+        return false, "No saved state"
     end
-    if not decoded then
-        activeBrowserStatePath = browserStatePath()
-        return false, lastErr
+
+    local payload, readErr = readTextFile(statePath)
+    if payload == nil then
+        return false, tostring(readErr or "Could not open saved state")
+    end
+    if payload == "" then
+        return false, "Saved state is empty"
+    end
+
+    local okParse, decoded = pcall(textutils.unserialize, payload)
+    if not okParse or type(decoded) ~= "table" then
+        return false, "Saved state is invalid"
     end
 
     if type(decoded.settings) == "table" then
         for key, rawValue in pairs(decoded.settings) do
             local normalized = normalizeSettingKey(key)
-            if normalized ~= "" then
+            if MUTABLE_SETTING_KEYS[normalized] then
                 if normalized == "fullscreen_mode" then
                     browserSettings[normalized] = normalizeFullscreenMode(rawValue)
-                elseif normalized == "browser_data_dir" then
-                    -- browser_data_dir is fixed to SCRIPT_DIR/data and cannot be overridden by saved state
-                elseif normalized == "downloads_dir" then
-                    browserSettings[normalized] = normalizeDirSettingPath(rawValue, DEFAULT_BROWSER_DOWNLOADS_DIR)
-                else
-                    browserSettings[normalized] = tostring(rawValue)
+                elseif normalized == "browser_engine_level" then
+                    browserSettings[normalized] = normalizeBrowserEngineLevel(rawValue)
+                elseif normalized == "default_bg_color" then
+                    browserSettings[normalized] = normalizeSettingColorName(rawValue, "black")
+                elseif normalized == "default_fg_color" then
+                    browserSettings[normalized] = normalizeSettingColorName(rawValue, "white")
+                elseif normalized == "home_page" then
+                    local homePage = core.trim(tostring(rawValue or ""))
+                    if homePage ~= "" then
+                        browserSettings[normalized] = homePage
+                    end
+                elseif normalized == "turtle_mode"
+                    or normalized == "history_enabled"
+                    or normalized == "usage_guard_enabled"
+                    or normalized == "pause_inactive_applets" then
+                    local parsed = parseBooleanSetting(rawValue)
+                    if parsed ~= nil then
+                        browserSettings[normalized] = parsed and "true" or "false"
+                    end
                 end
             end
         end
     end
-    browserSettings.downloads_dir = currentDownloadsDir()
+
     browserSettings.fullscreen_mode = normalizeFullscreenMode(browserSettings.fullscreen_mode)
     browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
     browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
     browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
+    if settingEnabledRaw("turtle_mode", false) then
+        browserSettings.usage_guard_enabled = "false"
+    end
 
     browserFavorites = {}
     if type(decoded.favorites) == "table" then
@@ -1191,37 +1012,23 @@ local function loadBrowserState()
         end
     end
     nextBrowserHistoryId = math.max(maxId + 1, 1)
-
-    if settingEnabledRaw("turtle_mode", false) then
-        browserSettings.usage_guard_enabled = "false"
-    end
-    if persistPathSettings then
-        persistPathSettings()
-    end
-    activeBrowserStatePath = browserStatePath()
     return true, nil
 end
 
-persistBrowserState = function(forceWrite)
-    if (not forceWrite) and not settingEnabledRaw("persistence_enabled", true) then
-        return false, "Persistence disabled"
-    end
+persistBrowserState = function(_forceWrite)
     if not (fs and fs.open) then
         return false, "Filesystem unavailable"
     end
     if not (textutils and type(textutils.serialize) == "function") then
         return false, "Serializer unavailable"
     end
-    if persistPathSettings then
-        persistPathSettings()
-    end
-    local settingsDir = currentSettingsDir()
-    if not ensureDirExists(settingsDir) then
-        return false, "Could not prepare settings directory"
+    local okStorage, storageErr = ensureStoragePaths()
+    if not okStorage then
+        return false, tostring(storageErr or "Could not prepare storage paths")
     end
 
     local snapshot = {
-        version = 1,
+        version = 2,
         settings = listBrowserSettings(),
         favorites = listBrowserFavorites(),
         history = listBrowserHistory(),
@@ -1234,53 +1041,38 @@ persistBrowserState = function(forceWrite)
     local targetPath = browserStatePath()
     local okWrite, writeErr = writeTextFile(targetPath, encoded)
     if not okWrite then
-        return false, tostring(writeErr or "Could not write state file")
+        storageReady = false
+        lastStorageError = tostring(writeErr or "Could not write state file")
+        return false, lastStorageError
     end
-    activeBrowserStatePath = targetPath
+    storageReady = true
+    lastStorageError = nil
     return true, nil
 end
 
-loadPathSettings()
-loadBrowserState()
-migrateLegacyBrowserDataDirIfNeeded()
-ensureWritableStoragePaths()
+local initialStorageReady = ensureStoragePaths()
+if initialStorageReady then
+    loadBrowserState()
+    if not fs.exists(browserStatePath()) then
+        persistBrowserState(true)
+    end
+else
+    storageReady = false
+    if not lastStorageError or lastStorageError == "" then
+        lastStorageError = "Storage initialization failed"
+    end
+end
 browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
 browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
 browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
 
-logger.info(APP_TITLE .. " " .. APP_VERSION .. " starting (log: " .. VERBOSE_LOG_PATH .. ")")
-if fs.exists("/.vfs") then
-    local targetVfsRoot = currentVfsRoot()
-    local vfsParent = fs.getDir(targetVfsRoot)
-    if vfsParent and vfsParent ~= "" then
-        pcall(fs.makeDir, vfsParent)
-    end
-    if not fs.exists(targetVfsRoot) then
-        pcall(fs.makeDir, targetVfsRoot)
-    end
-    local importPath = fs.combine(targetVfsRoot, "_legacy_root")
-    if not fs.exists(importPath) then
-        pcall(fs.move, "/.vfs", importPath)
-    end
-end
-
 local network = createNetwork(core, {
     aboutPagesDir = fs.combine(SCRIPT_DIR, "about-pages"),
-    logger = logger,
     aboutApi = {
         appTitle = APP_TITLE,
         appVersion = APP_VERSION,
         appIcon = APP_ICON,
         getBrowserDataDir = currentBrowserDataDir,
-        readVerboseLogBuffer = function()
-            if logger and type(logger.readBuffer) == "function" then
-                return logger.readBuffer()
-            end
-            return "", "Logger buffer unavailable"
-        end,
-        getVerboseLogPath = function()
-            return VERBOSE_LOG_PATH
-        end,
         listSettings = listBrowserSettings,
         getSetting = getBrowserSetting,
         setSetting = setBrowserSetting,
@@ -1460,7 +1252,7 @@ local function createTab(initialUrl)
         formMeta = nil,
         focusedFormControl = nil,
         loading = false,
-        status = "",
+        status = (not storageReady and tostring(lastStorageError or "")) or "",
         aboutUpdateIntervalMs = nil,
         settingsStickyStatus = nil,
         pendingApplet = nil,
@@ -3208,6 +3000,18 @@ function suggestedDownloadPath(url, body, headers)
     local sourceUrl = trim(tostring(url or ""))
     local name = sourceUrl:gsub("[?#].*$", ""):match("([^/\\]+)$") or ""
     local contentType = trim(tostring(getHeader(headers, "Content-Type") or "")):lower()
+    local function sanitizeFileName(rawName)
+        local cleaned = trim(tostring(rawName or ""))
+        cleaned = cleaned:gsub("[^%w%._%-]", "_")
+        cleaned = cleaned:gsub("_+", "_")
+        cleaned = cleaned:gsub("^%.*", "")
+        cleaned = cleaned:gsub("%.*$", "")
+        if cleaned == "" then
+            cleaned = "download"
+        end
+        return cleaned
+    end
+
     if name == "" then
         if contentType:find("html", 1, true) or looksLikeHtml(body or "", contentType) then
             name = "index.html"
@@ -3225,144 +3029,8 @@ function suggestedDownloadPath(url, body, headers)
             name = name .. ".txt"
         end
     end
+    name = sanitizeFileName(name)
     return fs.combine(currentDownloadsDir(), name)
-end
-
-function promptSaveFilePath(defaultPath)
-    local choice = nil
-    local keyActions = {}
-    if keys.enter then
-        keyActions[keys.enter] = "save"
-    end
-    if keys.escape then
-        keyActions[keys.escape] = "cancel"
-    end
-
-    openModal({
-        id = "save_file_dialog",
-        title = "Save File",
-        titleBackground = colors.blue,
-        titleForeground = colors.white,
-        lines = {
-            "Choose save path:",
-            "Use absolute path or relative path.",
-        },
-        input = {
-            value = tostring(defaultPath or fs.combine(currentDownloadsDir(), "download.txt")),
-            placeholder = fs.combine(currentDownloadsDir(), "file.txt"),
-            maxLen = 255,
-        },
-        buttons = {
-            {
-                id = "save",
-                label = "[Save]",
-                shortLabel = "[OK]",
-                background = colors.lime,
-                foreground = colors.black,
-            },
-            {
-                id = "cancel",
-                label = "[Cancel]",
-                shortLabel = "[X]",
-                background = colors.red,
-                foreground = colors.white,
-            },
-        },
-        keyActions = keyActions,
-        autoClose = false,
-        onButton = function(buttonId, source, spec)
-            if buttonId == "save" then
-                local path = trim(tostring(spec and spec.input and spec.input.value or ""))
-                if path == "" then
-                    if spec and type(spec.lines) == "table" then
-                        spec.lines[1] = "Path cannot be empty."
-                    end
-                    draw()
-                    return false
-                end
-                choice = path
-                clearModal()
-                return false
-            end
-            choice = false
-            clearModal()
-            return false
-        end,
-    })
-    draw()
-
-    while choice == nil and state.modal.open do
-        local event = { os.pullEvent() }
-        handleModalEvent(event)
-        if state.running then
-            draw()
-        end
-    end
-
-    if type(choice) == "string" and choice ~= "" then
-        return choice
-    end
-    return nil
-end
-
-function promptOverwriteFile(path)
-    if not fs.exists(path) or fs.isDir(path) then
-        return true
-    end
-
-    local choice = nil
-    local keyActions = {}
-    if keys.enter then
-        keyActions[keys.enter] = "overwrite"
-    end
-    if keys.escape then
-        keyActions[keys.escape] = "cancel"
-    end
-
-    openModal({
-        id = "overwrite_file_dialog",
-        title = "Overwrite File?",
-        titleBackground = colors.red,
-        titleForeground = colors.white,
-        lines = {
-            "File already exists:",
-            tostring(path),
-        },
-        buttons = {
-            {
-                id = "overwrite",
-                label = "[Overwrite]",
-                shortLabel = "[Yes]",
-                background = colors.red,
-                foreground = colors.white,
-            },
-            {
-                id = "cancel",
-                label = "[Cancel]",
-                shortLabel = "[No]",
-                background = colors.gray,
-                foreground = colors.white,
-            },
-        },
-        keyActions = keyActions,
-        autoClose = false,
-        onButton = function(buttonId)
-            choice = (buttonId == "overwrite")
-            clearModal()
-            return false
-        end,
-    })
-    draw()
-
-    while choice == nil and state.modal.open do
-        local event = { os.pullEvent() }
-        handleModalEvent(event)
-        if state.running then
-            draw()
-        end
-    end
-
-    return choice == true
 end
 
 function downloadCurrentPage(tab)
@@ -3379,19 +3047,40 @@ function downloadCurrentPage(tab)
         return false
     end
 
-    local savePath = promptSaveFilePath(suggestedDownloadPath(finalUrl or currentUrl, body, headers))
-    if not savePath then
-        target.status = "Download canceled"
+    local okStorage, storageErr = ensureStoragePaths()
+    if not okStorage then
+        target.status = "Download failed: " .. tostring(storageErr or "storage unavailable")
         return false
     end
 
+    local preferredPath = suggestedDownloadPath(finalUrl or currentUrl, body, headers)
+    local savePath = preferredPath
     if fs.exists(savePath) and fs.isDir(savePath) then
-        target.status = "Download failed: path is a directory"
-        return false
+        savePath = fs.combine(currentDownloadsDir(), "download.txt")
     end
-    if not promptOverwriteFile(savePath) then
-        target.status = "Download canceled"
-        return false
+
+    local function splitName(path)
+        local filename = fs.getName(path)
+        local stem, ext = filename:match("^(.*)%.([%w]+)$")
+        if not stem or stem == "" then
+            stem = filename
+            ext = nil
+        end
+        return stem, ext
+    end
+
+    if fs.exists(savePath) then
+        local directory = fs.getDir(savePath)
+        local stem, ext = splitName(savePath)
+        local suffix = 1
+        while fs.exists(savePath) do
+            local candidate = stem .. "-" .. tostring(suffix)
+            if ext and ext ~= "" then
+                candidate = candidate .. "." .. ext
+            end
+            savePath = fs.combine(directory, candidate)
+            suffix = suffix + 1
+        end
     end
 
     local okWrite, writeErr = writeTextFile(savePath, body)
@@ -4224,19 +3913,17 @@ function parseAppletActionUrl(url)
     return action, params
 end
 
-function buildLuaAppletPromptHtml(url)
+function buildLuaAppletPromptHtml(_url)
     local sandboxedUrl = makeAppletActionUrl("run", { mode = "sandboxed" })
-    local fullUrl = makeAppletActionUrl("run", { mode = "full" })
     local noUrl = makeAppletActionUrl("no", {})
     return "<html><body>"
         .. "<p>This file is a Lua executable.</p>"
         .. "<p><a href=\"" .. escapeHtml(sandboxedUrl) .. "\">[Run Sandboxed]</a></p>"
-        .. "<p><a href=\"" .. escapeHtml(fullUrl) .. "\">[Run Full Access]</a></p>"
         .. "<p><a href=\"" .. escapeHtml(noUrl) .. "\">[Do Not Execute]</a></p>"
         .. "</body></html>"
 end
 
-function buildLuaAppletDeclinedHtml(url)
+function buildLuaAppletDeclinedHtml(_url)
     local viewUrl = makeAppletActionUrl("view_source", {})
     return "<html><body>"
         .. "<p>This file is an executable.</p>"
@@ -4245,11 +3932,7 @@ function buildLuaAppletDeclinedHtml(url)
         .. "</body></html>"
 end
 
-function normalizeAppletMode(mode)
-    local lowered = trim(tostring(mode or "")):lower()
-    if lowered == "full" or lowered == "yes" then
-        return "full"
-    end
+function normalizeAppletMode(_mode)
     return "sandboxed"
 end
 
