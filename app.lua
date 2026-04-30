@@ -3309,54 +3309,67 @@ function refreshCurrentDocumentWithoutNavigation(tab)
         return false
     end
     state.highUsage.loadingFrame = true
-    local previousScroll = target.scroll or 0
-    local previousFormState = target.formState or {}
-    local previousFocusedControl = target.focusedFormControl
-    local wasUrlFocused = target.urlFocus
-    local previousUrlInput = target.urlInput or currentUrl
-    local previousUrlCursor = target.urlCursor or (#previousUrlInput + 1)
-    local previousUrlOffset = target.urlOffset or 0
-    local previousUrlSelStart = target.urlSelStart
-    local previousUrlSelEnd = target.urlSelEnd
 
-    local body, finalUrl, headers, err = fetchTextResource(currentUrl, false)
-    if not body then
-        finalUrl = currentUrl
-        body = makeErrorPage(finalUrl, err or "Unknown error")
-        headers = { ["Content-Type"] = "text/html" }
+    local previous = {
+        scroll = target.scroll or 0,
+        formState = target.formState or {},
+        focusedControl = target.focusedFormControl,
+        urlFocused = target.urlFocus and true or false,
+        urlInput = target.urlInput or currentUrl,
+        urlCursor = target.urlCursor,
+        urlOffset = target.urlOffset,
+        urlSelStart = target.urlSelStart,
+        urlSelEnd = target.urlSelEnd,
+    }
+    previous.urlCursor = previous.urlCursor or (#previous.urlInput + 1)
+    previous.urlOffset = previous.urlOffset or 0
+
+    local loaded = {
+        body = nil,
+        finalUrl = nil,
+        headers = nil,
+    }
+
+    loaded.body, loaded.finalUrl, loaded.headers, loaded.err = fetchTextResource(currentUrl, false)
+    if not loaded.body then
+        loaded.finalUrl = currentUrl
+        loaded.body = makeErrorPage(loaded.finalUrl, loaded.err or "Unknown error")
+        loaded.headers = { ["Content-Type"] = "text/html" }
     end
 
-    local contentType = getHeader(headers, "Content-Type") or ""
-    if not looksLikeHtml(body, contentType) then
-        body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
+    local contentType = getHeader(loaded.headers, "Content-Type") or ""
+    if not looksLikeHtml(loaded.body, contentType) then
+        loaded.body = "<html><body><pre>" .. escapeHtml(loaded.body) .. "</pre></body></html>"
     end
 
-    local resolvedUrl = finalUrl or currentUrl
-    target.document = buildDocument(body, resolvedUrl)
-    target.currentUrl = resolvedUrl
-    target.aboutUpdateIntervalMs = parseAboutUpdateIntervalMs(headers)
-    target.settingsStickyStatus = parseSettingsStatusMessage(headers, resolvedUrl)
+    loaded.resolvedUrl = loaded.finalUrl or currentUrl
+    target.document = buildDocument(loaded.body, loaded.resolvedUrl)
+    target.currentUrl = loaded.resolvedUrl
+    target.aboutUpdateIntervalMs = parseAboutUpdateIntervalMs(loaded.headers)
+    target.settingsStickyStatus = parseSettingsStatusMessage(loaded.headers, loaded.resolvedUrl)
     target.status = target.document.title or target.status
-    if wasUrlFocused then
-        target.urlInput = previousUrlInput
-        target.urlCursor = clamp(previousUrlCursor, 1, #target.urlInput + 1)
-        target.urlOffset = math.max(0, tonumber(previousUrlOffset) or 0)
+
+    if previous.urlFocused then
+        target.urlInput = previous.urlInput
+        target.urlCursor = clamp(previous.urlCursor, 1, #target.urlInput + 1)
+        target.urlOffset = math.max(0, tonumber(previous.urlOffset) or 0)
         target.urlFocus = true
-        target.urlSelStart = previousUrlSelStart
-        target.urlSelEnd = previousUrlSelEnd
+        target.urlSelStart = previous.urlSelStart
+        target.urlSelEnd = previous.urlSelEnd
     else
-        target.urlInput = resolvedUrl
+        target.urlInput = loaded.resolvedUrl
         target.urlCursor = #target.urlInput + 1
         target.urlOffset = 0
         target.urlFocus = false
         clearUrlSelection(target)
     end
-    target.formState = previousFormState
+
+    target.formState = previous.formState
     target.formMeta = nil
-    target.focusedFormControl = previousFocusedControl
+    target.focusedFormControl = previous.focusedControl
     target.renderRevision = 0
     target.lastRenderSignature = nil
-    target.scroll = previousScroll
+    target.scroll = previous.scroll
     renderDocument(target)
     if scheduleAboutUpdateTimer then
         scheduleAboutUpdateTimer()
