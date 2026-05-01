@@ -650,6 +650,8 @@ return function(core, options)
                 elseif choice == "normal" then
                     value = "normal"
                 end
+            elseif key == "default_monitor" then
+                value = tostring(params.default_monitor_choice or "")
             elseif key == "browser_engine_level" then
                 local choice = trim(tostring(params.browser_engine_level_choice or "")):lower()
                 if choice == "lite" then
@@ -725,6 +727,55 @@ return function(core, options)
             fullscreenModeChoice = "seamless"
         end
 
+        local defaultMonitorChoice = trim(tostring(settings.default_monitor or "internal"))
+        if defaultMonitorChoice == "" then
+            defaultMonitorChoice = "internal"
+        end
+        local activeMonitorValue = "internal"
+        if type(aboutApi.getActiveMonitor) == "function" then
+            activeMonitorValue = trim(tostring(aboutApi.getActiveMonitor() or "internal"))
+            if activeMonitorValue == "" then
+                activeMonitorValue = "internal"
+            end
+        end
+        local monitorOverrideValue = ""
+        if type(aboutApi.getMonitorOverride) == "function" then
+            monitorOverrideValue = trim(tostring(aboutApi.getMonitorOverride() or ""))
+        end
+        local monitorTargets = {}
+        if type(aboutApi.listMonitors) == "function" then
+            local listed = aboutApi.listMonitors()
+            if type(listed) == "table" then
+                monitorTargets = listed
+            end
+        end
+        local monitorOptionsMarkup = {}
+        local foundDefaultMonitor = false
+        for index, target in ipairs(monitorTargets) do
+            local value = trim(tostring(target.value or ""))
+            local label = trim(tostring(target.label or value))
+            if value ~= "" then
+                if label == "" then
+                    label = value
+                end
+                if value == defaultMonitorChoice then
+                    foundDefaultMonitor = true
+                end
+                local inputId = ("default-monitor-%d"):format(index)
+                monitorOptionsMarkup[#monitorOptionsMarkup + 1] =
+                    ("<input id=\"%s\" name=\"default_monitor_choice\" type=\"radio\" value=\"%s\" %s>")
+                        :format(escapeHtml(inputId), escapeHtml(value), value == defaultMonitorChoice and "checked" or "")
+                monitorOptionsMarkup[#monitorOptionsMarkup + 1] =
+                    ("<label for=\"%s\">%s</label><br>")
+                        :format(escapeHtml(inputId), escapeHtml(label))
+            end
+        end
+        if not foundDefaultMonitor and defaultMonitorChoice ~= "internal" then
+            monitorOptionsMarkup[#monitorOptionsMarkup + 1] =
+                ("<p><i>Saved monitor \"%s\" is currently unavailable.</i></p>")
+                    :format(escapeHtml(defaultMonitorChoice))
+        end
+
         local browserEngineLevelChoice = trim(tostring(settings.browser_engine_level or "standard")):lower()
         if browserEngineLevelChoice == "lite" then
             browserEngineLevelChoice = "standard"
@@ -775,6 +826,9 @@ return function(core, options)
             PAUSE_APPLETS_RADIO_DISABLED_CHECKED = pauseAppletsEnabled and "" or "checked",
             FULLSCREEN_MODE_RADIO_NORMAL_CHECKED = fullscreenModeChoice == "normal" and "checked" or "",
             FULLSCREEN_MODE_RADIO_SEAMLESS_CHECKED = fullscreenModeChoice == "seamless" and "checked" or "",
+            DEFAULT_MONITOR_OPTIONS = table.concat(monitorOptionsMarkup),
+            ACTIVE_MONITOR_VALUE = escapeHtml(activeMonitorValue),
+            MONITOR_OVERRIDE_VALUE = escapeHtml(monitorOverrideValue == "" and "(none)" or monitorOverrideValue),
             BROWSER_ENGINE_LEVEL_RADIO_TEXT_ONLY_CHECKED = browserEngineLevelChoice == "text_only" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_STANDARD_CHECKED = browserEngineLevelChoice == "standard" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED = browserEngineLevelChoice == "advanced" and "checked" or "",

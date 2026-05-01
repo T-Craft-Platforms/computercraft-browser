@@ -195,6 +195,7 @@ local browserSettings = {
     usage_guard_enabled = "true",
     pause_inactive_applets = "true",
     fullscreen_mode = "normal",
+    default_monitor = "internal",
     browser_engine_level = "standard",
     default_bg_color = "black",
     default_fg_color = "white",
@@ -268,6 +269,9 @@ function normalizeSettingKey(key)
     normalized = normalized:gsub("_+", "_")
     if normalized == "fullscreen" then
         return "fullscreen_mode"
+    end
+    if normalized == "monitor" or normalized == "display_monitor" or normalized == "default_display_monitor" then
+        return "default_monitor"
     end
     if normalized == "default_text_color" or normalized == "default_foreground_color" then
         return "default_fg_color"
@@ -438,6 +442,116 @@ end
 
 function currentVfsRoot()
     return BROWSER_VFS_DIR
+end
+
+local INTERNAL_MONITOR_ID = "internal"
+local INTERNAL_MONITOR_LABEL = "Internal Monitor"
+local NATIVE_TERM = (term and type(term.native) == "function" and term.native()) or (term and term.current and term.current()) or term
+local runtimeDisplayTarget = INTERNAL_MONITOR_ID
+local runtimeDisplayMonitorPeripheral = nil
+local startupMonitorOverride = nil
+
+function normalizeMonitorChoice(value)
+    local raw = core.trim(tostring(value or ""))
+    local lowered = raw:lower()
+    if lowered == "" or lowered == "internal" or lowered == "computer" or lowered == "terminal" then
+        return INTERNAL_MONITOR_ID
+    end
+    return raw
+end
+
+function attachedMonitorNames()
+    local names = {}
+    if peripheral and type(peripheral.getNames) == "function" and type(peripheral.getType) == "function" then
+        for _, name in ipairs(peripheral.getNames()) do
+            if peripheral.getType(name) == "monitor" then
+                names[#names + 1] = tostring(name)
+            end
+        end
+    end
+    table.sort(names)
+    return names
+end
+
+function monitorExists(name)
+    local wanted = tostring(name or "")
+    if wanted == "" then
+        return false
+    end
+    for _, monitorName in ipairs(attachedMonitorNames()) do
+        if monitorName == wanted then
+            return true
+        end
+    end
+    return false
+end
+
+function listMonitorTargets()
+    local targets = {
+        { value = INTERNAL_MONITOR_ID, label = INTERNAL_MONITOR_LABEL },
+    }
+    for _, name in ipairs(attachedMonitorNames()) do
+        targets[#targets + 1] = { value = name, label = name }
+    end
+    return targets
+end
+
+function applyDisplayTarget(choice)
+    local normalized = normalizeMonitorChoice(choice)
+    if normalized == INTERNAL_MONITOR_ID then
+        if term and type(term.redirect) == "function" and NATIVE_TERM then
+            term.redirect(NATIVE_TERM)
+        end
+        runtimeDisplayTarget = INTERNAL_MONITOR_ID
+        runtimeDisplayMonitorPeripheral = nil
+        return true, nil
+    end
+
+    if not monitorExists(normalized) then
+        return false, "Monitor not found: " .. tostring(normalized)
+    end
+    local wrapped = peripheral and type(peripheral.wrap) == "function" and peripheral.wrap(normalized) or nil
+    if not wrapped then
+        return false, "Could not access monitor: " .. tostring(normalized)
+    end
+
+    if term and type(term.redirect) == "function" then
+        term.redirect(wrapped)
+    end
+    runtimeDisplayTarget = normalized
+    runtimeDisplayMonitorPeripheral = normalized
+    return true, nil
+end
+
+function refreshDisplayTarget()
+    local function tryApply(choice)
+        local normalized = normalizeMonitorChoice(choice)
+        if normalized == INTERNAL_MONITOR_ID then
+            return applyDisplayTarget(INTERNAL_MONITOR_ID)
+        end
+        return applyDisplayTarget(normalized)
+    end
+
+    if startupMonitorOverride then
+        local okOverride = select(1, tryApply(startupMonitorOverride))
+        if okOverride then
+            return true, nil
+        end
+    end
+
+    local okSetting = select(1, tryApply(browserSettings.default_monitor))
+    if okSetting then
+        return true, nil
+    end
+
+    applyDisplayTarget(INTERNAL_MONITOR_ID)
+    if not startupMonitorOverride and browserSettings.default_monitor ~= INTERNAL_MONITOR_ID then
+        browserSettings.default_monitor = INTERNAL_MONITOR_ID
+        if persistBrowserState then
+            persistBrowserState()
+        end
+    end
+    return false, "Display target unavailable; switched to internal monitor."
 end
 
 function currentLogsDir()
@@ -663,6 +777,10 @@ function listBrowserSettings()
     copied.logs_dir = currentLogsDir()
     copied.config_path = browserConfigPath()
     copied.history_path = browserHistoryPath()
+    copied.default_monitor = tostring(browserSettings.default_monitor or INTERNAL_MONITOR_ID)
+    copied.active_monitor = tostring(runtimeDisplayTarget or INTERNAL_MONITOR_ID)
+    copied.available_monitors = table.concat(attachedMonitorNames(), ",")
+    copied.monitor_override = tostring(startupMonitorOverride or "")
     copied.storage_ready = storageReady and "true" or "false"
     copied.storage_last_error = tostring(lastStorageError or "")
     local freeSpace = "unknown"
@@ -680,6 +798,7 @@ local MUTABLE_SETTING_KEYS = {
     usage_guard_enabled = true,
     pause_inactive_applets = true,
     fullscreen_mode = true,
+    default_monitor = true,
     browser_engine_level = true,
     default_bg_color = true,
     default_fg_color = true,
@@ -951,6 +1070,21 @@ function setBrowserSetting(key, value)
         browserSettings[normalized] = normalizeFullscreenMode(lowered)
         if persistBrowserState then
             persistBrowserState()
+        end
+        log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
+        return true, nil
+    end
+    if normalized == "default_monitor" then
+        local choice = normalizeMonitorChoice(value)
+        if choice ~= INTERNAL_MONITOR_ID and not monitorExists(choice) then
+            return false, "Invalid default_monitor value (monitor not found: " .. tostring(choice) .. ")"
+        end
+        browserSettings[normalized] = choice
+        if persistBrowserState then
+            persistBrowserState()
+        end
+        if not startupMonitorOverride then
+            refreshDisplayTarget()
         end
         log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
         return true, nil
@@ -1278,6 +1412,8 @@ function applyDecodedConfig(decoded)
             if MUTABLE_SETTING_KEYS[normalized] then
                 if normalized == "fullscreen_mode" then
                     browserSettings[normalized] = normalizeFullscreenMode(rawValue)
+                elseif normalized == "default_monitor" then
+                    browserSettings[normalized] = normalizeMonitorChoice(rawValue)
                 elseif normalized == "browser_engine_level" then
                     browserSettings[normalized] = normalizeBrowserEngineLevel(rawValue)
                 elseif normalized == "default_bg_color" then
@@ -1306,6 +1442,7 @@ function applyDecodedConfig(decoded)
     end
 
     browserSettings.fullscreen_mode = normalizeFullscreenMode(browserSettings.fullscreen_mode)
+    browserSettings.default_monitor = normalizeMonitorChoice(browserSettings.default_monitor)
     browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
     browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
     browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
@@ -1478,6 +1615,7 @@ else
     end
     log(lastStorageError, LogLevel.error)
 end
+browserSettings.default_monitor = normalizeMonitorChoice(browserSettings.default_monitor)
 browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
 browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
 browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
@@ -1498,6 +1636,13 @@ local network = createNetwork(core, {
         removeHistoryEntry = removeBrowserHistoryEntry,
         clearHistoryDay = clearBrowserHistoryDay,
         clearHistory = clearBrowserHistory,
+        listMonitors = listMonitorTargets,
+        getActiveMonitor = function()
+            return runtimeDisplayTarget or INTERNAL_MONITOR_ID
+        end,
+        getMonitorOverride = function()
+            return startupMonitorOverride or ""
+        end,
     },
 })
 local html = createHtml(core)
@@ -3881,7 +4026,10 @@ function submitForm(tab, formId, submitterKey)
 
     ctx.target.status = "Form submitted"
     log(ctx.target.status .. " (" .. tostring(ctx.requestUrl) .. ")", LogLevel.info)
-    if startsWith(trim(ctx.target.currentUrl or ""):lower(), "about:") then
+    local currentAboutUrl = trim(ctx.target.currentUrl or ""):lower()
+    if startsWith(currentAboutUrl, "about:history") then
+        navigate(ctx.requestUrl, false, false, ctx.target, ctx.requestOptions)
+    elseif startsWith(currentAboutUrl, "about:") then
         refreshCurrentDocumentWithoutNavigation(ctx.target)
     end
     return true
@@ -6089,13 +6237,23 @@ function handlePaste(text)
     end
 end
 
-function bootstrap(initialUrls, startupFullscreenMode)
-    if state.initialTermBackground == nil and term and term.getBackgroundColor then
-        state.initialTermBackground = term.getBackgroundColor()
+function bootstrap(initialUrls, startupFullscreenMode, startupMonitorChoice)
+    if state.initialTermBackground == nil and NATIVE_TERM and NATIVE_TERM.getBackgroundColor then
+        state.initialTermBackground = NATIVE_TERM.getBackgroundColor()
     end
-    if state.initialTermForeground == nil and term and term.getTextColor then
-        state.initialTermForeground = term.getTextColor()
+    if state.initialTermForeground == nil and NATIVE_TERM and NATIVE_TERM.getTextColor then
+        state.initialTermForeground = NATIVE_TERM.getTextColor()
     end
+
+    startupMonitorOverride = normalizeMonitorChoice(startupMonitorChoice)
+    if startupMonitorOverride == INTERNAL_MONITOR_ID then
+        startupMonitorOverride = nil
+    end
+    local okDisplay, displayErr = refreshDisplayTarget()
+    if not okDisplay and displayErr and displayErr ~= "" then
+        log(displayErr, LogLevel.warn)
+    end
+
     local bg = currentDefaultBackgroundColorValue()
     local fg = currentDefaultForegroundColorValue(bg)
     term.setBackgroundColor(bg)
@@ -6379,6 +6537,19 @@ end
 
 function processNextBrowserEvent()
     state.lastPulledEvent = { os.pullEvent() }
+    if state.lastPulledEvent[1] == "monitor_touch" then
+        if runtimeDisplayMonitorPeripheral and state.lastPulledEvent[2] == runtimeDisplayMonitorPeripheral then
+            state.lastPulledEvent = { "mouse_click", 1, state.lastPulledEvent[3], state.lastPulledEvent[4] }
+        end
+    elseif state.lastPulledEvent[1] == "peripheral_detach" or state.lastPulledEvent[1] == "peripheral" then
+        if runtimeDisplayMonitorPeripheral and state.lastPulledEvent[2] == runtimeDisplayMonitorPeripheral then
+            refreshDisplayTarget()
+            if state.running then
+                rerenderAllTabs()
+                draw()
+            end
+        end
+    end
     state.highUsage.loadingFrame = false
 
     if state.skipNextPaste and state.lastPulledEvent[1] ~= "paste" and state.lastPulledEvent[1] ~= "key_up" then
@@ -6399,6 +6570,9 @@ end
 
 function shutdownBrowserUi()
     term.setCursorBlink(false)
+    if term and type(term.redirect) == "function" and NATIVE_TERM then
+        term.redirect(NATIVE_TERM)
+    end
     local bg = state.initialTermBackground or colors.black
     local fg = state.initialTermForeground or colors.white
     term.setBackgroundColor(bg)
@@ -6411,6 +6585,7 @@ end
 function parseStartupArgs(args)
     local initialUrls = {}
     local startupFullscreenMode = nil
+    local startupMonitorChoice = nil
     for i = 1, #(args or {}) do
         local value = tostring(args[i] or "")
         local lowered = value:lower()
@@ -6420,18 +6595,20 @@ function parseStartupArgs(args)
             if startupFullscreenMode ~= "seamless" then
                 startupFullscreenMode = "normal"
             end
+        elseif lowered:sub(1, #"--monitor=") == "--monitor=" then
+            startupMonitorChoice = value:sub(#"--monitor=" + 1)
         elseif value ~= "" then
             initialUrls[#initialUrls + 1] = value
         end
     end
-    return initialUrls, startupFullscreenMode
+    return initialUrls, startupFullscreenMode, startupMonitorChoice
 end
 
 function run(...)
     local rawArgs = { ... }
-    local initialUrls, startupFullscreenMode = parseStartupArgs(rawArgs)
+    local initialUrls, startupFullscreenMode, startupMonitorChoice = parseStartupArgs(rawArgs)
     log("browser start", LogLevel.info)
-    bootstrap(initialUrls, startupFullscreenMode)
+    bootstrap(initialUrls, startupFullscreenMode, startupMonitorChoice)
     while state.running do
         processNextBrowserEvent()
     end

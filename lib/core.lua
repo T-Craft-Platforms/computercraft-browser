@@ -1,58 +1,5 @@
 local M = {}
 
-local FALLBACK_SYMBOL = "?"
-
-local CODEPOINT_FALLBACKS = {
-    [0x131] = "i",
-    [0x152] = "OE",
-    [0x153] = "oe",
-    [0x160] = "S",
-    [0x161] = "s",
-    [0x178] = "Y",
-    [0x17D] = "Z",
-    [0x17E] = "z",
-    [0x192] = "f",
-    [0x2C6] = "^",
-    [0x2DC] = "~",
-    [0x2002] = " ",
-    [0x2003] = " ",
-    [0x2009] = " ",
-    [0x200B] = "",
-    [0x2010] = "-",
-    [0x2011] = "-",
-    [0x2012] = "-",
-    [0x2013] = "-",
-    [0x2014] = "-",
-    [0x2015] = "-",
-    [0x2018] = "'",
-    [0x2019] = "'",
-    [0x201A] = ",",
-    [0x201B] = "'",
-    [0x201C] = "\"",
-    [0x201D] = "\"",
-    [0x201E] = "\"",
-    [0x2020] = "+",
-    [0x2021] = "++",
-    [0x2022] = "*",
-    [0x2026] = "...",
-    [0x2030] = "o/oo",
-    [0x2039] = "<",
-    [0x203A] = ">",
-    [0x20AC] = "EUR",
-    [0x2122] = "TM",
-    [0x2190] = "<-",
-    [0x2191] = "^",
-    [0x2192] = "->",
-    [0x2193] = "v",
-    [0x2212] = "-",
-    [0x221A] = "sqrt",
-    [0x2260] = "!=",
-    [0x2264] = "<=",
-    [0x2265] = ">=",
-    [0x25B2] = "^",
-    [0x25BC] = "v",
-}
-
 local VOID_TAGS = {
     area = true,
     base = true,
@@ -171,103 +118,11 @@ local PALETTE = {
 local ENTITY_MAP = {
     amp = "&",
     apos = "'",
-    bull = "*",
-    copy = string.char(169),
-    euro = "EUR",
     gt = ">",
-    hellip = "...",
-    laquo = "<<",
     lt = "<",
-    mdash = "-",
-    middot = "*",
-    ndash = "-",
     nbsp = " ",
-    raquo = ">>",
-    reg = string.char(174),
     quot = "\"",
-    rsquo = "'",
-    lsquo = "'",
-    rdquo = "\"",
-    ldquo = "\"",
-    trade = "TM",
 }
-
-local function decodeCodepoint(codepoint)
-    local cp = tonumber(codepoint)
-    if not cp then
-        return FALLBACK_SYMBOL
-    end
-    cp = math.floor(cp)
-    if cp == 9 then
-        return "\t"
-    end
-    if cp == 10 then
-        return "\n"
-    end
-    if (cp >= 32 and cp <= 126) or (cp >= 160 and cp <= 255) then
-        return string.char(cp)
-    end
-    return CODEPOINT_FALLBACKS[cp] or FALLBACK_SYMBOL
-end
-
-local function decodeUtf8At(source, index)
-    local b1 = string.byte(source, index)
-    if not b1 then
-        return nil, 0
-    end
-    if b1 < 0x80 then
-        return b1, 1
-    end
-
-    local b2 = string.byte(source, index + 1)
-    local b3 = string.byte(source, index + 2)
-    local b4 = string.byte(source, index + 3)
-
-    if b1 >= 0xC2 and b1 <= 0xDF and b2 and b2 >= 0x80 and b2 <= 0xBF then
-        local codepoint = ((b1 - 0xC0) * 0x40) + (b2 - 0x80)
-        return codepoint, 2
-    end
-
-    if b1 >= 0xE0 and b1 <= 0xEF and b2 and b3 then
-        local validSecond = b2 >= 0x80 and b2 <= 0xBF
-        local validThird = b3 >= 0x80 and b3 <= 0xBF
-        if validSecond and validThird then
-            if b1 == 0xE0 and b2 < 0xA0 then
-                return nil, 0
-            end
-            if b1 == 0xED and b2 >= 0xA0 then
-                return nil, 0
-            end
-            local codepoint = ((b1 - 0xE0) * 0x1000) + ((b2 - 0x80) * 0x40) + (b3 - 0x80)
-            return codepoint, 3
-        end
-    end
-
-    if b1 >= 0xF0 and b1 <= 0xF4 and b2 and b3 and b4 then
-        local validSecond = b2 >= 0x80 and b2 <= 0xBF
-        local validThird = b3 >= 0x80 and b3 <= 0xBF
-        local validFourth = b4 >= 0x80 and b4 <= 0xBF
-        if validSecond and validThird and validFourth then
-            if b1 == 0xF0 and b2 < 0x90 then
-                return nil, 0
-            end
-            if b1 == 0xF4 and b2 > 0x8F then
-                return nil, 0
-            end
-            local codepoint = ((b1 - 0xF0) * 0x40000)
-                + ((b2 - 0x80) * 0x1000)
-                + ((b3 - 0x80) * 0x40)
-                + (b4 - 0x80)
-            return codepoint, 4
-        end
-    end
-
-    return nil, 0
-end
-
-local function normalizeDisplayText(value)
-    return tostring(value or "")
-end
 
 local function clamp(value, minValue, maxValue)
     if value < minValue then
@@ -290,6 +145,19 @@ local function startsWith(value, prefix)
     return value:sub(1, #prefix) == prefix
 end
 
+local function toAsciiChar(code)
+    if code == 9 then
+        return "\t"
+    end
+    if code == 10 then
+        return "\n"
+    end
+    if code >= 32 and code <= 126 then
+        return string.char(code)
+    end
+    return "?"
+end
+
 local function decodeEntities(value)
     if value == nil or value == "" then
         return ""
@@ -299,22 +167,21 @@ local function decodeEntities(value)
     decoded = decoded:gsub("&#x([%x]+);", function(hex)
         local code = tonumber(hex, 16)
         if not code then
-            return FALLBACK_SYMBOL
+            return "?"
         end
-        return decodeCodepoint(code)
+        return toAsciiChar(code)
     end)
     decoded = decoded:gsub("&#([%d]+);", function(decimal)
         local code = tonumber(decimal, 10)
         if not code then
-            return FALLBACK_SYMBOL
+            return "?"
         end
-        return decodeCodepoint(code)
+        return toAsciiChar(code)
     end)
     decoded = decoded:gsub("&([%a]+);", function(name)
-        local lowered = tostring(name or ""):lower()
-        return ENTITY_MAP[lowered] or ("&" .. name .. ";")
+        return ENTITY_MAP[name] or ("&" .. name .. ";")
     end)
-    return normalizeDisplayText(decoded)
+    return decoded
 end
 
 local function splitByWhitespace(value)
@@ -654,7 +521,6 @@ M.clamp = clamp
 M.trim = trim
 M.startsWith = startsWith
 M.decodeEntities = decodeEntities
-M.normalizeDisplayText = normalizeDisplayText
 M.splitByWhitespace = splitByWhitespace
 M.escapeHtml = escapeHtml
 M.parseCssColor = parseCssColor
