@@ -452,7 +452,7 @@ return function(deps)
                     if caretChar == "" then
                         caretChar = " "
                     end
-                    writeClipped(cursorX, 2, caretChar, urlFieldFg, colors.blue)
+                    writeClipped(cursorX, 2, caretChar, urlFieldFg, colors.white)
                 end
             end
             urlCursorState.visible = false

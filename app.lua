@@ -450,6 +450,7 @@ local NATIVE_TERM = (term and type(term.native) == "function" and term.native())
 local runtimeDisplayTarget = INTERNAL_MONITOR_ID
 local runtimeDisplayMonitorPeripheral = nil
 local startupMonitorOverride = nil
+local sessionMonitorOverride = nil
 
 function normalizeMonitorChoice(value)
     local raw = core.trim(tostring(value or ""))
@@ -496,8 +497,57 @@ function listMonitorTargets()
     return targets
 end
 
+function monitorSurface(choice)
+    local normalized = normalizeMonitorChoice(choice)
+    if normalized == INTERNAL_MONITOR_ID then
+        return NATIVE_TERM
+    end
+    if peripheral and type(peripheral.wrap) == "function" then
+        return peripheral.wrap(normalized)
+    end
+    return nil
+end
+
+function runOnSurface(surface, fn)
+    if not surface or type(fn) ~= "function" or not (term and type(term.redirect) == "function") then
+        return false
+    end
+    local previous = term.current and term.current() or nil
+    term.redirect(surface)
+    local ok, err = pcall(fn)
+    if previous then
+        term.redirect(previous)
+    elseif NATIVE_TERM then
+        term.redirect(NATIVE_TERM)
+    end
+    return ok, err
+end
+
+function clearSurface(choice, background, foreground)
+    local surface = monitorSurface(choice)
+    if not surface then
+        return false
+    end
+    local bg = background or currentDefaultBackgroundColorValue()
+    local fg = foreground or currentDefaultForegroundColorValue(bg)
+    runOnSurface(surface, function()
+        term.setCursorBlink(false)
+        term.setBackgroundColor(bg)
+        term.setTextColor(fg)
+        term.clear()
+        term.setCursorPos(1, 1)
+    end)
+    return true
+end
+
 function applyDisplayTarget(choice)
     local normalized = normalizeMonitorChoice(choice)
+    local previousTarget = normalizeMonitorChoice(runtimeDisplayTarget or INTERNAL_MONITOR_ID)
+    local bg = currentDefaultBackgroundColorValue()
+    local fg = currentDefaultForegroundColorValue(bg)
+    if previousTarget ~= normalized then
+        clearSurface(previousTarget, bg, fg)
+    end
     if normalized == INTERNAL_MONITOR_ID then
         if term and type(term.redirect) == "function" and NATIVE_TERM then
             term.redirect(NATIVE_TERM)
@@ -537,6 +587,14 @@ function refreshDisplayTarget()
         if okOverride then
             return true, nil
         end
+    end
+
+    if sessionMonitorOverride then
+        local okSession = select(1, tryApply(sessionMonitorOverride))
+        if okSession then
+            return true, nil
+        end
+        sessionMonitorOverride = nil
     end
 
     local okSetting = select(1, tryApply(browserSettings.default_monitor))
@@ -1080,6 +1138,7 @@ function setBrowserSetting(key, value)
             return false, "Invalid default_monitor value (monitor not found: " .. tostring(choice) .. ")"
         end
         browserSettings[normalized] = choice
+        sessionMonitorOverride = nil
         if persistBrowserState then
             persistBrowserState()
         end
@@ -1878,6 +1937,11 @@ state = {
         url = { x1 = 13, x2 = 13, y = 2 },
         menuButton = { x1 = 1, x2 = 1, y = 2 },
         menu = nil,
+    },
+    monitorControls = {
+        visible = false,
+        switchButton = nil,
+        exitButton = nil,
     },
 }
 
@@ -2990,11 +3054,87 @@ function drawSnackbar()
     term.write(banner)
 end
 
+function drawNativeMonitorControls()
+    local controls = state.monitorControls or {}
+    state.monitorControls = controls
+
+    if runtimeDisplayTarget == INTERNAL_MONITOR_ID or not NATIVE_TERM then
+        controls.visible = false
+        controls.switchButton = nil
+        controls.exitButton = nil
+        return
+    end
+
+    runOnSurface(NATIVE_TERM, function()
+        local w, h = term.getSize()
+        term.setCursorBlink(false)
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.clear()
+
+        local title = APP_TITLE
+        local active = "Showing on: " .. tostring(runtimeDisplayTarget or INTERNAL_MONITOR_ID)
+        local helper = "Use the buttons below from this terminal."
+        term.setCursorPos(math.max(1, math.floor((w - #title) / 2) + 1), math.max(1, math.floor(h / 2) - 3))
+        term.write(title:sub(1, w))
+        term.setCursorPos(math.max(1, math.floor((w - #active) / 2) + 1), math.max(1, math.floor(h / 2) - 2))
+        term.write(active:sub(1, w))
+        term.setCursorPos(math.max(1, math.floor((w - #helper) / 2) + 1), math.max(1, math.floor(h / 2) - 1))
+        term.write(helper:sub(1, w))
+
+        local function drawButton(y, label, fg, bg)
+            local text = " " .. tostring(label or "") .. " "
+            if #text > w then
+                text = text:sub(1, w)
+            end
+            local x1 = math.max(1, math.floor((w - #text) / 2) + 1)
+            local x2 = math.min(w, x1 + #text - 1)
+            term.setCursorPos(x1, y)
+            term.setTextColor(fg)
+            term.setBackgroundColor(bg)
+            term.write(text)
+            return { x1 = x1, x2 = x2, y = y }
+        end
+
+        local switchY = math.max(1, math.floor(h / 2) + 1)
+        local exitY = math.min(h, switchY + 2)
+        controls.switchButton = drawButton(switchY, "Switch To Internal (One-Time)", colors.black, colors.lime)
+        controls.exitButton = drawButton(exitY, "Exit Browser", colors.white, colors.red)
+        controls.visible = true
+    end)
+end
+
+function handleNativeMonitorControlClick(button, x, y)
+    local controls = state.monitorControls
+    if runtimeDisplayTarget == INTERNAL_MONITOR_ID or not controls or not controls.visible then
+        return false
+    end
+    if button ~= 1 then
+        return true
+    end
+    if hitRegion(x, y, controls.switchButton) then
+        sessionMonitorOverride = INTERNAL_MONITOR_ID
+        local okDisplay, displayErr = refreshDisplayTarget()
+        if not okDisplay and displayErr and displayErr ~= "" then
+            log(displayErr, LogLevel.warn)
+        end
+        rerenderAllTabs()
+        draw()
+        return true
+    end
+    if hitRegion(x, y, controls.exitButton) then
+        state.running = false
+        return true
+    end
+    return true
+end
+
 draw = function()
     drawBase()
     drawActiveAppletOverlay()
     drawModal()
     drawSnackbar()
+    drawNativeMonitorControls()
 end
 
 function triggerModalButton(buttonId, source)
@@ -4029,10 +4169,35 @@ function submitForm(tab, formId, submitterKey)
     local currentAboutUrl = trim(ctx.target.currentUrl or ""):lower()
     if startsWith(currentAboutUrl, "about:history") then
         navigate(ctx.requestUrl, false, false, ctx.target, ctx.requestOptions)
+        focusHistorySearchInput(ctx.target)
     elseif startsWith(currentAboutUrl, "about:") then
         refreshCurrentDocumentWithoutNavigation(ctx.target)
     end
     return true
+end
+
+function focusHistorySearchInput(tab)
+    local target = tab or activeTab()
+    local formMeta = target.formMeta or {}
+    local controls = formMeta.controlsByKey or {}
+    for _, key in ipairs(formMeta.controlOrder or {}) do
+        local control = controls[key]
+        if control and control.tag == "input" then
+            local inputType = tostring(control.inputType or "text"):lower()
+            local name = trim(tostring(control.name or "")):lower()
+            if (inputType == "text" or inputType == "search") and name == "q" then
+                setFocusedFormControl(target, key)
+                local _, stateEntry = formControl(target, key)
+                if stateEntry then
+                    stateEntry.cursor = #tostring(stateEntry.value or "") + 1
+                end
+                target.urlFocus = false
+                bumpRenderRevision(target)
+                return true
+            end
+        end
+    end
+    return false
 end
 
 function cycleSelect(tab, control, stateEntry, direction)
@@ -6150,6 +6315,9 @@ function handleTimer(timerId)
     if state.animationTimer and timerId == state.animationTimer then
         state.animationTimer = nil
         scheduleAnimationTick()
+        if state.running then
+            draw()
+        end
         return
     end
 
@@ -6511,6 +6679,18 @@ function processFrameAfterEvent(frameStart)
 end
 
 function processBrowserEvent(event, frameStart)
+    if runtimeDisplayTarget ~= INTERNAL_MONITOR_ID
+        and event[5] ~= "monitor_touch"
+        and (event[1] == "mouse_click" or event[1] == "mouse_drag" or event[1] == "mouse_up" or event[1] == "mouse_scroll") then
+        if event[1] == "mouse_click" then
+            handleNativeMonitorControlClick(event[2], event[3], event[4])
+        end
+        if state.running then
+            draw()
+        end
+        return
+    end
+
     if state.modal.open then
         handleModalEvent(event)
         dispatchEventToBackgroundApplets(event)
@@ -6539,7 +6719,7 @@ function processNextBrowserEvent()
     state.lastPulledEvent = { os.pullEvent() }
     if state.lastPulledEvent[1] == "monitor_touch" then
         if runtimeDisplayMonitorPeripheral and state.lastPulledEvent[2] == runtimeDisplayMonitorPeripheral then
-            state.lastPulledEvent = { "mouse_click", 1, state.lastPulledEvent[3], state.lastPulledEvent[4] }
+            state.lastPulledEvent = { "mouse_click", 1, state.lastPulledEvent[3], state.lastPulledEvent[4], "monitor_touch" }
         end
     elseif state.lastPulledEvent[1] == "peripheral_detach" or state.lastPulledEvent[1] == "peripheral" then
         if runtimeDisplayMonitorPeripheral and state.lastPulledEvent[2] == runtimeDisplayMonitorPeripheral then
@@ -6570,16 +6750,17 @@ end
 
 function shutdownBrowserUi()
     term.setCursorBlink(false)
+    local bg = state.initialTermBackground or colors.black
+    local fg = state.initialTermForeground or colors.white
+    clearSurface(runtimeDisplayTarget or INTERNAL_MONITOR_ID, bg, fg)
+    clearSurface(INTERNAL_MONITOR_ID, bg, fg)
     if term and type(term.redirect) == "function" and NATIVE_TERM then
         term.redirect(NATIVE_TERM)
     end
-    local bg = state.initialTermBackground or colors.black
-    local fg = state.initialTermForeground or colors.white
     term.setBackgroundColor(bg)
     term.setTextColor(fg)
     term.clear()
     term.setCursorPos(1, 1)
-    print(APP_TITLE .. " closed")
 end
 
 function parseStartupArgs(args)
