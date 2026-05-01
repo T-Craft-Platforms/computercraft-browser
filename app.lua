@@ -199,13 +199,22 @@ local browserSettings = {
     default_bg_color = "black",
     default_fg_color = "white",
 }
-local browserPolicies = {
+local defaultPolicies = {
     log = {
         enabled = true,
         level = "info",
         max_files = 6,
         max_file_size = 131072,
         max_entry_length = 2048,
+    },
+}
+local browserPolicies = {
+    log = {
+        enabled = defaultPolicies.log.enabled,
+        level = defaultPolicies.log.level,
+        max_files = defaultPolicies.log.max_files,
+        max_file_size = defaultPolicies.log.max_file_size,
+        max_entry_length = defaultPolicies.log.max_entry_length,
     },
 }
 local browserFavorites = {}
@@ -497,6 +506,7 @@ function ensureStoragePaths()
     if not okData then
         storageReady = false
         lastStorageError = tostring(dataErr or "Could not prepare browser data directory")
+        log(lastStorageError, LogLevel.warn)
         return false, lastStorageError
     end
 
@@ -504,6 +514,7 @@ function ensureStoragePaths()
     if not okSettings then
         storageReady = false
         lastStorageError = tostring(settingsErr or "Could not prepare browser settings directory")
+        log(lastStorageError, LogLevel.warn)
         return false, lastStorageError
     end
 
@@ -511,6 +522,7 @@ function ensureStoragePaths()
     if not okDownloads then
         storageReady = false
         lastStorageError = tostring(downloadsErr or "Could not prepare browser downloads directory")
+        log(lastStorageError, LogLevel.warn)
         return false, lastStorageError
     end
 
@@ -518,6 +530,7 @@ function ensureStoragePaths()
     if not okVfs then
         storageReady = false
         lastStorageError = tostring(vfsErr or "Could not prepare browser applet directory")
+        log(lastStorageError, LogLevel.warn)
         return false, lastStorageError
     end
 
@@ -525,6 +538,7 @@ function ensureStoragePaths()
     if not okLogs then
         storageReady = false
         lastStorageError = tostring(logsErr or "Could not prepare browser logs directory")
+        log(lastStorageError, LogLevel.warn)
         return false, lastStorageError
     end
 
@@ -581,20 +595,24 @@ function readTextFile(path)
         return nil, "Filesystem unavailable"
     end
     if not fs.exists(path) then
+        log("readTextFile missing: " .. tostring(path), LogLevel.warn)
         return nil, "File not found"
     end
 
     local handle = fs.open(path, "r")
     if not handle then
+        log("readTextFile open failed: " .. tostring(path), LogLevel.error)
         return nil, "Could not open file"
     end
 
     local payload, readErr = readHandleAll(handle)
     if not closeHandle(handle) then
+        log("readTextFile close failed: " .. tostring(path), LogLevel.warn)
         return nil, "Could not close file"
     end
 
     if payload == nil then
+        log("readTextFile failed: " .. tostring(path) .. " (" .. tostring(readErr or "read error") .. ")", LogLevel.error)
         return nil, tostring(readErr or "Failed reading file")
     end
     return payload, nil
@@ -619,15 +637,18 @@ function writeTextFile(path, payload)
 
     local handle = fs.open(target, "w")
     if not handle then
+        log("writeTextFile open failed: " .. tostring(target), LogLevel.error)
         return false, "Could not open file for writing"
     end
 
     local okWrite, writeErr = writeHandleAll(handle, payload)
     if not closeHandle(handle) then
+        log("writeTextFile close failed: " .. tostring(target), LogLevel.warn)
         return false, "Could not close file"
     end
 
     if not okWrite then
+        log("writeTextFile failed: " .. tostring(target) .. " (" .. tostring(writeErr or "write error") .. ")", LogLevel.error)
         return false, tostring(writeErr or "Failed writing file")
     end
     return true, nil
@@ -711,19 +732,20 @@ end
 
 function normalizeLogPolicy(policyTable)
     local source = type(policyTable) == "table" and policyTable or {}
+    local defaults = defaultPolicies.log or {}
     local normalized = {}
 
     local enabled = parseBooleanSetting(source.enabled)
     if enabled == nil then
-        enabled = true
+        enabled = defaults.enabled == true
     end
     normalized.enabled = enabled
 
-    local level = normalizeLogLevel(source.level)
+    local level = normalizeLogLevel(source.level or defaults.level)
     normalized.level = (LOG_LEVEL_NAMES[level] or "INFO"):lower()
 
     local maxFiles = tonumber(source.max_files)
-    maxFiles = math.floor(maxFiles or 6)
+    maxFiles = math.floor(maxFiles or tonumber(defaults.max_files) or 6)
     if maxFiles < 1 then
         maxFiles = 1
     elseif maxFiles > 64 then
@@ -732,7 +754,7 @@ function normalizeLogPolicy(policyTable)
     normalized.max_files = maxFiles
 
     local maxFileSize = tonumber(source.max_file_size)
-    maxFileSize = math.floor(maxFileSize or 131072)
+    maxFileSize = math.floor(maxFileSize or tonumber(defaults.max_file_size) or 131072)
     if maxFileSize < 1024 then
         maxFileSize = 1024
     elseif maxFileSize > 4194304 then
@@ -741,7 +763,7 @@ function normalizeLogPolicy(policyTable)
     normalized.max_file_size = maxFileSize
 
     local maxEntryLength = tonumber(source.max_entry_length)
-    maxEntryLength = math.floor(maxEntryLength or 2048)
+    maxEntryLength = math.floor(maxEntryLength or tonumber(defaults.max_entry_length) or 2048)
     if maxEntryLength < 128 then
         maxEntryLength = 128
     elseif maxEntryLength > 65535 then
@@ -867,6 +889,7 @@ function setBooleanBrowserSetting(key, value)
     if persistBrowserState then
         persistBrowserState()
     end
+    log("setting updated: " .. tostring(key) .. "=" .. tostring(browserSettings[key]), LogLevel.info)
     return true, nil
 end
 
@@ -899,6 +922,7 @@ function setBrowserSetting(key, value)
         if persistBrowserState then
             persistBrowserState()
         end
+        log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
         return true, nil
     end
     if normalized == "pause_inactive_applets" then
@@ -917,6 +941,7 @@ function setBrowserSetting(key, value)
         if persistBrowserState then
             persistBrowserState()
         end
+        log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
         return true, nil
     end
     if normalized == "fullscreen_mode" then
@@ -928,6 +953,7 @@ function setBrowserSetting(key, value)
         if persistBrowserState then
             persistBrowserState()
         end
+        log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
         return true, nil
     end
     if normalized == "browser_engine_level" then
@@ -939,6 +965,7 @@ function setBrowserSetting(key, value)
         if persistBrowserState then
             persistBrowserState()
         end
+        log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
         return true, nil
     end
     if normalized == "default_bg_color" or normalized == "default_fg_color" then
@@ -951,6 +978,7 @@ function setBrowserSetting(key, value)
         if persistBrowserState then
             persistBrowserState()
         end
+        log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
         return true, nil
     end
     if normalized == "home_page" then
@@ -965,6 +993,7 @@ function setBrowserSetting(key, value)
     if persistBrowserState then
         persistBrowserState()
     end
+    log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
     return true, nil
 end
 
@@ -1338,12 +1367,14 @@ function loadBrowserState()
     if type(configDecoded) == "table" then
         applyDecodedConfig(configDecoded)
         loadedAny = true
+        log("config loaded from " .. tostring(browserConfigPath()), LogLevel.info)
     end
 
     local historyDecoded = readSerializedTable(browserHistoryPath())
     if type(historyDecoded) == "table" then
         applyDecodedHistory(type(historyDecoded.entries) == "table" and historyDecoded.entries or historyDecoded.history)
         loadedAny = true
+        log("history loaded from " .. tostring(browserHistoryPath()), LogLevel.info)
     else
         applyDecodedHistory({})
     end
@@ -1354,11 +1385,13 @@ function loadBrowserState()
 
     local legacyDecoded, legacyErr = readSerializedTable(legacyBrowserStatePath())
     if not legacyDecoded then
+        log("browser state load failed: " .. tostring(legacyErr or "No saved state"), LogLevel.warn)
         return false, tostring(legacyErr or "No saved state")
     end
 
     applyDecodedConfig(legacyDecoded)
     applyDecodedHistory(legacyDecoded.history)
+    log("legacy browser state loaded from " .. tostring(legacyBrowserStatePath()), LogLevel.warn)
     return true, nil
 end
 
@@ -1394,12 +1427,14 @@ persistBrowserState = function(_forceWrite)
     if not okConfigWrite then
         storageReady = false
         lastStorageError = tostring(configWriteErr or "Could not write config file")
+        log(lastStorageError, LogLevel.error)
         return false, lastStorageError
     end
     local okHistoryWrite, historyWriteErr = writeTextFile(browserHistoryPath(), historyEncoded)
     if not okHistoryWrite then
         storageReady = false
         lastStorageError = tostring(historyWriteErr or "Could not write history file")
+        log(lastStorageError, LogLevel.error)
         return false, lastStorageError
     end
     storageReady = true
@@ -1412,12 +1447,14 @@ if initialStorageReady then
     loadBrowserState()
     if not fs.exists(browserConfigPath()) or not fs.exists(browserHistoryPath()) then
         persistBrowserState(true)
+        log("initialized browser state store", LogLevel.info)
     end
 else
     storageReady = false
     if not lastStorageError or lastStorageError == "" then
         lastStorageError = "Storage initialization failed"
     end
+    log(lastStorageError, LogLevel.error)
 end
 browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
 browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
@@ -3287,18 +3324,21 @@ function printCurrentPage(tab)
     local printers = listPrinterNames()
     if #printers == 0 then
         target.status = "Print failed: no printer peripheral found"
+        log(target.status, LogLevel.warn)
         return false
     end
 
     local selectedPrinter = promptPrinterSelection(printers)
     if not selectedPrinter then
         target.status = "Print canceled"
+        log(target.status, LogLevel.info)
         return false
     end
 
     local printerDevice = peripheral.wrap(selectedPrinter)
     if not printerDevice then
         target.status = "Print failed: could not access printer '" .. tostring(selectedPrinter) .. "'"
+        log(target.status, LogLevel.error)
         return false
     end
 
@@ -3329,11 +3369,13 @@ function printCurrentPage(tab)
             prefix = ("Print failed after %d pages: "):format(math.floor(printedPages))
         end
         target.status = prefix .. tostring(printErr or "unknown error")
+        log(target.status, LogLevel.error)
         return false
     end
 
     local pageCount = math.max(1, math.floor(tonumber(printedPages) or 0))
     target.status = ("Printed %d pages on %s"):format(pageCount, tostring(selectedPrinter))
+    log(target.status, LogLevel.info)
     showSnackbar(("Printed %d pages"):format(pageCount), 1200)
     return true
 end
@@ -3380,18 +3422,21 @@ function downloadCurrentPage(tab)
     local currentUrl = trim(tostring(target.currentUrl or target.urlInput or ""))
     if currentUrl == "" then
         target.status = "Download failed: no active URL"
+        log(target.status, LogLevel.warn)
         return false
     end
 
     local body, finalUrl, headers, err = fetchTextResource(currentUrl, false)
     if not body then
         target.status = "Download failed: " .. tostring(err or "unknown error")
+        log(target.status, LogLevel.error)
         return false
     end
 
     local okStorage, storageErr = ensureStoragePaths()
     if not okStorage then
         target.status = "Download failed: " .. tostring(storageErr or "storage unavailable")
+        log(target.status, LogLevel.error)
         return false
     end
 
@@ -3428,10 +3473,12 @@ function downloadCurrentPage(tab)
     local okWrite, writeErr = writeTextFile(savePath, body)
     if not okWrite then
         target.status = "Download failed: " .. tostring(writeErr or "could not write file")
+        log(target.status, LogLevel.error)
         return false
     end
 
     target.status = ("Downloaded %d bytes to %s"):format(#tostring(body or ""), tostring(savePath))
+    log(target.status, LogLevel.info)
     showSnackbar("Download complete", 1200)
     return true
 end
@@ -3790,10 +3837,12 @@ function submitForm(tab, formId, submitterKey)
     ctx.err = select(4, fetchTextResource(ctx.requestUrl, true, ctx.requestOptions))
     if ctx.err then
         ctx.target.status = "Form submit failed: " .. tostring(ctx.err)
+        log(ctx.target.status .. " (" .. tostring(ctx.requestUrl) .. ")", LogLevel.warn)
         return false
     end
 
     ctx.target.status = "Form submitted"
+    log(ctx.target.status .. " (" .. tostring(ctx.requestUrl) .. ")", LogLevel.info)
     if startsWith(trim(ctx.target.currentUrl or ""):lower(), "about:") then
         refreshCurrentDocumentWithoutNavigation(ctx.target)
     end
@@ -4220,6 +4269,7 @@ function loadDocumentWithAbort(tab, normalized, allowFallback, requestOptions)
 
         if not ok then
             local safeError = tostring(errMsg)
+            log("document load task failed: " .. tostring(normalized) .. " (" .. safeError .. ")", LogLevel.error)
             local finalUrl = normalized
             local body = makeErrorPage(finalUrl, safeError)
             result = {
@@ -4479,6 +4529,9 @@ function finalizeAppletForTab(tab)
     local statusLine = nil
     if not runOk then
         statusLine = "Execution failed (" .. mode .. "): " .. runErr
+        log("applet execution failed (" .. tostring(mode) .. "): " .. tostring(runErr), LogLevel.error)
+    else
+        log("applet execution finished (" .. tostring(mode) .. "): " .. tostring(sourceUrl), LogLevel.info)
     end
 
     target.document = buildDocument(
@@ -4523,12 +4576,14 @@ function startLuaAppletSession(luaSource, sourceUrl, mode, tab)
     local contentWindow = ensureAppletWindowForTab(target, true)
     if not contentWindow then
         target.applet = nil
+        log("applet start failed: window init failed for " .. tostring(sourceUrl), LogLevel.error)
         return false, "Could not initialize applet window"
     end
 
     local session, sessionErr = sandbox.createAppletSession(luaSource, sourceUrl, mode, contentWindow)
     if not session then
         target.applet = nil
+        log("applet start failed (" .. tostring(mode) .. "): " .. tostring(sessionErr), LogLevel.error)
         return false, tostring(sessionErr or "Unknown applet startup error")
     end
 
@@ -4538,6 +4593,7 @@ function startLuaAppletSession(luaSource, sourceUrl, mode, tab)
         return true, nil
     end
     target.status = "Lua applet running (" .. mode .. "): " .. sourceUrl
+    log("applet started (" .. tostring(mode) .. "): " .. tostring(sourceUrl), LogLevel.info)
     return true, nil
 end
 
@@ -4575,6 +4631,7 @@ function handleAppletActionNavigation(url, tab)
     local pending = target.pendingApplet
     if not pending then
         local message = "No pending applet action in this tab."
+        log("applet action ignored: " .. tostring(message), LogLevel.warn)
         target.loading = false
         target.document = buildDocument(makeErrorPage(url, message), url)
         target.currentUrl = url
@@ -4596,6 +4653,7 @@ function handleAppletActionNavigation(url, tab)
 
     if selectedAction == "run" then
         local mode = normalizeAppletMode(params.mode)
+        log("applet action run requested (" .. tostring(mode) .. "): " .. tostring(sourceUrl), LogLevel.info)
         commitPendingAppletHistory(target, "Lua Applet: " .. sourceUrl)
         target.pendingApplet = {
             sourceUrl = sourceUrl,
@@ -4612,6 +4670,7 @@ function handleAppletActionNavigation(url, tab)
             target.document = buildDocument("<html><body></body></html>", sourceUrl)
             target.status = "Lua applet running (" .. mode .. "): " .. sourceUrl
         else
+            log("applet run request failed (" .. tostring(mode) .. "): " .. tostring(startErr), LogLevel.error)
             target.document = buildDocument(
                 buildLuaSourceHtml(
                     sourceUrl,
@@ -4625,6 +4684,7 @@ function handleAppletActionNavigation(url, tab)
             target.status = "Lua applet failed: " .. tostring(startErr)
         end
     else
+        log("applet action view source: " .. tostring(sourceUrl), LogLevel.info)
         commitPendingAppletHistory(target, "Lua Source: " .. sourceUrl)
         target.pendingApplet = {
             sourceUrl = sourceUrl,
@@ -4881,6 +4941,7 @@ function handleLuaNavigation(target, normalized, allowFallback, requestOptions, 
     target.loading = false
 
     if not body then
+        log("lua fetch failed: " .. tostring(normalized) .. " (" .. tostring(err or "Unknown error") .. ")", LogLevel.warn)
         local errUrl = normalized
         local errDocument = buildDocument(makeErrorPage(errUrl, err or "Unknown error"), errUrl)
         applyLoadedDocumentToTab(target, errUrl, errDocument, nil, nil)
@@ -4911,6 +4972,7 @@ function handleLuaNavigation(target, normalized, allowFallback, requestOptions, 
     applyLoadedDocumentToTab(target, resolvedUrl, promptDocument, nil, nil)
     target.pendingApplet = pendingApplet
     target.status = "Executable detected: " .. resolvedUrl
+    log("lua source loaded: " .. tostring(resolvedUrl), LogLevel.info)
     finalizeNavigationRender(target)
     return true
 end
@@ -4920,6 +4982,7 @@ function handleDocumentNavigation(target, normalized, allowFallback, requestOpti
     target.loading = false
     if aborted then
         target.status = "Load aborted"
+        log("document load aborted: " .. tostring(normalized), LogLevel.warn)
         draw()
         if scheduleAboutUpdateTimer then
             scheduleAboutUpdateTimer()
@@ -4938,6 +5001,7 @@ function handleDocumentNavigation(target, normalized, allowFallback, requestOpti
         settingsStickyStatus = result.settingsStickyStatus
     end
     if not document then
+        log("document render fallback error page: " .. tostring(normalized), LogLevel.warn)
         document = buildDocument(makeErrorPage(normalized, "Unknown error"), normalized)
     end
 
@@ -4947,6 +5011,7 @@ function handleDocumentNavigation(target, normalized, allowFallback, requestOpti
         addBrowserHistory(finalUrl, target.document and target.document.title or "")
     end
     finalizeNavigationRender(target)
+    log("document loaded: " .. tostring(finalUrl), LogLevel.info)
     return true
 end
 
@@ -4955,7 +5020,7 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     local normalized, inferred = normalizeInputUrl(rawInput)
     local normalizedLower = trim(tostring(normalized or "")):lower()
     local shouldAllowFallback = allowFallback or inferred
-    log("navigate " .. tostring(normalized), LogLevel.debug)
+    log("navigate " .. tostring(normalized), LogLevel.info)
     state.highUsage.loadingFrame = true
 
     stopAppletForTab(target, true)

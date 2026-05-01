@@ -219,13 +219,15 @@ return function(deps)
         end
 
         local stepInterval = 0.18
-        if now >= (carousel.pauseUntil or 0) then
+        if now < (carousel.pauseUntil or 0) then
+            carousel.lastTick = now
+        else
             local elapsed = now - (carousel.lastTick or now)
             local steps = math.floor(elapsed / stepInterval)
             if steps > 0 then
                 carousel.lastTick = (carousel.lastTick or now) + (steps * stepInterval)
                 for _ = 1, steps do
-                    local nextOffset = carousel.offset + carousel.dir
+                    local nextOffset = (carousel.offset or 0) + (carousel.dir or 1)
                     if nextOffset >= overflow then
                         carousel.offset = overflow
                         carousel.dir = -1
@@ -243,8 +245,6 @@ return function(deps)
                     end
                 end
             end
-        else
-            carousel.lastTick = now
         end
 
         local start = 1 + (carousel.offset or 0)
