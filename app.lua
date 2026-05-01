@@ -96,6 +96,8 @@ createUi = loadModule("ui/view.lua")
 createSandbox = loadModule("lib/sandbox.lua")
 createPrinting = loadModule("lib/printing.lua")
 createFormControls = loadModule("lib/form-controls.lua")
+createDisplayManager = loadModule("app/display/manager.lua")
+createTabState = loadModule("app/state/tabs.lua")
 local FIXED_BROWSER_DATA_DIR_CANDIDATES = {
     ".ccbrowser",
     "browser-data",
@@ -447,169 +449,72 @@ end
 local INTERNAL_MONITOR_ID = "internal"
 local INTERNAL_MONITOR_LABEL = "Internal Monitor"
 local NATIVE_TERM = (term and type(term.native) == "function" and term.native()) or (term and term.current and term.current()) or term
-local runtimeDisplayTarget = INTERNAL_MONITOR_ID
-local runtimeDisplayMonitorPeripheral = nil
-local startupMonitorOverride = nil
-local sessionMonitorOverride = nil
+local rerenderAllTabs
+local draw
 
-function normalizeMonitorChoice(value)
-    local raw = core.trim(tostring(value or ""))
-    local lowered = raw:lower()
-    if lowered == "" or lowered == "internal" or lowered == "computer" or lowered == "terminal" then
-        return INTERNAL_MONITOR_ID
-    end
-    return raw
-end
-
-function attachedMonitorNames()
-    local names = {}
-    if peripheral and type(peripheral.getNames) == "function" and type(peripheral.getType) == "function" then
-        for _, name in ipairs(peripheral.getNames()) do
-            if peripheral.getType(name) == "monitor" then
-                names[#names + 1] = tostring(name)
-            end
-        end
-    end
-    table.sort(names)
-    return names
-end
-
-function monitorExists(name)
-    local wanted = tostring(name or "")
-    if wanted == "" then
-        return false
-    end
-    for _, monitorName in ipairs(attachedMonitorNames()) do
-        if monitorName == wanted then
-            return true
-        end
-    end
-    return false
-end
-
-function listMonitorTargets()
-    local targets = {
-        { value = INTERNAL_MONITOR_ID, label = INTERNAL_MONITOR_LABEL },
-    }
-    for _, name in ipairs(attachedMonitorNames()) do
-        targets[#targets + 1] = { value = name, label = name }
-    end
-    return targets
-end
-
-function monitorSurface(choice)
-    local normalized = normalizeMonitorChoice(choice)
-    if normalized == INTERNAL_MONITOR_ID then
-        return NATIVE_TERM
-    end
-    if peripheral and type(peripheral.wrap) == "function" then
-        return peripheral.wrap(normalized)
-    end
-    return nil
-end
-
-function runOnSurface(surface, fn)
-    if not surface or type(fn) ~= "function" or not (term and type(term.redirect) == "function") then
-        return false
-    end
-    local previous = term.current and term.current() or nil
-    term.redirect(surface)
-    local ok, err = pcall(fn)
-    if previous then
-        term.redirect(previous)
-    elseif NATIVE_TERM then
-        term.redirect(NATIVE_TERM)
-    end
-    return ok, err
-end
-
-function clearSurface(choice, background, foreground)
-    local surface = monitorSurface(choice)
-    if not surface then
-        return false
-    end
-    local bg = background or currentDefaultBackgroundColorValue()
-    local fg = foreground or currentDefaultForegroundColorValue(bg)
-    runOnSurface(surface, function()
-        term.setCursorBlink(false)
-        term.setBackgroundColor(bg)
-        term.setTextColor(fg)
-        term.clear()
-        term.setCursorPos(1, 1)
-    end)
-    return true
-end
-
-function applyDisplayTarget(choice)
-    local normalized = normalizeMonitorChoice(choice)
-    local previousTarget = normalizeMonitorChoice(runtimeDisplayTarget or INTERNAL_MONITOR_ID)
-    local bg = currentDefaultBackgroundColorValue()
-    local fg = currentDefaultForegroundColorValue(bg)
-    if previousTarget ~= normalized then
-        clearSurface(previousTarget, bg, fg)
-    end
-    if normalized == INTERNAL_MONITOR_ID then
-        if term and type(term.redirect) == "function" and NATIVE_TERM then
-            term.redirect(NATIVE_TERM)
-        end
-        runtimeDisplayTarget = INTERNAL_MONITOR_ID
-        runtimeDisplayMonitorPeripheral = nil
-        return true, nil
-    end
-
-    if not monitorExists(normalized) then
-        return false, "Monitor not found: " .. tostring(normalized)
-    end
-    local wrapped = peripheral and type(peripheral.wrap) == "function" and peripheral.wrap(normalized) or nil
-    if not wrapped then
-        return false, "Could not access monitor: " .. tostring(normalized)
-    end
-
-    if term and type(term.redirect) == "function" then
-        term.redirect(wrapped)
-    end
-    runtimeDisplayTarget = normalized
-    runtimeDisplayMonitorPeripheral = normalized
-    return true, nil
-end
-
-function refreshDisplayTarget()
-    local function tryApply(choice)
-        local normalized = normalizeMonitorChoice(choice)
-        if normalized == INTERNAL_MONITOR_ID then
-            return applyDisplayTarget(INTERNAL_MONITOR_ID)
-        end
-        return applyDisplayTarget(normalized)
-    end
-
-    if startupMonitorOverride then
-        local okOverride = select(1, tryApply(startupMonitorOverride))
-        if okOverride then
-            return true, nil
-        end
-    end
-
-    if sessionMonitorOverride then
-        local okSession = select(1, tryApply(sessionMonitorOverride))
-        if okSession then
-            return true, nil
-        end
-        sessionMonitorOverride = nil
-    end
-
-    local okSetting = select(1, tryApply(browserSettings.default_monitor))
-    if okSetting then
-        return true, nil
-    end
-
-    applyDisplayTarget(INTERNAL_MONITOR_ID)
-    if not startupMonitorOverride and browserSettings.default_monitor ~= INTERNAL_MONITOR_ID then
-        browserSettings.default_monitor = INTERNAL_MONITOR_ID
+local displayManager = createDisplayManager({
+    core = core,
+    term = term,
+    peripheral = peripheral,
+    colors = colors,
+    appTitle = APP_TITLE,
+    internalMonitorId = INTERNAL_MONITOR_ID,
+    internalMonitorLabel = INTERNAL_MONITOR_LABEL,
+    nativeTerm = NATIVE_TERM,
+    browserSettings = browserSettings,
+    currentDefaultBackgroundColorValue = currentDefaultBackgroundColorValue,
+    currentDefaultForegroundColorValue = currentDefaultForegroundColorValue,
+    persistBrowserState = function()
         if persistBrowserState then
             persistBrowserState()
         end
-    end
-    return false, "Display target unavailable; switched to internal monitor."
+    end,
+    getState = function()
+        return state
+    end,
+    onDisplayChanged = function()
+        if rerenderAllTabs then
+            rerenderAllTabs()
+        end
+        if draw then
+            draw()
+        end
+    end,
+    onExitRequested = function()
+        if state then
+            state.running = false
+        end
+    end,
+    log = function(message, level)
+        if log then
+            log(message, level)
+        end
+    end,
+    logLevelWarn = LogLevel.warn,
+})
+
+function normalizeMonitorChoice(value)
+    return displayManager.normalizeMonitorChoice(value)
+end
+
+function attachedMonitorNames()
+    return displayManager.attachedMonitorNames()
+end
+
+function monitorExists(name)
+    return displayManager.monitorExists(name)
+end
+
+function listMonitorTargets()
+    return displayManager.listMonitorTargets()
+end
+
+function applyDisplayTarget(choice)
+    return displayManager.applyDisplayTarget(choice)
+end
+
+function refreshDisplayTarget()
+    return displayManager.refreshDisplayTarget()
 end
 
 function currentLogsDir()
@@ -836,9 +741,9 @@ function listBrowserSettings()
     copied.config_path = browserConfigPath()
     copied.history_path = browserHistoryPath()
     copied.default_monitor = tostring(browserSettings.default_monitor or INTERNAL_MONITOR_ID)
-    copied.active_monitor = tostring(runtimeDisplayTarget or INTERNAL_MONITOR_ID)
+    copied.active_monitor = tostring(displayManager.getRuntimeDisplayTarget() or INTERNAL_MONITOR_ID)
     copied.available_monitors = table.concat(attachedMonitorNames(), ",")
-    copied.monitor_override = tostring(startupMonitorOverride or "")
+    copied.monitor_override = tostring(displayManager.getStartupMonitorOverride() or "")
     copied.storage_ready = storageReady and "true" or "false"
     copied.storage_last_error = tostring(lastStorageError or "")
     local freeSpace = "unknown"
@@ -1138,13 +1043,11 @@ function setBrowserSetting(key, value)
             return false, "Invalid default_monitor value (monitor not found: " .. tostring(choice) .. ")"
         end
         browserSettings[normalized] = choice
-        sessionMonitorOverride = nil
+        displayManager.clearSessionOverride()
         if persistBrowserState then
             persistBrowserState()
         end
-        if not startupMonitorOverride then
-            refreshDisplayTarget()
-        end
+        refreshDisplayTarget()
         log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
         return true, nil
     end
@@ -1697,10 +1600,10 @@ local network = createNetwork(core, {
         clearHistory = clearBrowserHistory,
         listMonitors = listMonitorTargets,
         getActiveMonitor = function()
-            return runtimeDisplayTarget or INTERNAL_MONITOR_ID
+            return displayManager.getRuntimeDisplayTarget() or INTERNAL_MONITOR_ID
         end,
         getMonitorOverride = function()
-            return startupMonitorOverride or ""
+            return displayManager.getStartupMonitorOverride() or ""
         end,
     },
 })
@@ -1945,432 +1848,60 @@ state = {
     },
 }
 
-function activeTab()
-    if #state.tabs < 1 then
-        state.tabs[1] = createTab(homePageUrl())
-        state.activeTab = 1
-    end
-    state.activeTab = clamp(state.activeTab, 1, #state.tabs)
-    return state.tabs[state.activeTab]
-end
+local tabState = createTabState({
+    state = state,
+    clamp = clamp,
+    term = term,
+    effectiveTopBarRows = effectiveTopBarRows,
+    homePageUrl = homePageUrl,
+    createTab = createTab,
+    createEmptyLine = createEmptyLine,
+    buildDocument = buildDocument,
+    currentDefaultBackgroundColorValue = currentDefaultBackgroundColorValue,
+    currentDefaultForegroundColorValue = currentDefaultForegroundColorValue,
+    renderDocumentWindowLines = renderDocumentWindowLines,
+    pageOverflowYFromDocument = function(document)
+        return document and document.pageOverflowY or "visible"
+    end,
+    getStopAppletForTab = function()
+        return stopAppletForTab
+    end,
+    getFlushPausedAppletQueue = function()
+        return flushPausedAppletQueue
+    end,
+    PAUSED_APPLET_EVENT_MAX = PAUSED_APPLET_EVENT_MAX,
+})
 
-function syncAppletWindowVisibility()
-    local tabCount = #state.tabs
-    if tabCount < 1 then
-        return
-    end
-
-    local activeIndex = clamp(state.activeTab, 1, tabCount)
-    local showActive = not state.menuOpen and not state.modal.open
-
-    for index = 1, tabCount do
-        local tab = state.tabs[index]
-        local applet = tab and tab.applet or nil
-        local windowHandle = applet and applet.window or nil
-        if windowHandle and windowHandle.setVisible then
-            local shouldShow = showActive and index == activeIndex and applet.running == true
-            pcall(windowHandle.setVisible, shouldShow and true or false)
-        end
-    end
-end
-
-function clearUrlSelection(tab)
-    local target = tab or activeTab()
-    target.urlSelStart = nil
-    target.urlSelEnd = nil
-end
-
-function getUrlSelection(tab)
-    local target = tab or activeTab()
-    if target.urlSelStart == nil or target.urlSelEnd == nil then
-        return nil, nil
-    end
-
-    local maxPos = #target.urlInput + 1
-    local startPos = clamp(target.urlSelStart, 1, maxPos)
-    local endPos = clamp(target.urlSelEnd, 1, maxPos)
-    if startPos > endPos then
-        startPos, endPos = endPos, startPos
-    end
-    if startPos == endPos then
-        return nil, nil
-    end
-    return startPos, endPos
-end
-
-function getSelectedUrlText(tab)
-    local target = tab or activeTab()
-    local startPos, endPos = getUrlSelection(target)
-    if not startPos then
-        return ""
-    end
-    return target.urlInput:sub(startPos, endPos - 1)
-end
-
-function deleteUrlSelection(tab)
-    local target = tab or activeTab()
-    local startPos, endPos = getUrlSelection(target)
-    if not startPos then
-        return false
-    end
-
-    local before = target.urlInput:sub(1, startPos - 1)
-    local after = target.urlInput:sub(endPos)
-    target.urlInput = before .. after
-    target.urlCursor = startPos
-    clearUrlSelection(target)
-    return true
-end
-
-function clearPageSelection(tab)
-    local target = tab or activeTab()
-    target.pageSelection = nil
-end
-
-function bumpRenderRevision(tab)
-    local target = tab or activeTab()
-    target.renderRevision = (target.renderRevision or 0) + 1
-end
-
-function pageLineCount(tab)
-    local target = tab or activeTab()
-    local count = tonumber(target.pageContentHeight)
-    if not count then
-        count = #target.pageLines
-    end
-    return math.max(1, math.floor(count or 1))
-end
-
-function normalizedPageSelection(tab)
-    local target = tab or activeTab()
-    local selection = target.pageSelection
-    if not selection then
-        return nil
-    end
-
-    local startLine = selection.startLine or 1
-    local startCol = selection.startCol or 1
-    local endLine = selection.endLine or startLine
-    local endCol = selection.endCol or startCol
-
-    if (startLine > endLine) or (startLine == endLine and startCol > endCol) then
-        startLine, endLine = endLine, startLine
-        startCol, endCol = endCol, startCol
-    end
-
-    return {
-        startLine = startLine,
-        startCol = startCol,
-        endLine = endLine,
-        endCol = endCol,
-    }
-end
-
-function pageSelectionContains(selection, lineIndex, column)
-    if not selection then
-        return false
-    end
-    if lineIndex < selection.startLine or lineIndex > selection.endLine then
-        return false
-    end
-    if lineIndex == selection.startLine and column < selection.startCol then
-        return false
-    end
-    if lineIndex == selection.endLine and column > selection.endCol then
-        return false
-    end
-    return true
-end
-
-function setPageSelection(tab, startLine, startCol, endLine, endCol)
-    local target = tab or activeTab()
-    local w = math.max(1, target.viewportWidth or 1)
-    local maxLine = pageLineCount(target)
-
-    target.pageSelection = {
-        startLine = clamp(startLine, 1, maxLine),
-        startCol = clamp(startCol, 1, w),
-        endLine = clamp(endLine, 1, maxLine),
-        endCol = clamp(endCol, 1, w),
-    }
-end
-
-function selectAllPageText(tab)
-    local target = tab or activeTab()
-    local totalLines = pageLineCount(target)
-    if totalLines < 1 then
-        clearPageSelection(target)
-        return
-    end
-
-    local width = math.max(1, target.viewportWidth or 1)
-    setPageSelection(target, 1, 1, totalLines, width)
-end
-
-function getSelectedPageText(tab)
-    local target = tab or activeTab()
-    local selection = normalizedPageSelection(target)
-    if not selection then
-        return ""
-    end
-
-    local w = math.max(1, target.viewportWidth or 1)
-    local sourceLines = target.pageLines or {}
-    local missingRange = false
-    for lineIndex = selection.startLine, selection.endLine do
-        if sourceLines[lineIndex] == nil then
-            missingRange = true
-            break
-        end
-    end
-    if missingRange and target.document then
-        local requestedCount = selection.endLine - selection.startLine + 1
-        local windowLines = select(
-            1,
-            renderDocumentWindowLines(
-                target.document,
-                w,
-                selection.startLine,
-                requestedCount,
-                target.formState,
-                target.focusedFormControl
-            )
-        )
-        if type(windowLines) == "table" then
-            sourceLines = windowLines
-        end
-    end
-
-    local parts = {}
-    for lineIndex = selection.startLine, selection.endLine do
-        local startCol = (lineIndex == selection.startLine) and selection.startCol or 1
-        local endCol = (lineIndex == selection.endLine) and selection.endCol or w
-        startCol = clamp(startCol, 1, w)
-        endCol = clamp(endCol, 1, w)
-        if endCol < startCol then
-            startCol, endCol = endCol, startCol
-        end
-
-        local line = sourceLines[lineIndex] or target.pageLines[lineIndex]
-        local chars = {}
-        for x = startCol, endCol do
-            chars[#chars + 1] = (line and line.chars and line.chars[x]) or " "
-        end
-        parts[#parts + 1] = table.concat(chars):gsub("%s+$", "")
-    end
-
-    return table.concat(parts, "\n")
-end
-
-function pageHeight()
-    local _, h = term.getSize()
-    return math.max(1, h - effectiveTopBarRows())
-end
-
-function pageContentWidth(tab)
-    local target = tab or activeTab()
-    local w, _ = term.getSize()
-    return clamp(target.viewportWidth or w, 1, w)
-end
-
-function pageOverflowY(tab)
-    local target = tab or activeTab()
-    local mode = target and target.document and target.document.pageOverflowY or "visible"
-    if mode == "hidden" or mode == "scroll" or mode == "auto" then
-        return mode
-    end
-    return "visible"
-end
-
-function maxScroll(tab)
-    local target = tab or activeTab()
-    if pageOverflowY(target) == "hidden" then
-        return 0
-    end
-    return math.max(0, pageLineCount(target) - pageHeight())
-end
-
-function setScroll(value, tab)
-    local target = tab or activeTab()
-    target.scroll = clamp(value, 0, maxScroll(target))
-end
-
-function canGoBack(tab)
-    local target = tab or activeTab()
-    return target.historyIndex > 1
-end
-
-function canGoForward(tab)
-    local target = tab or activeTab()
-    return target.historyIndex > 0 and target.historyIndex < #target.history
-end
-
-function pushHistory(tab, url)
-    local target = tab or activeTab()
-    for i = #target.history, target.historyIndex + 1, -1 do
-        target.history[i] = nil
-    end
-    table.insert(target.history, url)
-    target.historyIndex = #target.history
-end
-
-function collapseExpandedTab()
-    state.expandedTabIndex = nil
-end
-
-function toggleExpandedTab(index)
-    if state.expandedTabIndex == index then
-        collapseExpandedTab()
-    else
-        state.expandedTabIndex = index
-    end
-end
-
-function activateTab(index)
-    if #state.tabs < 1 then
-        return
-    end
-    state.menuOpen = false
-    state.activeTab = clamp(index, 1, #state.tabs)
-    state.tabDrag = nil
-    state.scrollbarDrag = nil
-    if state.expandedTabIndex and state.expandedTabIndex ~= state.activeTab then
-        collapseExpandedTab()
-    end
-    syncAppletWindowVisibility()
-    if flushPausedAppletQueue then
-        flushPausedAppletQueue(activeTab(), PAUSED_APPLET_EVENT_MAX)
-    end
-end
-
-function moveTab(fromIndex, toIndex)
-    if fromIndex == toIndex then
-        return
-    end
-    if fromIndex < 1 or fromIndex > #state.tabs then
-        return
-    end
-    if toIndex < 1 or toIndex > #state.tabs then
-        return
-    end
-
-    local moved = table.remove(state.tabs, fromIndex)
-    table.insert(state.tabs, toIndex, moved)
-
-    if state.activeTab == fromIndex then
-        state.activeTab = toIndex
-    elseif fromIndex < state.activeTab and toIndex >= state.activeTab then
-        state.activeTab = state.activeTab - 1
-    elseif fromIndex > state.activeTab and toIndex <= state.activeTab then
-        state.activeTab = state.activeTab + 1
-    end
-
-    local expanded = state.expandedTabIndex
-    if expanded then
-        if expanded == fromIndex then
-            state.expandedTabIndex = toIndex
-        elseif fromIndex < expanded and toIndex >= expanded then
-            state.expandedTabIndex = expanded - 1
-        elseif fromIndex > expanded and toIndex <= expanded then
-            state.expandedTabIndex = expanded + 1
-        end
-    end
-end
-
-function newTab(initialUrl)
-    local tab = createTab(initialUrl or homePageUrl())
-    table.insert(state.tabs, tab)
-    collapseExpandedTab()
-    activateTab(#state.tabs)
-    return tab
-end
-
-function closeTab(index)
-    local targetIndex = clamp(index or state.activeTab, 1, #state.tabs)
-    if #state.tabs <= 1 then
-        local tab = activeTab()
-        if stopAppletForTab then
-            stopAppletForTab(tab, true)
-        end
-        tab.currentUrl = "about:blank"
-        tab.urlInput = "about:blank"
-        tab.urlCursor = #tab.urlInput + 1
-        tab.urlOffset = 0
-        clearUrlSelection(tab)
-        tab.urlFocus = false
-        tab.scroll = 0
-        tab.history = { "about:blank" }
-        tab.historyIndex = 1
-        tab.document = buildDocument("<html><body></body></html>", "about:blank")
-        tab.pageDefaultBackground = tab.document.defaultBackground or currentDefaultBackgroundColorValue()
-        tab.pageDefaultForeground = tab.document.defaultForeground
-            or currentDefaultForegroundColorValue(tab.pageDefaultBackground)
-        tab.pageLines = { createEmptyLine() }
-        tab.pageContentHeight = 1
-        tab.pageWindowStart = 1
-        tab.pageWindowEnd = 1
-        tab.renderRevision = 0
-        tab.lastRenderSignature = nil
-        tab.viewportWidth = 1
-        tab.showVerticalScrollbar = false
-        clearPageSelection(tab)
-        tab.formState = {}
-        tab.formMeta = nil
-        tab.focusedFormControl = nil
-        tab.loading = false
-        tab.status = ""
-        tab.aboutUpdateIntervalMs = nil
-        tab.settingsStickyStatus = nil
-        tab.pendingApplet = nil
-        tab.applet = nil
-        state.tabDrag = nil
-        state.scrollbarDrag = nil
-        state.menuOpen = false
-        collapseExpandedTab()
-        return
-    end
-
-    local removedTab = state.tabs[targetIndex]
-    if removedTab and stopAppletForTab then
-        stopAppletForTab(removedTab, true)
-    end
-    table.remove(state.tabs, targetIndex)
-    if targetIndex < state.activeTab then
-        state.activeTab = state.activeTab - 1
-    elseif targetIndex == state.activeTab and state.activeTab > #state.tabs then
-        state.activeTab = #state.tabs
-    end
-    state.activeTab = clamp(state.activeTab, 1, #state.tabs)
-    state.tabDrag = nil
-    state.scrollbarDrag = nil
-    state.menuOpen = false
-
-    local expanded = state.expandedTabIndex
-    if expanded then
-        if targetIndex == expanded then
-            collapseExpandedTab()
-        elseif targetIndex < expanded then
-            state.expandedTabIndex = expanded - 1
-        end
-    end
-end
-
-function closeActiveTab()
-    closeTab(state.activeTab)
-end
-
-function cycleTabs(direction)
-    if #state.tabs <= 1 then
-        return
-    end
-    local index = state.activeTab + direction
-    if index < 1 then
-        index = #state.tabs
-    elseif index > #state.tabs then
-        index = 1
-    end
-    activateTab(index)
-end
+activeTab = tabState.activeTab
+syncAppletWindowVisibility = tabState.syncAppletWindowVisibility
+clearUrlSelection = tabState.clearUrlSelection
+getUrlSelection = tabState.getUrlSelection
+getSelectedUrlText = tabState.getSelectedUrlText
+deleteUrlSelection = tabState.deleteUrlSelection
+clearPageSelection = tabState.clearPageSelection
+bumpRenderRevision = tabState.bumpRenderRevision
+pageLineCount = tabState.pageLineCount
+normalizedPageSelection = tabState.normalizedPageSelection
+pageSelectionContains = tabState.pageSelectionContains
+setPageSelection = tabState.setPageSelection
+selectAllPageText = tabState.selectAllPageText
+getSelectedPageText = tabState.getSelectedPageText
+pageHeight = tabState.pageHeight
+pageContentWidth = tabState.pageContentWidth
+pageOverflowY = tabState.pageOverflowY
+maxScroll = tabState.maxScroll
+setScroll = tabState.setScroll
+canGoBack = tabState.canGoBack
+canGoForward = tabState.canGoForward
+pushHistory = tabState.pushHistory
+collapseExpandedTab = tabState.collapseExpandedTab
+toggleExpandedTab = tabState.toggleExpandedTab
+activateTab = tabState.activateTab
+moveTab = tabState.moveTab
+newTab = tabState.newTab
+closeTab = tabState.closeTab
+closeActiveTab = tabState.closeActiveTab
+cycleTabs = tabState.cycleTabs
 
 function runningAppletTitle(tab)
     local applet = tab and tab.applet or nil
@@ -2443,7 +1974,6 @@ local layoutUi = ui.layoutUi
 local tabIndexAt = ui.tabIndexAt
 local tabCloseIndexAt = ui.tabCloseIndexAt
 local drawBase = ui.draw
-local draw
 local navigate
 local scheduleAboutUpdateTimer
 
@@ -3055,78 +2585,11 @@ function drawSnackbar()
 end
 
 function drawNativeMonitorControls()
-    local controls = state.monitorControls or {}
-    state.monitorControls = controls
-
-    if runtimeDisplayTarget == INTERNAL_MONITOR_ID or not NATIVE_TERM then
-        controls.visible = false
-        controls.switchButton = nil
-        controls.exitButton = nil
-        return
-    end
-
-    runOnSurface(NATIVE_TERM, function()
-        local w, h = term.getSize()
-        term.setCursorBlink(false)
-        term.setBackgroundColor(colors.black)
-        term.setTextColor(colors.white)
-        term.clear()
-
-        local title = APP_TITLE
-        local active = "Showing on: " .. tostring(runtimeDisplayTarget or INTERNAL_MONITOR_ID)
-        local helper = "Use the buttons below from this terminal."
-        term.setCursorPos(math.max(1, math.floor((w - #title) / 2) + 1), math.max(1, math.floor(h / 2) - 3))
-        term.write(title:sub(1, w))
-        term.setCursorPos(math.max(1, math.floor((w - #active) / 2) + 1), math.max(1, math.floor(h / 2) - 2))
-        term.write(active:sub(1, w))
-        term.setCursorPos(math.max(1, math.floor((w - #helper) / 2) + 1), math.max(1, math.floor(h / 2) - 1))
-        term.write(helper:sub(1, w))
-
-        local function drawButton(y, label, fg, bg)
-            local text = " " .. tostring(label or "") .. " "
-            if #text > w then
-                text = text:sub(1, w)
-            end
-            local x1 = math.max(1, math.floor((w - #text) / 2) + 1)
-            local x2 = math.min(w, x1 + #text - 1)
-            term.setCursorPos(x1, y)
-            term.setTextColor(fg)
-            term.setBackgroundColor(bg)
-            term.write(text)
-            return { x1 = x1, x2 = x2, y = y }
-        end
-
-        local switchY = math.max(1, math.floor(h / 2) + 1)
-        local exitY = math.min(h, switchY + 2)
-        controls.switchButton = drawButton(switchY, "Switch To Internal (One-Time)", colors.black, colors.lime)
-        controls.exitButton = drawButton(exitY, "Exit Browser", colors.white, colors.red)
-        controls.visible = true
-    end)
+    displayManager.drawNativeMonitorControls()
 end
 
 function handleNativeMonitorControlClick(button, x, y)
-    local controls = state.monitorControls
-    if runtimeDisplayTarget == INTERNAL_MONITOR_ID or not controls or not controls.visible then
-        return false
-    end
-    if button ~= 1 then
-        return true
-    end
-    if hitRegion(x, y, controls.switchButton) then
-        sessionMonitorOverride = INTERNAL_MONITOR_ID
-        local okDisplay, displayErr = refreshDisplayTarget()
-        if not okDisplay and displayErr and displayErr ~= "" then
-            log(displayErr, LogLevel.warn)
-        end
-        rerenderAllTabs()
-        draw()
-        return true
-    end
-    if hitRegion(x, y, controls.exitButton) then
-        state.running = false
-        return true
-    end
-    return true
+    return displayManager.handleNativeMonitorControlClick(button, x, y)
 end
 
 draw = function()
@@ -4169,35 +3632,10 @@ function submitForm(tab, formId, submitterKey)
     local currentAboutUrl = trim(ctx.target.currentUrl or ""):lower()
     if startsWith(currentAboutUrl, "about:history") then
         navigate(ctx.requestUrl, false, false, ctx.target, ctx.requestOptions)
-        focusHistorySearchInput(ctx.target)
     elseif startsWith(currentAboutUrl, "about:") then
         refreshCurrentDocumentWithoutNavigation(ctx.target)
     end
     return true
-end
-
-function focusHistorySearchInput(tab)
-    local target = tab or activeTab()
-    local formMeta = target.formMeta or {}
-    local controls = formMeta.controlsByKey or {}
-    for _, key in ipairs(formMeta.controlOrder or {}) do
-        local control = controls[key]
-        if control and control.tag == "input" then
-            local inputType = tostring(control.inputType or "text"):lower()
-            local name = trim(tostring(control.name or "")):lower()
-            if (inputType == "text" or inputType == "search") and name == "q" then
-                setFocusedFormControl(target, key)
-                local _, stateEntry = formControl(target, key)
-                if stateEntry then
-                    stateEntry.cursor = #tostring(stateEntry.value or "") + 1
-                end
-                target.urlFocus = false
-                bumpRenderRevision(target)
-                return true
-            end
-        end
-    end
-    return false
 end
 
 function cycleSelect(tab, control, stateEntry, direction)
@@ -6413,10 +5851,7 @@ function bootstrap(initialUrls, startupFullscreenMode, startupMonitorChoice)
         state.initialTermForeground = NATIVE_TERM.getTextColor()
     end
 
-    startupMonitorOverride = normalizeMonitorChoice(startupMonitorChoice)
-    if startupMonitorOverride == INTERNAL_MONITOR_ID then
-        startupMonitorOverride = nil
-    end
+    displayManager.setStartupMonitorChoice(startupMonitorChoice)
     local okDisplay, displayErr = refreshDisplayTarget()
     if not okDisplay and displayErr and displayErr ~= "" then
         log(displayErr, LogLevel.warn)
@@ -6679,7 +6114,7 @@ function processFrameAfterEvent(frameStart)
 end
 
 function processBrowserEvent(event, frameStart)
-    if runtimeDisplayTarget ~= INTERNAL_MONITOR_ID
+    if displayManager.getRuntimeDisplayTarget() ~= INTERNAL_MONITOR_ID
         and event[5] ~= "monitor_touch"
         and (event[1] == "mouse_click" or event[1] == "mouse_drag" or event[1] == "mouse_up" or event[1] == "mouse_scroll") then
         if event[1] == "mouse_click" then
@@ -6716,13 +6151,18 @@ function processBrowserEvent(event, frameStart)
 end
 
 function processNextBrowserEvent()
+    if scheduleAnimationTick then
+        scheduleAnimationTick()
+    end
     state.lastPulledEvent = { os.pullEvent() }
     if state.lastPulledEvent[1] == "monitor_touch" then
-        if runtimeDisplayMonitorPeripheral and state.lastPulledEvent[2] == runtimeDisplayMonitorPeripheral then
+        local monitorPeripheral = displayManager.getRuntimeDisplayMonitorPeripheral()
+        if monitorPeripheral and state.lastPulledEvent[2] == monitorPeripheral then
             state.lastPulledEvent = { "mouse_click", 1, state.lastPulledEvent[3], state.lastPulledEvent[4], "monitor_touch" }
         end
     elseif state.lastPulledEvent[1] == "peripheral_detach" or state.lastPulledEvent[1] == "peripheral" then
-        if runtimeDisplayMonitorPeripheral and state.lastPulledEvent[2] == runtimeDisplayMonitorPeripheral then
+        local monitorPeripheral = displayManager.getRuntimeDisplayMonitorPeripheral()
+        if monitorPeripheral and state.lastPulledEvent[2] == monitorPeripheral then
             refreshDisplayTarget()
             if state.running then
                 rerenderAllTabs()
@@ -6752,11 +6192,7 @@ function shutdownBrowserUi()
     term.setCursorBlink(false)
     local bg = state.initialTermBackground or colors.black
     local fg = state.initialTermForeground or colors.white
-    clearSurface(runtimeDisplayTarget or INTERNAL_MONITOR_ID, bg, fg)
-    clearSurface(INTERNAL_MONITOR_ID, bg, fg)
-    if term and type(term.redirect) == "function" and NATIVE_TERM then
-        term.redirect(NATIVE_TERM)
-    end
+    displayManager.shutdownDisplay(bg, fg)
     term.setBackgroundColor(bg)
     term.setTextColor(fg)
     term.clear()

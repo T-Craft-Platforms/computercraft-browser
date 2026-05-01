@@ -42,17 +42,10 @@
     <p><code>{{STATUS_MESSAGE}}</code></p>
     <p>{{HISTORY_HINT}}</p>
     <p>Total entries: <code>{{HISTORY_COUNT}}</code></p>
-    <p>{{HISTORY_SEARCH_STATUS}}</p>
 
     <h2>Actions</h2>
     <p><a href="{{CLEAR_ALL_URL}}">Delete all history</a></p>
     <p><a href="about:settings">Settings</a> | <a href="about:home">Home</a></p>
-
-    <h2>Search</h2>
-    <form method="get" action="about:history">
-      <input type="text" name="q" value="{{HISTORY_SEARCH_QUERY}}" placeholder="Search title, URL, or timestamp">
-      <input type="submit" value="Search">
-    </form>
 
     <h2>Entries (chronological)</h2>
     {{HISTORY_GROUPS}}

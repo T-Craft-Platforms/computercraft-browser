@@ -399,15 +399,6 @@ return function(core, options)
     local function renderHistoryPage(template, url, params)
         local statusMessage = "Ready."
         local action = trim(tostring(params.action or "")):lower()
-        local query = trim(tostring(params.q or params.search or ""))
-
-        local function appendSearchParam(targetUrl)
-            if query == "" then
-                return targetUrl
-            end
-            local separator = targetUrl:find("?", 1, true) and "&" or "?"
-            return targetUrl .. separator .. "q=" .. urlEncode(query)
-        end
 
         if action == "delete_entry" then
             if type(aboutApi.removeHistoryEntry) ~= "function" then
@@ -466,25 +457,9 @@ return function(core, options)
             entries = newestFirst
         end
 
-        local normalizedQuery = trim(query):lower()
-        if normalizedQuery ~= "" then
-            local filtered = {}
-            for _, entry in ipairs(entries) do
-                local title = trim(tostring(entry.title or "")):lower()
-                local entryUrl = tostring(entry.url or ""):lower()
-                local stamp = trim(tostring(entry.timestamp or "")):lower()
-                if title:find(normalizedQuery, 1, true)
-                    or entryUrl:find(normalizedQuery, 1, true)
-                    or stamp:find(normalizedQuery, 1, true) then
-                    filtered[#filtered + 1] = entry
-                end
-            end
-            entries = filtered
-        end
-
         local groupsMarkup = {}
         if #entries == 0 then
-            groupsMarkup[#groupsMarkup + 1] = "<p><i>No matching history entries.</i></p>"
+            groupsMarkup[#groupsMarkup + 1] = "<p><i>No history entries yet.</i></p>"
         else
             local currentDay = nil
             local openedList = false
@@ -499,7 +474,7 @@ return function(core, options)
                     end
                     currentDay = day
                     openedList = true
-                    local deleteDayUrl = appendSearchParam("about:history?action=delete_day&day=" .. urlEncode(day))
+                    local deleteDayUrl = "about:history?action=delete_day&day=" .. urlEncode(day)
                     groupsMarkup[#groupsMarkup + 1] = ("<h3>%s</h3><p><a href=\"%s\">Delete this day</a></p><ul>")
                         :format(escapeHtml(day), escapeHtml(deleteDayUrl))
                 end
@@ -513,9 +488,8 @@ return function(core, options)
                 if timestamp == "" then
                     timestamp = day
                 end
-                local deleteEntryUrl = appendSearchParam(
+                local deleteEntryUrl =
                     "about:history?action=delete_entry&key=" .. urlEncode(tostring(entry.key or ""))
-                )
                 groupsMarkup[#groupsMarkup + 1] =
                     ("<li><code>%s</code> <a href=\"%s\">%s</a> <a href=\"%s\">[delete]</a></li>")
                         :format(escapeHtml(timestamp), escapeHtml(entryUrl), escapeHtml(entryTitle), escapeHtml(deleteEntryUrl))
@@ -528,10 +502,7 @@ return function(core, options)
         local historyHint = historyEnabled
             and "History tracking is enabled."
             or "History tracking is disabled."
-        local historyCountText = tostring(#entries)
-        if normalizedQuery ~= "" then
-            historyCountText = ("%d / %d"):format(#entries, totalEntriesCount)
-        end
+        local historyCountText = tostring(totalEntriesCount)
 
         local tokenValues = {
             APP_TITLE = escapeHtml(tostring(aboutApi.appTitle or "CC Browser")),
@@ -541,10 +512,8 @@ return function(core, options)
             STATUS_MESSAGE = escapeHtml(statusMessage),
             HISTORY_HINT = escapeHtml(historyHint),
             HISTORY_COUNT = historyCountText,
-            HISTORY_SEARCH_QUERY = escapeHtml(query),
-            HISTORY_SEARCH_STATUS = normalizedQuery ~= "" and ("Filtered by \"" .. escapeHtml(query) .. "\".") or "Showing all entries.",
             HISTORY_GROUPS = table.concat(groupsMarkup),
-            CLEAR_ALL_URL = escapeHtml(appendSearchParam("about:history?action=clear_all")),
+            CLEAR_ALL_URL = escapeHtml("about:history?action=clear_all"),
         }
         return applyTemplateTokens(template, tokenValues)
     end
