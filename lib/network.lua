@@ -122,12 +122,41 @@ return function(core, options)
     end
 
     local function loadAboutPage(pageName)
-        local filePath = fs.combine(aboutPagesDir, pageName .. ".html")
-        local body, err = readLocalFile(filePath)
-        if not body then
-            return nil, err
+        local htmlPath = fs.combine(aboutPagesDir, pageName .. ".html")
+        if fs.exists(htmlPath) and not fs.isDir(htmlPath) then
+            return readLocalFile(htmlPath)
         end
-        return body, nil
+
+        local luaPath = fs.combine(aboutPagesDir, pageName .. ".lua")
+        if fs.exists(luaPath) and not fs.isDir(luaPath) then
+            local okLoad, loadedOrErr = pcall(dofile, luaPath)
+            if not okLoad then
+                return nil, "Failed to execute about page: " .. tostring(loadedOrErr)
+            end
+
+            local rendered = loadedOrErr
+            if type(rendered) == "function" then
+                local okRender, renderedOrErr = pcall(rendered, {
+                    page = pageName,
+                    aboutApi = aboutApi,
+                    core = core,
+                })
+                if not okRender then
+                    return nil, "Failed to render about page: " .. tostring(renderedOrErr)
+                end
+                rendered = renderedOrErr
+            end
+
+            if type(rendered) == "table" then
+                rendered = rendered.body or rendered.html or rendered[1]
+            end
+            if rendered == nil then
+                rendered = ""
+            end
+            return tostring(rendered), nil
+        end
+
+        return nil, "File not found: " .. htmlPath .. " or " .. luaPath
     end
 
     local function decodeQueryComponent(value)
@@ -583,13 +612,6 @@ return function(core, options)
                 elseif choice == "custom" then
                     value = tostring(params.home_page_custom or "")
                 end
-            elseif key == "turtle_mode" then
-                local choice = trim(tostring(params.turtle_mode_choice or "")):lower()
-                if choice == "enabled" then
-                    value = "true"
-                elseif choice == "disabled" then
-                    value = "false"
-                end
             elseif key == "usage_guard_enabled" then
                 local choice = trim(tostring(params.usage_guard_choice or "")):lower()
                 if choice == "enabled" then
@@ -682,13 +704,9 @@ return function(core, options)
             customValue = homePageValue
         end
 
-        local turtleModeEnabled = isEnabled(settings.turtle_mode, false)
         local historyEnabled = isEnabled(settings.history_enabled, true)
         local usageGuardEnabled = isEnabled(settings.usage_guard_enabled, true)
         local pauseAppletsEnabled = isEnabled(settings.pause_inactive_applets, true)
-        if turtleModeEnabled then
-            usageGuardEnabled = false
-        end
 
         local fullscreenModeChoice = trim(tostring(settings.fullscreen_mode or "normal")):lower()
         if fullscreenModeChoice ~= "seamless" and fullscreenModeChoice ~= "seemless" then
@@ -739,8 +757,6 @@ return function(core, options)
             HOME_PAGE_RADIO_BLANK_CHECKED = selectedChoice == "about:blank" and "checked" or "",
             HOME_PAGE_RADIO_CUSTOM_CHECKED = selectedChoice == "custom" and "checked" or "",
             HOME_PAGE_CUSTOM_VALUE = escapeHtml(customValue),
-            TURTLE_MODE_RADIO_ENABLED_CHECKED = turtleModeEnabled and "checked" or "",
-            TURTLE_MODE_RADIO_DISABLED_CHECKED = turtleModeEnabled and "" or "checked",
             HISTORY_RADIO_ENABLED_CHECKED = historyEnabled and "checked" or "",
             HISTORY_RADIO_DISABLED_CHECKED = historyEnabled and "" or "checked",
             USAGE_GUARD_RADIO_ENABLED_CHECKED = usageGuardEnabled and "checked" or "",

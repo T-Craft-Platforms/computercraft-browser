@@ -190,7 +190,6 @@ local BROWSER_LEGACY_STATE_PATH = fs.combine(BROWSER_SETTINGS_DIR, "browser-stat
 
 local browserSettings = {
     home_page = "about:home",
-    turtle_mode = "false",
     history_enabled = "true",
     usage_guard_enabled = "true",
     pause_inactive_applets = "true",
@@ -218,9 +217,6 @@ function normalizeSettingKey(key)
     local normalized = tostring(key or ""):lower()
     normalized = normalized:gsub("[^%w_%-]", "_")
     normalized = normalized:gsub("_+", "_")
-    if normalized == "virtual_views" then
-        return "turtle_mode"
-    end
     if normalized == "fullscreen" then
         return "fullscreen_mode"
     end
@@ -607,7 +603,6 @@ end
 
 local MUTABLE_SETTING_KEYS = {
     home_page = true,
-    turtle_mode = true,
     history_enabled = true,
     usage_guard_enabled = true,
     pause_inactive_applets = true,
@@ -679,20 +674,6 @@ function setBrowserSetting(key, value)
     if not MUTABLE_SETTING_KEYS[normalized] then
         return false, "Unsupported setting key"
     end
-    if normalized == "turtle_mode" then
-        local parsed = parseBooleanSetting(value)
-        if parsed == nil then
-            return false, "Invalid turtle_mode value (expected true/false)"
-        end
-        browserSettings[normalized] = parsed and "true" or "false"
-        if parsed then
-            browserSettings.usage_guard_enabled = "false"
-        end
-        if persistBrowserState then
-            persistBrowserState()
-        end
-        return true, nil
-    end
     if normalized == "history_enabled" then
         return setBooleanBrowserSetting(normalized, value)
     end
@@ -700,10 +681,6 @@ function setBrowserSetting(key, value)
         local parsed = parseBooleanSetting(value)
         if parsed == nil then
             return false, "Invalid usage_guard_enabled value (expected true/false)"
-        end
-        if parsed and settingEnabledRaw("turtle_mode", false) then
-            browserSettings[normalized] = "false"
-            return false, "usage_guard_enabled cannot be enabled while turtle_mode is enabled"
         end
         browserSettings[normalized] = parsed and "true" or "false"
         if persistBrowserState then
@@ -1034,8 +1011,7 @@ function applyDecodedConfig(decoded)
                     if homePage ~= "" then
                         browserSettings[normalized] = homePage
                     end
-                elseif normalized == "turtle_mode"
-                    or normalized == "history_enabled"
+                elseif normalized == "history_enabled"
                     or normalized == "usage_guard_enabled"
                     or normalized == "pause_inactive_applets" then
                     local parsed = parseBooleanSetting(rawValue)
@@ -1051,9 +1027,6 @@ function applyDecodedConfig(decoded)
     browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
     browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
     browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
-    if settingEnabledRaw("turtle_mode", false) then
-        browserSettings.usage_guard_enabled = "false"
-    end
 
     browserFavorites = {}
     if type(decoded.favorites) == "table" then
@@ -1291,14 +1264,7 @@ function homePageUrl()
     return homePage
 end
 
-function turtleModeEnabled()
-    return settingEnabledRaw("turtle_mode", false)
-end
-
 function usageGuardEnabled()
-    if turtleModeEnabled() then
-        return false
-    end
     return settingEnabledRaw("usage_guard_enabled", true)
 end
 
@@ -1462,7 +1428,6 @@ state = {
     running = true,
     initialTermBackground = nil,
     initialTermForeground = nil,
-    syntheticCharPending = false,
     ctrlDown = false,
     shiftDown = false,
     highUsage = {
@@ -1996,7 +1961,6 @@ local scheduleAboutUpdateTimer
 
 function renderDocument(tab)
     local target = tab or activeTab()
-    local turtleMode = turtleModeEnabled()
     local w, h = term.getSize()
     local visibleHeight = pageHeight()
 
@@ -2004,7 +1968,6 @@ function renderDocument(tab)
         local focusKey = target.focusedFormControl or ""
         return table.concat({
             tostring(target.document),
-            turtleMode and "turtle" or "full",
             tostring(w),
             tostring(h),
             tostring(pageOverflowY(target)),
@@ -2037,19 +2000,9 @@ function renderDocument(tab)
         return
     end
 
-    local viewportStart = math.max(1, (target.scroll or 0) + 1)
-    local viewportEnd = viewportStart + visibleHeight - 1
     local renderSignature = makeRenderSignature()
     if target.lastRenderSignature == renderSignature then
-        if turtleMode then
-            local windowStart = tonumber(target.pageWindowStart) or 1
-            local windowEnd = tonumber(target.pageWindowEnd) or 0
-            if viewportStart >= windowStart and viewportEnd <= windowEnd then
-                return
-            end
-        else
-            return
-        end
+        return
     end
 
     local requestedScroll = target.scroll or 0
@@ -2063,46 +2016,17 @@ function renderDocument(tab)
     local lines = {}
     local formMeta = nil
     local totalLines = 1
-    local windowStart = 1
-    local windowEnd = 1
-
-    if turtleMode then
-        local overscan = math.max(2, math.floor(visibleHeight / 3))
-        local windowLineCount = visibleHeight + (overscan * 2)
-
-        local function renderWindowAt(widthValue, startLine)
-            local linesOut, metaOut, totalOut = renderDocumentWindowLines(
-                target.document,
-                widthValue,
-                startLine,
-                windowLineCount,
-                target.formState,
-                target.focusedFormControl
-            )
-            totalOut = math.max(1, tonumber(totalOut) or (#linesOut or 0))
-            return linesOut or {}, metaOut, totalOut
-        end
-
-        windowStart = math.max(1, requestedScroll + 1 - overscan)
-        lines, formMeta, totalLines = renderWindowAt(contentWidth, windowStart)
-        if (not reserveScrollbar) and canShowScrollbarColumn and allowVerticalScrolling and totalLines > visibleHeight then
-            reserveScrollbar = true
-            contentWidth = math.max(1, w - 1)
-            lines, formMeta, totalLines = renderWindowAt(contentWidth, windowStart)
-        end
-
-        target.pageContentHeight = totalLines
-        target.viewportWidth = contentWidth
-        target.showVerticalScrollbar = reserveScrollbar and allowVerticalScrolling
-        setScroll(requestedScroll, target)
-
-        if target.scroll ~= requestedScroll then
-            windowStart = math.max(1, target.scroll + 1 - overscan)
-            lines, formMeta, totalLines = renderWindowAt(contentWidth, windowStart)
-        end
-
-        windowEnd = windowStart + windowLineCount - 1
-    else
+    lines, formMeta = renderDocumentLines(
+        target.document,
+        contentWidth,
+        target.formState,
+        target.focusedFormControl
+    )
+    lines = lines or { createEmptyLine() }
+    totalLines = math.max(1, #lines)
+    if (not reserveScrollbar) and canShowScrollbarColumn and allowVerticalScrolling and totalLines > visibleHeight then
+        reserveScrollbar = true
+        contentWidth = math.max(1, w - 1)
         lines, formMeta = renderDocumentLines(
             target.document,
             contentWidth,
@@ -2111,31 +2035,17 @@ function renderDocument(tab)
         )
         lines = lines or { createEmptyLine() }
         totalLines = math.max(1, #lines)
-        if (not reserveScrollbar) and canShowScrollbarColumn and allowVerticalScrolling and totalLines > visibleHeight then
-            reserveScrollbar = true
-            contentWidth = math.max(1, w - 1)
-            lines, formMeta = renderDocumentLines(
-                target.document,
-                contentWidth,
-                target.formState,
-                target.focusedFormControl
-            )
-            lines = lines or { createEmptyLine() }
-            totalLines = math.max(1, #lines)
-        end
-
-        target.pageContentHeight = totalLines
-        target.viewportWidth = contentWidth
-        target.showVerticalScrollbar = reserveScrollbar and allowVerticalScrolling
-        setScroll(requestedScroll, target)
-        windowStart = 1
-        windowEnd = totalLines
     end
+
+    target.pageContentHeight = totalLines
+    target.viewportWidth = contentWidth
+    target.showVerticalScrollbar = reserveScrollbar and allowVerticalScrolling
+    setScroll(requestedScroll, target)
 
     target.pageLines = lines
     target.pageContentHeight = totalLines
-    target.pageWindowStart = windowStart
-    target.pageWindowEnd = windowEnd
+    target.pageWindowStart = 1
+    target.pageWindowEnd = totalLines
     local pageBg = target.document.defaultBackground or currentDefaultBackgroundColorValue()
     local pageFg = target.document.defaultForeground or currentDefaultForegroundColorValue(pageBg)
     target.pageDefaultBackground = pageBg
@@ -2807,7 +2717,6 @@ function handleModalEvent(event)
         elseif key == keys.leftShift or key == keys.rightShift then
             state.shiftDown = false
         end
-        spec.syntheticCharPending = false
         return true
     end
 
@@ -2852,15 +2761,6 @@ function handleModalEvent(event)
                 deleteModalInputForward(spec)
                 draw()
                 return true
-            end
-            if not state.ctrlDown then
-                local typed = keyToPrintableText(key, state.shiftDown)
-                if typed and typed ~= "" then
-                    appendModalInput(spec, typed)
-                    spec.syntheticCharPending = true
-                    draw()
-                    return true
-                end
             end
         end
         local action = nil
@@ -2917,17 +2817,12 @@ function handleModalEvent(event)
     end
 
     if name == "char" and ensureModalInput(spec) then
-        if spec.syntheticCharPending then
-            spec.syntheticCharPending = false
-            return true
-        end
         appendModalInput(spec, event[2] or "")
         draw()
         return true
     end
 
     if name == "paste" and ensureModalInput(spec) then
-        spec.syntheticCharPending = false
         appendModalInput(spec, event[2] or "")
         draw()
         return true
@@ -3027,19 +2922,6 @@ function printablePageLines(tab)
     local width = math.max(1, tonumber(target.viewportWidth) or tonumber(terminalWidth) or 1)
     local lines = target.pageLines or { createEmptyLine() }
     local totalLines = math.max(1, pageLineCount(target))
-
-    if turtleModeEnabled() and target.document then
-        local fullLines = renderDocumentLines(
-            target.document,
-            width,
-            target.formState,
-            target.focusedFormControl
-        )
-        if type(fullLines) == "table" and #fullLines > 0 then
-            lines = fullLines
-            totalLines = math.max(1, #fullLines)
-        end
-    end
 
     local output = {}
     for index = 1, totalLines do
@@ -5479,67 +5361,6 @@ function pasteClipboardText()
     return true
 end
 
-function keyToPrintableText(key, shifted)
-    if key == nil then
-        return nil
-    end
-    if keys and keys.a and keys.z and key >= keys.a and key <= keys.z then
-        local base = string.byte("a")
-        local ch = string.char(base + (key - keys.a))
-        if shifted then
-            ch = ch:upper()
-        end
-        return ch
-    end
-    if key == keys.space then
-        return " "
-    end
-    if key == keys.zero then
-        return shifted and ")" or "0"
-    elseif key == keys.one then
-        return shifted and "!" or "1"
-    elseif key == keys.two then
-        return shifted and "@" or "2"
-    elseif key == keys.three then
-        return shifted and "#" or "3"
-    elseif key == keys.four then
-        return shifted and "$" or "4"
-    elseif key == keys.five then
-        return shifted and "%" or "5"
-    elseif key == keys.six then
-        return shifted and "^" or "6"
-    elseif key == keys.seven then
-        return shifted and "&" or "7"
-    elseif key == keys.eight then
-        return shifted and "*" or "8"
-    elseif key == keys.nine then
-        return shifted and "(" or "9"
-    elseif key == keys.minus then
-        return shifted and "_" or "-"
-    elseif key == keys.equals then
-        return shifted and "+" or "="
-    elseif key == keys.leftBracket then
-        return shifted and "{" or "["
-    elseif key == keys.rightBracket then
-        return shifted and "}" or "]"
-    elseif key == keys.backslash then
-        return shifted and "|" or "\\"
-    elseif key == keys.semicolon then
-        return shifted and ":" or ";"
-    elseif key == keys.apostrophe then
-        return shifted and "\"" or "'"
-    elseif key == keys.grave then
-        return shifted and "~" or "`"
-    elseif key == keys.comma then
-        return shifted and "<" or ","
-    elseif key == keys.period then
-        return shifted and ">" or "."
-    elseif key == keys.slash then
-        return shifted and "?" or "/"
-    end
-    return nil
-end
-
 function handleKeyDown(key, appletContext)
     if key ~= keys.v then
         state.skipNextPaste = false
@@ -5652,23 +5473,6 @@ function handleKeyDown(key, appletContext)
             end
         end
         return
-    end
-
-    if not state.ctrlDown then
-        local typed = keyToPrintableText(key, state.shiftDown)
-        if typed and typed ~= "" then
-            local tab = activeTab()
-            if tab.urlFocus then
-                insertUrlText(typed)
-                state.syntheticCharPending = true
-                return
-            end
-            if handleFocusedFormControlChar(tab, typed) then
-                bumpRenderRevision(tab)
-                state.syntheticCharPending = true
-                return
-            end
-        end
     end
 
     local tab = activeTab()
@@ -5790,10 +5594,6 @@ function handleTimer(timerId)
 end
 
 function handleChar(character)
-    if state.syntheticCharPending then
-        state.syntheticCharPending = false
-        return
-    end
     local byte = character and string.byte(character, 1) or nil
     if byte and byte >= 1 and byte <= 31 then
         if byte == 1 then
@@ -6140,10 +5940,6 @@ end
 function processNextBrowserEvent()
     state.lastPulledEvent = { os.pullEvent() }
     state.highUsage.loadingFrame = false
-
-    if state.syntheticCharPending and state.lastPulledEvent[1] ~= "char" then
-        state.syntheticCharPending = false
-    end
 
     if state.skipNextPaste and state.lastPulledEvent[1] ~= "paste" and state.lastPulledEvent[1] ~= "key_up" then
         state.skipNextPaste = false
