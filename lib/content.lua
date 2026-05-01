@@ -35,7 +35,7 @@ end
 
 local function looksLikeBrowserRoot(path)
     local root = normalizeDir(path)
-    local appPath = fs.combine(root, "app.lua")
+    local appPath = fs.combine(root, "main.lua")
     local corePath = fs.combine(root, "lib/core.lua")
     local featurePath = fs.combine(root, "lib/content-features/01_style_and_css.lua")
     return fs.exists(appPath) and not fs.isDir(appPath)

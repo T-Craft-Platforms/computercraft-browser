@@ -1,26 +1,4 @@
-local function readAll(path)
-    local handle, err = fs.open(path, "r")
-    if not handle then
-        error(("Failed to open %s: %s"):format(path, tostring(err)), 2)
-    end
-    local data = handle.readAll() or ""
-    handle.close()
-    return data
-end
-
-local function loadChunk(source, name)
-    local chunk, err = load(source, name, "t", _ENV)
-    if not chunk and type(loadstring) == "function" then
-        chunk, err = loadstring(source, name)
-        if chunk and type(setfenv) == "function" and type(getfenv) == "function" then
-            setfenv(chunk, getfenv(1))
-        end
-    end
-    if not chunk then
-        error(("Failed to compile %s: %s"):format(name, tostring(err)), 2)
-    end
-    return chunk
-end
+local APP_TITLE = "CC Browser"
 
 local function normalizeDir(path)
     local normalized = fs.combine(tostring(path or ""), "")
@@ -35,15 +13,13 @@ end
 
 local function looksLikeBrowserRoot(path)
     local root = normalizeDir(path)
-    local appPath = fs.combine(root, "app.lua")
+    local appPath = fs.combine(root, "main.lua")
     local corePath = fs.combine(root, "lib/core.lua")
-    local featurePath = fs.combine(root, "app/features/01_bootstrap.lua")
     return fs.exists(appPath) and not fs.isDir(appPath)
         and fs.exists(corePath) and not fs.isDir(corePath)
-        and fs.exists(featurePath) and not fs.isDir(featurePath)
 end
 
-local function resolveScriptDir()
+local function resolveBrowserRoot()
     local candidates = {}
     local function push(path)
         if not path or path == "" then
@@ -52,13 +28,9 @@ local function resolveScriptDir()
         candidates[#candidates + 1] = normalizeDir(path)
     end
 
-    if type(CC_BROWSER_BASE_DIR) == "string" and CC_BROWSER_BASE_DIR ~= "" then
-        push(CC_BROWSER_BASE_DIR)
-    end
-
     if debug and type(debug.getinfo) == "function" then
-        local ok, info = pcall(debug.getinfo, 1, "S")
-        if ok and type(info) == "table" and type(info.source) == "string" then
+        local okInfo, info = pcall(debug.getinfo, 1, "S")
+        if okInfo and type(info) == "table" and type(info.source) == "string" then
             local source = tostring(info.source or "")
             if source:sub(1, 1) == "@" then
                 push(fs.getDir(source:sub(2)))
@@ -96,32 +68,59 @@ local function resolveScriptDir()
         end
     end
 
-    if type(CC_BROWSER_BASE_DIR) == "string" and CC_BROWSER_BASE_DIR ~= "" then
-        return normalizeDir(CC_BROWSER_BASE_DIR)
-    end
     if shell and type(shell.dir) == "function" then
         return normalizeDir(shell.dir())
     end
     return "."
 end
 
-local scriptDir = resolveScriptDir()
-local featuresDir = fs.combine(scriptDir, "app/features")
-local featureFiles = {
-    "01_bootstrap.lua",
-    "02_settings_state.lua",
-    "03_tabs_modal_render.lua",
-    "04_page_actions_forms.lua",
-    "05_navigation_applets.lua",
-    "06_input_handlers.lua",
-    "07_runtime_loop.lua",
-}
-
-local chunks = {}
-for i = 1, #featureFiles do
-    local path = fs.combine(featuresDir, featureFiles[i])
-    chunks[#chunks + 1] = readAll(path)
+local browserRoot = resolveBrowserRoot()
+local appPath = fs.combine(browserRoot, "main.lua")
+if not fs.exists(appPath) then
+    term.setCursorBlink(false)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.red)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("Missing file: " .. appPath)
+    return
 end
 
-local compiled = loadChunk(table.concat(chunks, "\n"), "@app.lua")
-return compiled()
+_G.CC_BROWSER_BASE_DIR = browserRoot
+local previousLaunchToken = rawget(_G, "CC_BROWSER_ENV")
+_G.CC_BROWSER_ENV = true
+local loadOk, runOrErr = pcall(dofile, appPath)
+_G.CC_BROWSER_ENV = previousLaunchToken
+if not loadOk then
+    term.setCursorBlink(false)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.red)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("Failed loading browser app:")
+    print(appPath)
+    print(tostring(runOrErr))
+    return
+end
+
+local runApp = runOrErr
+if type(runApp) ~= "function" then
+    term.setCursorBlink(false)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.red)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("Invalid browser app entrypoint in: " .. appPath)
+    return
+end
+
+local ok, err = pcall(runApp, ...)
+if not ok then
+    term.setCursorBlink(false)
+    term.setBackgroundColor(colors.black)
+    term.setTextColor(colors.red)
+    term.clear()
+    term.setCursorPos(1, 1)
+    print(APP_TITLE .. " crashed:")
+    print(tostring(err))
+end
