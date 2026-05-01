@@ -1258,11 +1258,20 @@ return function(deps)
             local swatchStyle = cloneControlStyle(style, false, disabled)
             swatchStyle.bg = selectedColor
             swatchStyle.fg = ensureContrastingForeground(controlStyle.fg, selectedColor)
-            writer:writeControlText("< " .. selectedName .. " ", controlStyle, controlKey)
-            writer:writeControlText("  ", swatchStyle, controlKey)
-            writer:writeControlText(" >", controlStyle, controlKey)
+            stateEntry.colorFlyoutOpen = stateEntry.colorFlyoutOpen == true
+            local prevKey = controlKey and (key .. "::color:prev") or nil
+            local openKey = controlKey and (key .. "::color:open") or nil
+            local nextKey = controlKey and (key .. "::color:next") or nil
 
-            if focused and colorOptions and #colorOptions > 0 then
+            writer:writeControlText("<", controlStyle, prevKey)
+            writer:writeControlText(" ", controlStyle, openKey)
+            writer:writeControlText(selectedName, controlStyle, openKey)
+            writer:writeControlText(" ", controlStyle, openKey)
+            writer:writeControlText("  ", swatchStyle, openKey)
+            writer:writeControlText(" ", controlStyle, openKey)
+            writer:writeControlText(">", controlStyle, nextKey)
+
+            if focused and stateEntry.colorFlyoutOpen and colorOptions and #colorOptions > 0 then
                 writer:newLine()
                 for optionIndex, optionName in ipairs(colorOptions) do
                     local optionColor = COLOR_NAME_TO_VALUE[optionName] or colors.white

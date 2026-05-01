@@ -199,7 +199,7 @@ local browserSettings = {
     default_bg_color = "black",
     default_fg_color = "white",
 }
-local defaultPolicies = {
+local default = {
     log = {
         enabled = true,
         level = "info",
@@ -210,16 +210,15 @@ local defaultPolicies = {
 }
 local browserPolicies = {
     log = {
-        enabled = defaultPolicies.log.enabled,
-        level = defaultPolicies.log.level,
-        max_files = defaultPolicies.log.max_files,
-        max_file_size = defaultPolicies.log.max_file_size,
-        max_entry_length = defaultPolicies.log.max_entry_length,
+        enabled = default.log.enabled,
+        level = default.log.level,
+        max_files = default.log.max_files,
+        max_file_size = default.log.max_file_size,
+        max_entry_length = default.log.max_entry_length,
     },
 }
 local browserFavorites = {}
 local browserHistory = {}
-local nextBrowserHistoryId = 1
 local persistBrowserState
 local state
 local flushPausedAppletQueue
@@ -732,7 +731,7 @@ end
 
 function normalizeLogPolicy(policyTable)
     local source = type(policyTable) == "table" and policyTable or {}
-    local defaults = defaultPolicies.log or {}
+    local defaults = default.log or {}
     local normalized = {}
 
     local enabled = parseBooleanSetting(source.enabled)
@@ -1105,25 +1104,42 @@ function removeBrowserFavorite(url)
     return true, nil
 end
 
-function historyTimestampParts()
+local HISTORY_ENTRY_KEY_SEPARATOR = "\31"
+
+function historyTimestampText()
     if os and type(os.date) == "function" then
-        local okDate, dayText = pcall(os.date, "%Y-%m-%d")
         local okDateTime, dateTimeText = pcall(os.date, "%Y-%m-%d %H:%M:%S")
-        if okDate and okDateTime and dayText and dateTimeText then
-            return tostring(dayText), tostring(dateTimeText)
+        if okDateTime and dateTimeText then
+            return tostring(dateTimeText)
         end
     end
-    local fallback = ("clock %.2fs"):format((os and type(os.clock) == "function") and os.clock() or 0)
-    return "Unknown", fallback
+    return ("clock %.2fs"):format((os and type(os.clock) == "function") and os.clock() or 0)
+end
+
+function historyDayFromTimestamp(timestamp)
+    local parsed = tostring(timestamp or ""):match("^(%d%d%d%d%-%d%d%-%d%d)")
+    if parsed and parsed ~= "" then
+        return parsed
+    end
+    return "Unknown"
+end
+
+function historyEntryKey(entry)
+    return table.concat({
+        tostring(entry.timestamp or ""),
+        tostring(entry.url or ""),
+        tostring(entry.title or ""),
+    }, HISTORY_ENTRY_KEY_SEPARATOR)
 end
 
 function copyBrowserHistoryEntry(entry)
+    local timestamp = tostring(entry.timestamp or "")
     return {
-        id = tonumber(entry.id) or 0,
+        key = historyEntryKey(entry),
         url = tostring(entry.url or ""),
         title = tostring(entry.title or ""),
-        day = tostring(entry.day or "Unknown"),
-        timestamp = tostring(entry.timestamp or ""),
+        day = historyDayFromTimestamp(timestamp),
+        timestamp = timestamp,
     }
 end
 
@@ -1135,15 +1151,38 @@ function listBrowserHistory()
     return copied
 end
 
-function removeBrowserHistoryEntry(entryId)
-    local wanted = tonumber(entryId)
-    if not wanted then
-        return false, "Missing history entry id"
+function persistedBrowserHistoryEntries()
+    local entries = {}
+    for i, entry in ipairs(browserHistory) do
+        entries[i] = {
+            url = tostring(entry.url or ""),
+            title = tostring(entry.title or ""),
+            timestamp = tostring(entry.timestamp or ""),
+        }
     end
-    wanted = math.max(1, math.floor(wanted))
+    return entries
+end
+
+function removeBrowserHistoryEntry(entryToken)
+    local token = core.trim(tostring(entryToken or ""))
+    if token == "" then
+        return false, "Missing history entry key"
+    end
+
+    local numericIndex = tonumber(token)
+    if numericIndex then
+        local index = math.floor(numericIndex)
+        if index >= 1 and index <= #browserHistory then
+            table.remove(browserHistory, index)
+            if persistBrowserState then
+                persistBrowserState()
+            end
+            return true, nil
+        end
+    end
 
     for i, entry in ipairs(browserHistory) do
-        if tonumber(entry.id) == wanted then
+        if historyEntryKey(entry) == token then
             table.remove(browserHistory, i)
             if persistBrowserState then
                 persistBrowserState()
@@ -1163,7 +1202,7 @@ function clearBrowserHistoryDay(day)
     local kept = {}
     local removed = 0
     for _, entry in ipairs(browserHistory) do
-        if tostring(entry.day or "") == wanted then
+        if historyDayFromTimestamp(entry.timestamp) == wanted then
             removed = removed + 1
         else
             kept[#kept + 1] = entry
@@ -1218,16 +1257,13 @@ function addBrowserHistory(url, title)
         return false
     end
 
-    local day, timestamp = historyTimestampParts()
+    local timestamp = historyTimestampText()
     local normalizedTitle = core.trim(tostring(title or ""))
     browserHistory[#browserHistory + 1] = {
-        id = nextBrowserHistoryId,
         url = normalizedUrl,
         title = normalizedTitle,
-        day = day,
         timestamp = timestamp,
     }
-    nextBrowserHistoryId = nextBrowserHistoryId + 1
 
     if persistBrowserState then
         persistBrowserState()
@@ -1295,43 +1331,29 @@ end
 
 function applyDecodedHistory(historyTable)
     browserHistory = {}
-    local maxId = 0
     if type(historyTable) == "table" then
         for _, item in ipairs(historyTable) do
             local url = core.trim(tostring(item and item.url or ""))
             if url ~= "" then
-                local id = tonumber(item.id)
-                if not id then
-                    id = maxId + 1
-                else
-                    id = math.max(1, math.floor(id))
-                end
-                if id <= maxId then
-                    id = maxId + 1
-                end
-                maxId = id
-
                 local title = core.trim(tostring(item.title or ""))
-                local day = core.trim(tostring(item.day or ""))
                 local timestamp = core.trim(tostring(item.timestamp or ""))
-                if day == "" then
-                    day = "Unknown"
-                end
                 if timestamp == "" then
-                    timestamp = day
+                    local legacyDay = core.trim(tostring(item.day or ""))
+                    if legacyDay ~= "" and legacyDay:match("^%d%d%d%d%-%d%d%-%d%d$") then
+                        timestamp = legacyDay .. " 00:00:00"
+                    else
+                        timestamp = historyTimestampText()
+                    end
                 end
 
                 browserHistory[#browserHistory + 1] = {
-                    id = id,
                     url = url,
                     title = title,
-                    day = day,
                     timestamp = timestamp,
                 }
             end
         end
     end
-    nextBrowserHistoryId = math.max(maxId + 1, 1)
 end
 
 function readSerializedTable(path)
@@ -1414,8 +1436,8 @@ persistBrowserState = function(_forceWrite)
         favorites = listBrowserFavorites(),
     }
     local historySnapshot = {
-        version = 1,
-        entries = listBrowserHistory(),
+        version = 2,
+        entries = persistedBrowserHistoryEntries(),
     }
     local configEncoded = textutils.serialize(configSnapshot)
     local historyEncoded = textutils.serialize(historySnapshot)
@@ -3625,9 +3647,18 @@ function formControl(tab, key)
     local controls = meta.controlsByKey or {}
     local resolvedKey = key
     local colorOptionIndex = nil
+    local colorAction = nil
     local control = controls[resolvedKey]
     if not control then
-        local baseKey, optionIndexText = tostring(key or ""):match("^(.-)::color:(%d+)$")
+        local rawKey = tostring(key or "")
+        local baseKey, optionIndexText = rawKey:match("^(.-)::color:(%d+)$")
+        local baseKeyAction, actionName = rawKey:match("^(.-)::color:(prev)$")
+        if not baseKeyAction then
+            baseKeyAction, actionName = rawKey:match("^(.-)::color:(open)$")
+        end
+        if not baseKeyAction then
+            baseKeyAction, actionName = rawKey:match("^(.-)::color:(next)$")
+        end
         if baseKey and baseKey ~= "" then
             local candidate = controls[baseKey]
             if candidate and candidate.tag == "input" and tostring(candidate.inputType or ""):lower() == "color" then
@@ -3635,10 +3666,17 @@ function formControl(tab, key)
                 control = candidate
                 colorOptionIndex = tonumber(optionIndexText)
             end
+        elseif baseKeyAction and baseKeyAction ~= "" then
+            local candidate = controls[baseKeyAction]
+            if candidate and candidate.tag == "input" and tostring(candidate.inputType or ""):lower() == "color" then
+                resolvedKey = baseKeyAction
+                control = candidate
+                colorAction = actionName
+            end
         end
     end
     if not control then
-        return nil, nil, nil, nil
+        return nil, nil, nil, nil, nil
     end
     target.formState = target.formState or {}
     local stateEntry = target.formState[resolvedKey]
@@ -3646,7 +3684,7 @@ function formControl(tab, key)
         stateEntry = {}
         target.formState[resolvedKey] = stateEntry
     end
-    return control, stateEntry, resolvedKey, colorOptionIndex
+    return control, stateEntry, resolvedKey, colorOptionIndex, colorAction
 end
 
 function isEditableFormControl(control)
@@ -3912,6 +3950,14 @@ function setColorInputIndex(tab, control, stateEntry, requestedIndex)
     index = clamp(math.floor(index), 1, #options)
     stateEntry.colorIndex = index
     stateEntry.value = tostring(options[index] or options[1] or "white")
+    stateEntry.colorFlyoutOpen = true
+    bumpRenderRevision(target)
+    return true
+end
+
+function openColorInputFlyout(tab, stateEntry)
+    local target = tab or activeTab()
+    stateEntry.colorFlyoutOpen = true
     bumpRenderRevision(target)
     return true
 end
@@ -3990,7 +4036,7 @@ end
 
 function activateFormControl(tab, key)
     local target = tab or activeTab()
-    local control, stateEntry, resolvedKey, colorOptionIndex = formControl(target, key)
+    local control, stateEntry, resolvedKey, colorOptionIndex, colorAction = formControl(target, key)
     if not control or control.disabled then
         return false
     end
@@ -4000,6 +4046,21 @@ function activateFormControl(tab, key)
         and control.tag == "input"
         and tostring(control.inputType or ""):lower() == "color" then
         return setColorInputIndex(target, control, stateEntry, colorOptionIndex)
+    end
+    if colorAction
+        and control.tag == "input"
+        and tostring(control.inputType or ""):lower() == "color" then
+        if colorAction == "prev" then
+            stateEntry.colorFlyoutOpen = true
+            return cycleColorInput(target, control, stateEntry, -1)
+        end
+        if colorAction == "next" then
+            stateEntry.colorFlyoutOpen = true
+            return cycleColorInput(target, control, stateEntry, 1)
+        end
+        if colorAction == "open" then
+            return openColorInputFlyout(target, stateEntry)
+        end
     end
 
     if control.tag == "input" then

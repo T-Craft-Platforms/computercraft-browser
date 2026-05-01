@@ -199,26 +199,28 @@ return function(deps)
             return label
         end
 
-        local overflow = #label - maxLabel
         local now = os.clock()
         local carousel = state.tabTitleCarousel
         if (not carousel)
             or carousel.index ~= index
             or carousel.label ~= label
             or carousel.maxLabel ~= maxLabel then
+            local separator = "   "
+            local marqueeText = label .. separator
             carousel = {
                 index = index,
                 label = label,
                 maxLabel = maxLabel,
+                marqueeText = marqueeText,
                 offset = 0,
-                dir = 1,
                 lastTick = now,
                 pauseUntil = now + 0.45,
             }
             state.tabTitleCarousel = carousel
         end
 
-        local stepInterval = 0.18
+        local cycleLength = math.max(1, #(carousel.marqueeText or (label .. " ")))
+        local stepInterval = 0.12
         if now < (carousel.pauseUntil or 0) then
             carousel.lastTick = now
         else
@@ -226,29 +228,16 @@ return function(deps)
             local steps = math.floor(elapsed / stepInterval)
             if steps > 0 then
                 carousel.lastTick = (carousel.lastTick or now) + (steps * stepInterval)
-                for _ = 1, steps do
-                    local nextOffset = (carousel.offset or 0) + (carousel.dir or 1)
-                    if nextOffset >= overflow then
-                        carousel.offset = overflow
-                        carousel.dir = -1
-                        carousel.pauseUntil = now + 0.45
-                        carousel.lastTick = now
-                        break
-                    elseif nextOffset <= 0 then
-                        carousel.offset = 0
-                        carousel.dir = 1
-                        carousel.pauseUntil = now + 0.45
-                        carousel.lastTick = now
-                        break
-                    else
-                        carousel.offset = nextOffset
-                    end
+                carousel.offset = ((carousel.offset or 0) + steps) % cycleLength
+                if carousel.offset == 0 then
+                    carousel.pauseUntil = now + 0.35
                 end
             end
         end
 
+        local source = (carousel.marqueeText or (label .. " ")) .. label
         local start = 1 + (carousel.offset or 0)
-        return label:sub(start, start + maxLabel - 1)
+        return source:sub(start, start + maxLabel - 1)
     end
 
     local function drawTopBar()
@@ -452,17 +441,19 @@ return function(deps)
                 end
             end
 
-            local cursorVisible = false
             if tab.urlFocus then
                 local offset = cursor - tab.urlOffset
                 local cursorX = inputX1 + offset - 1
                 if cursorX >= inputX1 and cursorX <= inputX2 then
-                    urlCursorState.x = cursorX
-                    urlCursorState.y = 2
-                    cursorVisible = true
+                    local relative = cursorX - inputX1 + 1
+                    local caretChar = visible:sub(relative, relative)
+                    if caretChar == "" or caretChar == " " then
+                        caretChar = "|"
+                    end
+                    writeClipped(cursorX, 2, caretChar, colors.white, colors.blue)
                 end
             end
-            urlCursorState.visible = cursorVisible
+            urlCursorState.visible = false
         else
             urlCursorState.visible = false
         end
@@ -662,10 +653,8 @@ return function(deps)
         local urlCursor = state.ui and state.ui.urlCursor or nil
         if urlCursor and urlCursor.visible then
             term.setCursorPos(urlCursor.x or 1, urlCursor.y or 1)
-            term.setCursorBlink(true)
-        else
-            term.setCursorBlink(false)
         end
+        term.setCursorBlink(false)
     end
 
     return {
