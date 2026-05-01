@@ -184,6 +184,7 @@ local BROWSER_DATA_DIR = pickBrowserDataDir()
 local BROWSER_SETTINGS_DIR = fs.combine(BROWSER_DATA_DIR, "config")
 local BROWSER_DOWNLOADS_DIR = fs.combine(BROWSER_DATA_DIR, "downloads")
 local BROWSER_VFS_DIR = fs.combine(BROWSER_DATA_DIR, "vfs")
+local BROWSER_LOGS_DIR = fs.combine(BROWSER_DATA_DIR, "logs")
 local BROWSER_CONFIG_PATH = fs.combine(BROWSER_SETTINGS_DIR, "config.tbl")
 local BROWSER_HISTORY_PATH = fs.combine(BROWSER_SETTINGS_DIR, "history.tbl")
 local BROWSER_LEGACY_STATE_PATH = fs.combine(BROWSER_SETTINGS_DIR, "browser-state.tbl")
@@ -198,6 +199,15 @@ local browserSettings = {
     default_bg_color = "black",
     default_fg_color = "white",
 }
+local browserPolicies = {
+    log = {
+        enabled = true,
+        level = "info",
+        max_files = 6,
+        max_file_size = 131072,
+        max_entry_length = 2048,
+    },
+}
 local browserFavorites = {}
 local browserHistory = {}
 local nextBrowserHistoryId = 1
@@ -206,6 +216,37 @@ local state
 local flushPausedAppletQueue
 local storageReady = false
 local lastStorageError = nil
+local logWriteBusy = false
+
+LogLevel = {
+    trace = 10,
+    debug = 20,
+    info = 30,
+    warn = 40,
+    error = 50,
+    TRACE = 10,
+    DEBUG = 20,
+    INFO = 30,
+    WARN = 40,
+    ERROR = 50,
+}
+
+local LOG_LEVEL_NAMES = {
+    [10] = "TRACE",
+    [20] = "DEBUG",
+    [30] = "INFO",
+    [40] = "WARN",
+    [50] = "ERROR",
+}
+
+local LOG_LEVEL_ALIASES = {
+    trace = 10,
+    debug = 20,
+    info = 30,
+    warn = 40,
+    warning = 40,
+    error = 50,
+}
 
 function settingEnabledRaw(name, defaultEnabled)
     local defaultText = defaultEnabled and "true" or "false"
@@ -391,6 +432,10 @@ function currentVfsRoot()
     return BROWSER_VFS_DIR
 end
 
+function currentLogsDir()
+    return BROWSER_LOGS_DIR
+end
+
 function browserConfigPath()
     return BROWSER_CONFIG_PATH
 end
@@ -473,6 +518,13 @@ function ensureStoragePaths()
     if not okVfs then
         storageReady = false
         lastStorageError = tostring(vfsErr or "Could not prepare browser applet directory")
+        return false, lastStorageError
+    end
+
+    local okLogs, logsErr = ensureDirExists(currentLogsDir(), "browser logs directory")
+    if not okLogs then
+        storageReady = false
+        lastStorageError = tostring(logsErr or "Could not prepare browser logs directory")
         return false, lastStorageError
     end
 
@@ -588,6 +640,7 @@ function listBrowserSettings()
     end
     copied.browser_data_dir = currentBrowserDataDir()
     copied.downloads_dir = currentDownloadsDir()
+    copied.logs_dir = currentLogsDir()
     copied.config_path = browserConfigPath()
     copied.history_path = browserHistoryPath()
     copied.storage_ready = storageReady and "true" or "false"
@@ -643,6 +696,166 @@ function parseBooleanSetting(value)
         return false
     end
     return nil
+end
+
+function normalizeLogLevel(value)
+    if type(value) == "number" then
+        local numeric = math.floor(value)
+        if LOG_LEVEL_NAMES[numeric] then
+            return numeric
+        end
+    end
+    local lowered = core.trim(tostring(value or "")):lower()
+    return LOG_LEVEL_ALIASES[lowered] or LogLevel.info
+end
+
+function normalizeLogPolicy(policyTable)
+    local source = type(policyTable) == "table" and policyTable or {}
+    local normalized = {}
+
+    local enabled = parseBooleanSetting(source.enabled)
+    if enabled == nil then
+        enabled = true
+    end
+    normalized.enabled = enabled
+
+    local level = normalizeLogLevel(source.level)
+    normalized.level = (LOG_LEVEL_NAMES[level] or "INFO"):lower()
+
+    local maxFiles = tonumber(source.max_files)
+    maxFiles = math.floor(maxFiles or 6)
+    if maxFiles < 1 then
+        maxFiles = 1
+    elseif maxFiles > 64 then
+        maxFiles = 64
+    end
+    normalized.max_files = maxFiles
+
+    local maxFileSize = tonumber(source.max_file_size)
+    maxFileSize = math.floor(maxFileSize or 131072)
+    if maxFileSize < 1024 then
+        maxFileSize = 1024
+    elseif maxFileSize > 4194304 then
+        maxFileSize = 4194304
+    end
+    normalized.max_file_size = maxFileSize
+
+    local maxEntryLength = tonumber(source.max_entry_length)
+    maxEntryLength = math.floor(maxEntryLength or 2048)
+    if maxEntryLength < 128 then
+        maxEntryLength = 128
+    elseif maxEntryLength > 65535 then
+        maxEntryLength = 65535
+    end
+    normalized.max_entry_length = maxEntryLength
+
+    return normalized
+end
+
+function normalizedBrowserPolicies(policiesTable)
+    local source = type(policiesTable) == "table" and policiesTable or {}
+    return {
+        log = normalizeLogPolicy(source.log),
+    }
+end
+
+function activeLogPath()
+    return fs.combine(BROWSER_LOGS_DIR, "browser.log")
+end
+
+function rotatedLogPath(index)
+    return fs.combine(BROWSER_LOGS_DIR, ("browser.%d.log"):format(math.floor(index or 1)))
+end
+
+function rotateBrowserLogsIfNeeded(policy)
+    local activePath = activeLogPath()
+    if not fs.exists(activePath) or fs.isDir(activePath) then
+        return
+    end
+
+    local currentSize = tonumber(fs.getSize(activePath) or 0) or 0
+    if currentSize < tonumber(policy.max_file_size or 0) then
+        return
+    end
+
+    local maxFiles = math.max(1, math.floor(tonumber(policy.max_files) or 1))
+    local maxRotated = math.max(0, maxFiles - 1)
+    if maxRotated <= 0 then
+        pcall(fs.delete, activePath)
+        return
+    end
+
+    for idx = maxRotated, 1, -1 do
+        local sourcePath = idx == 1 and activePath or rotatedLogPath(idx - 1)
+        local destinationPath = rotatedLogPath(idx)
+        if fs.exists(destinationPath) then
+            pcall(fs.delete, destinationPath)
+        end
+        if fs.exists(sourcePath) and not fs.isDir(sourcePath) then
+            pcall(fs.move, sourcePath, destinationPath)
+        end
+    end
+end
+
+function appendBrowserLogLine(line)
+    local text = tostring(line or "")
+    local policy = normalizedBrowserPolicies(browserPolicies).log
+    browserPolicies.log = policy
+    if not policy.enabled then
+        return
+    end
+    if logWriteBusy then
+        return
+    end
+    if not ensureDirExists(currentLogsDir(), "browser logs directory") then
+        return
+    end
+
+    logWriteBusy = true
+    rotateBrowserLogsIfNeeded(policy)
+    local logPath = activeLogPath()
+    local handle = fs.open(logPath, "a")
+    if not handle then
+        handle = fs.open(logPath, "w")
+    end
+    if handle then
+        pcall(function()
+            handle.writeLine(text)
+        end)
+        closeHandle(handle)
+    end
+    logWriteBusy = false
+end
+
+function log(message, level)
+    local policy = normalizedBrowserPolicies(browserPolicies).log
+    browserPolicies.log = policy
+    local eventLevel = normalizeLogLevel(level)
+    local threshold = normalizeLogLevel(policy.level)
+    if eventLevel < threshold then
+        return
+    end
+
+    local body = tostring(message or "")
+    body = body:gsub("[\r\n\t]+", " ")
+    if #body > policy.max_entry_length then
+        body = body:sub(1, policy.max_entry_length)
+    end
+
+    local stamp = nil
+    if os and type(os.date) == "function" then
+        local okDate, rendered = pcall(os.date, "%Y-%m-%d %H:%M:%S")
+        if okDate and rendered then
+            stamp = tostring(rendered)
+        end
+    end
+    if not stamp or stamp == "" then
+        local clockValue = (os and type(os.clock) == "function") and os.clock() or 0
+        stamp = ("clock %.3f"):format(clockValue)
+    end
+
+    local levelText = LOG_LEVEL_NAMES[eventLevel] or "INFO"
+    appendBrowserLogLine("[" .. stamp .. "] [" .. levelText .. "] " .. body)
 end
 
 function setBooleanBrowserSetting(key, value)
@@ -1023,10 +1236,15 @@ function applyDecodedConfig(decoded)
         end
     end
 
+    if type(decoded.policies) == "table" then
+        browserPolicies = normalizedBrowserPolicies(decoded.policies)
+    end
+
     browserSettings.fullscreen_mode = normalizeFullscreenMode(browserSettings.fullscreen_mode)
     browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
     browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
     browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
+    browserPolicies = normalizedBrowserPolicies(browserPolicies)
 
     browserFavorites = {}
     if type(decoded.favorites) == "table" then
@@ -1159,6 +1377,7 @@ persistBrowserState = function(_forceWrite)
     local configSnapshot = {
         version = 3,
         settings = persistedBrowserSettings(),
+        policies = normalizedBrowserPolicies(browserPolicies),
         favorites = listBrowserFavorites(),
     }
     local historySnapshot = {
@@ -1203,6 +1422,7 @@ end
 browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
 browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
 browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
+browserPolicies = normalizedBrowserPolicies(browserPolicies)
 
 local network = createNetwork(core, {
     aboutPagesDir = fs.combine(SCRIPT_DIR, "about-pages"),
@@ -4085,7 +4305,6 @@ function buildLuaSourceHtml(url, body, heading, statusLine, options)
 
     return "<html><body>" .. executionBar
         .. "<h3>" .. escapeHtml(heading) .. "</h3>"
-        .. "<p><b>URL:</b> <code>" .. escapeHtml(url) .. "</code></p>"
         .. statusSection
         .. "<pre>" .. escapeHtml(body) .. "</pre></body></html>"
 end
@@ -4673,7 +4892,7 @@ function handleLuaNavigation(target, normalized, allowFallback, requestOptions, 
     end
 
     local resolvedUrl = finalUrl or normalized
-    target.pendingApplet = {
+    local pendingApplet = {
         sourceUrl = resolvedUrl,
         sourceCode = body,
         addToHistory = addToHistory == true,
@@ -4683,13 +4902,14 @@ function handleLuaNavigation(target, normalized, allowFallback, requestOptions, 
         historyCommitted = false,
     }
     commitTabHistoryUrl(target, addToHistory, resolvedUrl)
-    target.pendingApplet.tabHistoryCommitted = true
+    pendingApplet.tabHistoryCommitted = true
 
     local promptDocument = buildDocument(
         buildLuaSourceHtml(resolvedUrl, body, "Lua Source", nil, { executable = true }),
         resolvedUrl
     )
     applyLoadedDocumentToTab(target, resolvedUrl, promptDocument, nil, nil)
+    target.pendingApplet = pendingApplet
     target.status = "Executable detected: " .. resolvedUrl
     finalizeNavigationRender(target)
     return true
@@ -4735,6 +4955,7 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     local normalized, inferred = normalizeInputUrl(rawInput)
     local normalizedLower = trim(tostring(normalized or "")):lower()
     local shouldAllowFallback = allowFallback or inferred
+    log("navigate " .. tostring(normalized), LogLevel.debug)
     state.highUsage.loadingFrame = true
 
     stopAppletForTab(target, true)
@@ -6083,10 +6304,12 @@ end
 function run(...)
     local rawArgs = { ... }
     local initialUrls, startupFullscreenMode = parseStartupArgs(rawArgs)
+    log("browser start", LogLevel.info)
     bootstrap(initialUrls, startupFullscreenMode)
     while state.running do
         processNextBrowserEvent()
     end
+    log("browser shutdown", LogLevel.info)
     shutdownBrowserUi()
 end
 
