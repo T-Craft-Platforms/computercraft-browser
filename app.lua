@@ -3356,17 +3356,30 @@ function formControl(tab, key)
     local target = tab or activeTab()
     local meta = target.formMeta or {}
     local controls = meta.controlsByKey or {}
-    local control = controls[key]
+    local resolvedKey = key
+    local colorOptionIndex = nil
+    local control = controls[resolvedKey]
     if not control then
-        return nil, nil
+        local baseKey, optionIndexText = tostring(key or ""):match("^(.-)::color:(%d+)$")
+        if baseKey and baseKey ~= "" then
+            local candidate = controls[baseKey]
+            if candidate and candidate.tag == "input" and tostring(candidate.inputType or ""):lower() == "color" then
+                resolvedKey = baseKey
+                control = candidate
+                colorOptionIndex = tonumber(optionIndexText)
+            end
+        end
+    end
+    if not control then
+        return nil, nil, nil, nil
     end
     target.formState = target.formState or {}
-    local stateEntry = target.formState[key]
+    local stateEntry = target.formState[resolvedKey]
     if not stateEntry then
         stateEntry = {}
-        target.formState[key] = stateEntry
+        target.formState[resolvedKey] = stateEntry
     end
-    return control, stateEntry
+    return control, stateEntry, resolvedKey, colorOptionIndex
 end
 
 function isEditableFormControl(control)
@@ -3617,6 +3630,23 @@ function cycleColorInput(tab, control, stateEntry, direction)
     return true
 end
 
+function setColorInputIndex(tab, control, stateEntry, requestedIndex)
+    local target = tab or activeTab()
+    local options = control.colorOptions or {}
+    if #options == 0 then
+        return false
+    end
+    local index = tonumber(requestedIndex)
+    if not index then
+        return false
+    end
+    index = clamp(math.floor(index), 1, #options)
+    stateEntry.colorIndex = index
+    stateEntry.value = tostring(options[index] or options[1] or "white")
+    bumpRenderRevision(target)
+    return true
+end
+
 function activateRadioGroup(target, control, key, stateEntry)
     local formId = control.formId
     local name = trim(tostring(control.name or ""))
@@ -3691,15 +3721,20 @@ end
 
 function activateFormControl(tab, key)
     local target = tab or activeTab()
-    local control, stateEntry = formControl(target, key)
+    local control, stateEntry, resolvedKey, colorOptionIndex = formControl(target, key)
     if not control or control.disabled then
         return false
     end
 
-    setFocusedFormControl(target, key)
+    setFocusedFormControl(target, resolvedKey)
+    if colorOptionIndex
+        and control.tag == "input"
+        and tostring(control.inputType or ""):lower() == "color" then
+        return setColorInputIndex(target, control, stateEntry, colorOptionIndex)
+    end
 
     if control.tag == "input" then
-        return activateInputControl(target, control, stateEntry, key)
+        return activateInputControl(target, control, stateEntry, resolvedKey)
     end
 
     if control.tag == "textarea" then
@@ -3713,7 +3748,7 @@ function activateFormControl(tab, key)
     end
 
     if control.tag == "button" then
-        return activateButtonControl(target, control, key)
+        return activateButtonControl(target, control, resolvedKey)
     end
 
     return false
@@ -4055,14 +4090,14 @@ function buildLuaSourceHtml(url, body, heading, statusLine, options)
         .. "<pre>" .. escapeHtml(body) .. "</pre></body></html>"
 end
 
-local APPLET_ACTION_PREFIX = "ccbrowser:applet"
+local APPLET_ACTION_PREFIX = "ccbrowser-applet"
 
 function makeAppletActionUrl(action, params)
     local parts = { "action=" .. urlEncode(tostring(action or "")) }
     for key, value in pairs(params or {}) do
         parts[#parts + 1] = urlEncode(tostring(key or "")) .. "=" .. urlEncode(tostring(value or ""))
     end
-    return APPLET_ACTION_PREFIX .. "?" .. table.concat(parts, "&")
+    return "#" .. APPLET_ACTION_PREFIX .. "?" .. table.concat(parts, "&")
 end
 
 function decodeQueryComponent(value)
@@ -4073,10 +4108,17 @@ end
 
 function parseAppletActionUrl(url)
     local raw = tostring(url or "")
-    if not startsWith(raw:lower(), APPLET_ACTION_PREFIX) then
+    local marker = "#" .. APPLET_ACTION_PREFIX
+    local lowered = raw:lower()
+    local markerPos = lowered:find(marker, 1, true)
+    if not markerPos then
         return nil, {}
     end
-    local query = raw:match("%?(.*)$") or ""
+    local remainder = raw:sub(markerPos + #marker)
+    local query = ""
+    if remainder:sub(1, 1) == "?" then
+        query = remainder:sub(2)
+    end
     local params = {}
     for token in query:gmatch("([^&]+)") do
         local key, value = token:match("^([^=]+)=(.*)$")
@@ -4695,11 +4737,6 @@ navigate = function(rawInput, addToHistory, allowFallback, tab, requestOptions)
     local shouldAllowFallback = allowFallback or inferred
     state.highUsage.loadingFrame = true
 
-    if startsWith(normalizedLower, APPLET_ACTION_PREFIX) then
-        target.loading = false
-        return handleAppletActionNavigation(normalized, target)
-    end
-
     stopAppletForTab(target, true)
     target.loading = true
     target.status = "Loading " .. normalized
@@ -4982,6 +5019,11 @@ function handlePageContentClick(button, x, y, tab, topRows)
     tab.focusedFormControl = nil
     local href = line and line.links and line.links[column] or nil
     if href then
+        local action = select(1, parseAppletActionUrl(href))
+        if action ~= nil and tab.pendingApplet then
+            state.menuOpen = false
+            return handleAppletActionNavigation(href, tab)
+        end
         state.menuOpen = false
         navigate(href, true, false, tab)
         return true

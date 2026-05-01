@@ -1254,7 +1254,31 @@ return function(deps)
                 stateEntry.colorIndex = selectedIndex
             end
             stateEntry.value = selectedName
-            writer:writeControlText("< " .. selectedName .. " >", controlStyle, controlKey)
+            local selectedColor = COLOR_NAME_TO_VALUE[selectedName] or colors.white
+            local swatchStyle = cloneControlStyle(style, false, disabled)
+            swatchStyle.bg = selectedColor
+            swatchStyle.fg = ensureContrastingForeground(controlStyle.fg, selectedColor)
+            writer:writeControlText("< " .. selectedName .. " ", controlStyle, controlKey)
+            writer:writeControlText("  ", swatchStyle, controlKey)
+            writer:writeControlText(" >", controlStyle, controlKey)
+
+            if focused and colorOptions and #colorOptions > 0 then
+                writer:newLine()
+                for optionIndex, optionName in ipairs(colorOptions) do
+                    local optionColor = COLOR_NAME_TO_VALUE[optionName] or colors.white
+                    local optionStyle = cloneControlStyle(style, false, disabled)
+                    optionStyle.bg = optionColor
+                    optionStyle.fg = ensureContrastingForeground(controlStyle.fg, optionColor)
+                    local optionKey = key .. "::color:" .. tostring(optionIndex)
+                    local isSelected = optionIndex == stateEntry.colorIndex
+                    writer:writeControlText(isSelected and "[" or " ", controlStyle, optionKey)
+                    writer:writeControlText("  ", optionStyle, optionKey)
+                    writer:writeControlText(isSelected and "]" or " ", controlStyle, optionKey)
+                    if optionIndex < #colorOptions then
+                        writer:writeControlText(" ", controlStyle, optionKey)
+                    end
+                end
+            end
         else
             local value = tostring(stateEntry.value or "")
             local maxLength = parseInteger(attrs.maxlength, nil)

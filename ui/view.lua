@@ -457,11 +457,6 @@ return function(deps)
                 local offset = cursor - tab.urlOffset
                 local cursorX = inputX1 + offset - 1
                 if cursorX >= inputX1 and cursorX <= inputX2 then
-                    local cursorChar = visible:sub(offset, offset)
-                    if cursorChar == "" then
-                        cursorChar = " "
-                    end
-                    writeClipped(cursorX, 2, cursorChar, colors.black, colors.white)
                     urlCursorState.x = cursorX
                     urlCursorState.y = 2
                     cursorVisible = true
