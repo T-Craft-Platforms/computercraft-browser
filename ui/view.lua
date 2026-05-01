@@ -255,11 +255,13 @@ return function(deps)
         layoutUi()
         local w, _ = term.getSize()
         local tab = activeTab()
+        local urlCursorState = { visible = false, x = 1, y = 2 }
 
         -- In fullscreen mode, skip the full top bar. Only draw a floating "=" button.
         if state.fullscreen then
             state.tabTitleCarousel = nil
             if state.seamlessAppletFullscreen then
+                state.ui.urlCursor = { visible = false, x = 1, y = 1 }
                 term.setCursorBlink(false)
                 return
             end
@@ -273,6 +275,7 @@ return function(deps)
                 local menuX = state.ui.menuButton.x1 + math.floor((menuWidth - 1) / 2)
                 writeClipped(menuX, 1, "=", menuFg, menuBg)
             end
+            state.ui.urlCursor = { visible = false, x = 1, y = 1 }
             term.setCursorBlink(false)
             return
         end
@@ -459,14 +462,16 @@ return function(deps)
                         cursorChar = " "
                     end
                     writeClipped(cursorX, 2, cursorChar, colors.black, colors.white)
-                    term.setCursorPos(cursorX, 2)
+                    urlCursorState.x = cursorX
+                    urlCursorState.y = 2
                     cursorVisible = true
                 end
             end
-            term.setCursorBlink(cursorVisible)
+            urlCursorState.visible = cursorVisible
         else
-            term.setCursorBlink(false)
+            urlCursorState.visible = false
         end
+        state.ui.urlCursor = urlCursorState
     end
 
     local function verticalScrollbarGeometry(tab, visibleHeight)
@@ -659,6 +664,13 @@ return function(deps)
         drawTopBar()
         drawPage()
         drawMenuPopover()
+        local urlCursor = state.ui and state.ui.urlCursor or nil
+        if urlCursor and urlCursor.visible then
+            term.setCursorPos(urlCursor.x or 1, urlCursor.y or 1)
+            term.setCursorBlink(true)
+        else
+            term.setCursorBlink(false)
+        end
     end
 
     return {

@@ -129,31 +129,7 @@ return function(core, options)
 
         local luaPath = fs.combine(aboutPagesDir, pageName .. ".lua")
         if fs.exists(luaPath) and not fs.isDir(luaPath) then
-            local okLoad, loadedOrErr = pcall(dofile, luaPath)
-            if not okLoad then
-                return nil, "Failed to execute about page: " .. tostring(loadedOrErr)
-            end
-
-            local rendered = loadedOrErr
-            if type(rendered) == "function" then
-                local okRender, renderedOrErr = pcall(rendered, {
-                    page = pageName,
-                    aboutApi = aboutApi,
-                    core = core,
-                })
-                if not okRender then
-                    return nil, "Failed to render about page: " .. tostring(renderedOrErr)
-                end
-                rendered = renderedOrErr
-            end
-
-            if type(rendered) == "table" then
-                rendered = rendered.body or rendered.html or rendered[1]
-            end
-            if rendered == nil then
-                rendered = ""
-            end
-            return tostring(rendered), nil
+            return readLocalFile(luaPath)
         end
 
         return nil, "File not found: " .. htmlPath .. " or " .. luaPath

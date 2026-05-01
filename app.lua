@@ -4015,14 +4015,43 @@ function loadDocumentWithAbort(tab, normalized, allowFallback, requestOptions)
 end
 
 function isLuaUrl(url)
-    local stripped = (url or ""):gsub("[?#].*$", ""):lower()
-    return stripped:match("%.lua$") ~= nil
+    local raw = tostring(url or "")
+    local stripped = raw:gsub("[?#].*$", "")
+    if stripped:lower():match("%.lua$") ~= nil then
+        return true
+    end
+    if startsWith(stripped:lower(), "about:") then
+        local pageName = stripped:match("^about:([^/?#]+)") or ""
+        if pageName ~= "" then
+            local aboutLuaPath = fs.combine(fs.combine(SCRIPT_DIR, "about-pages"), pageName .. ".lua")
+            return fs.exists(aboutLuaPath) and not fs.isDir(aboutLuaPath)
+        end
+    end
+    return false
 end
 
-function buildLuaSourceHtml(url, body, heading, statusLine)
-    return "<html><body><h3>" .. escapeHtml(heading) .. "</h3>"
+function buildLuaSourceHtml(url, body, heading, statusLine, options)
+    local opts = options or {}
+    local executionBar = ""
+    if opts.executable then
+        local sandboxedUrl = makeAppletActionUrl("run", { mode = "sandboxed" })
+        local systemUrl = makeAppletActionUrl("run", { mode = "system" })
+        executionBar = "<div style=\"position:sticky;top:0;background-color:lightGray;color:black;padding:0 1;\">"
+            .. "<p><b>This file is executable.</b></p>"
+            .. "<p><a href=\"" .. escapeHtml(sandboxedUrl) .. "\">[Run Sandboxed]</a> "
+            .. "<a href=\"" .. escapeHtml(systemUrl) .. "\" style=\"color:red;\"><b>[Run on System]</b></a></p>"
+            .. "</div><hr>"
+    end
+
+    local statusSection = ""
+    if statusLine and statusLine ~= "" then
+        statusSection = "<p><i>" .. escapeHtml(statusLine) .. "</i></p><hr>"
+    end
+
+    return "<html><body>" .. executionBar
+        .. "<h3>" .. escapeHtml(heading) .. "</h3>"
         .. "<p><b>URL:</b> <code>" .. escapeHtml(url) .. "</code></p>"
-        .. (statusLine and ("<p><i>" .. escapeHtml(statusLine) .. "</i></p><hr>") or "")
+        .. statusSection
         .. "<pre>" .. escapeHtml(body) .. "</pre></body></html>"
 end
 
@@ -4065,26 +4094,11 @@ function parseAppletActionUrl(url)
     return action, params
 end
 
-function buildLuaAppletPromptHtml(_url)
-    local sandboxedUrl = makeAppletActionUrl("run", { mode = "sandboxed" })
-    local noUrl = makeAppletActionUrl("no", {})
-    return "<html><body>"
-        .. "<p>This file is a Lua executable.</p>"
-        .. "<p><a href=\"" .. escapeHtml(sandboxedUrl) .. "\">[Run Sandboxed]</a></p>"
-        .. "<p><a href=\"" .. escapeHtml(noUrl) .. "\">[Do Not Execute]</a></p>"
-        .. "</body></html>"
-end
-
-function buildLuaAppletDeclinedHtml(_url)
-    local viewUrl = makeAppletActionUrl("view_source", {})
-    return "<html><body>"
-        .. "<p>This file is an executable.</p>"
-        .. "<p>Do you want to see its contents?</p>"
-        .. "<p><a href=\"" .. escapeHtml(viewUrl) .. "\">[View Contents]</a></p>"
-        .. "</body></html>"
-end
-
-function normalizeAppletMode(_mode)
+function normalizeAppletMode(rawMode)
+    local mode = trim(tostring(rawMode or "")):lower()
+    if mode == "system" or mode == "run_on_system" or mode == "unsandboxed" then
+        return "system"
+    end
     return "sandboxed"
 end
 
@@ -4191,14 +4205,25 @@ function finalizeAppletForTab(tab)
         pcall(applet.window.setVisible, false)
     end
     target.applet = nil
-    target.pendingApplet = nil
+    target.pendingApplet = {
+        sourceUrl = sourceUrl,
+        sourceCode = sourceCode,
+        addToHistory = false,
+        trackHistory = shouldTrackNavigationInHistory(sourceUrl),
+        tabHistoryCommitted = true,
+        browserHistoryCommitted = true,
+        historyCommitted = true,
+    }
 
-    local statusLine = "Applet execution finished (" .. mode .. " mode)."
+    local statusLine = nil
     if not runOk then
-        statusLine = "Applet execution failed: " .. runErr
+        statusLine = "Execution failed (" .. mode .. "): " .. runErr
     end
 
-    target.document = buildDocument(buildLuaSourceHtml(sourceUrl, sourceCode, "Lua Applet", statusLine), sourceUrl)
+    target.document = buildDocument(
+        buildLuaSourceHtml(sourceUrl, sourceCode, "Lua Applet", statusLine, { executable = true }),
+        sourceUrl
+    )
     target.currentUrl = sourceUrl
     target.urlInput = sourceUrl
     target.urlCursor = #target.urlInput + 1
@@ -4306,12 +4331,20 @@ function handleAppletActionNavigation(url, tab)
 
     local sourceUrl = pending.sourceUrl
     local sourceCode = pending.sourceCode
-    local selectedAction = action ~= "" and action or "no"
+    local selectedAction = action ~= "" and action or "view_source"
 
     if selectedAction == "run" then
         local mode = normalizeAppletMode(params.mode)
         commitPendingAppletHistory(target, "Lua Applet: " .. sourceUrl)
-        target.pendingApplet = nil
+        target.pendingApplet = {
+            sourceUrl = sourceUrl,
+            sourceCode = sourceCode,
+            addToHistory = false,
+            trackHistory = pending.trackHistory,
+            tabHistoryCommitted = true,
+            browserHistoryCommitted = true,
+            historyCommitted = true,
+        }
 
         local started, startErr = startLuaAppletSession(sourceCode, sourceUrl, mode, target)
         if started then
@@ -4319,20 +4352,33 @@ function handleAppletActionNavigation(url, tab)
             target.status = "Lua applet running (" .. mode .. "): " .. sourceUrl
         else
             target.document = buildDocument(
-                buildLuaSourceHtml(sourceUrl, sourceCode, "Lua Applet", "Execution failed: " .. tostring(startErr)),
+                buildLuaSourceHtml(
+                    sourceUrl,
+                    sourceCode,
+                    "Lua Applet",
+                    "Execution failed (" .. mode .. "): " .. tostring(startErr),
+                    { executable = true }
+                ),
                 sourceUrl
             )
             target.status = "Lua applet failed: " .. tostring(startErr)
         end
-    elseif selectedAction == "view_source" then
-        commitPendingAppletHistory(target, "Lua Source: " .. sourceUrl)
-        target.pendingApplet = nil
-        target.document = buildDocument(buildLuaSourceHtml(sourceUrl, sourceCode, "Lua Source", nil), sourceUrl)
-        target.status = sourceUrl
     else
         commitPendingAppletHistory(target, "Lua Source: " .. sourceUrl)
-        target.document = buildDocument(buildLuaAppletDeclinedHtml(sourceUrl), sourceUrl)
-        target.status = "Executable blocked: " .. sourceUrl
+        target.pendingApplet = {
+            sourceUrl = sourceUrl,
+            sourceCode = sourceCode,
+            addToHistory = false,
+            trackHistory = pending.trackHistory,
+            tabHistoryCommitted = true,
+            browserHistoryCommitted = true,
+            historyCommitted = true,
+        }
+        target.document = buildDocument(
+            buildLuaSourceHtml(sourceUrl, sourceCode, "Lua Source", nil, { executable = true }),
+            sourceUrl
+        )
+        target.status = sourceUrl
     end
 
     target.loading = false
@@ -4597,18 +4643,12 @@ function handleLuaNavigation(target, normalized, allowFallback, requestOptions, 
     commitTabHistoryUrl(target, addToHistory, resolvedUrl)
     target.pendingApplet.tabHistoryCommitted = true
 
-    local promptDocument = buildDocument(buildLuaAppletPromptHtml(resolvedUrl), resolvedUrl)
+    local promptDocument = buildDocument(
+        buildLuaSourceHtml(resolvedUrl, body, "Lua Source", nil, { executable = true }),
+        resolvedUrl
+    )
     applyLoadedDocumentToTab(target, resolvedUrl, promptDocument, nil, nil)
     target.status = "Executable detected: " .. resolvedUrl
-    target.pendingApplet = {
-        sourceUrl = resolvedUrl,
-        sourceCode = body,
-        addToHistory = addToHistory == true,
-        trackHistory = shouldTrackNavigationInHistory(normalized),
-        tabHistoryCommitted = true,
-        browserHistoryCommitted = false,
-        historyCommitted = false,
-    }
     finalizeNavigationRender(target)
     return true
 end
@@ -5660,7 +5700,7 @@ function handlePaste(text)
     end
 end
 
-function bootstrap(initialUrls)
+function bootstrap(initialUrls, startupFullscreenMode)
     if state.initialTermBackground == nil and term and term.getBackgroundColor then
         state.initialTermBackground = term.getBackgroundColor()
     end
@@ -5673,6 +5713,17 @@ function bootstrap(initialUrls)
     term.setTextColor(fg)
     term.clear()
     term.setCursorPos(1, 1)
+
+    if startupFullscreenMode == "seamless" then
+        state.fullscreen = true
+        state.seamlessAppletFullscreen = true
+        state.menuOpen = false
+    elseif startupFullscreenMode == "normal" then
+        state.fullscreen = true
+        state.seamlessAppletFullscreen = false
+        state.menuOpen = false
+    end
+
     scheduleAnimationTick()
 
     if not initialUrls or #initialUrls == 0 then
@@ -5968,9 +6019,29 @@ function shutdownBrowserUi()
     print(APP_TITLE .. " closed")
 end
 
+function parseStartupArgs(args)
+    local initialUrls = {}
+    local startupFullscreenMode = nil
+    for i = 1, #(args or {}) do
+        local value = tostring(args[i] or "")
+        local lowered = value:lower()
+        if lowered == "--seamless" then
+            startupFullscreenMode = "seamless"
+        elseif lowered == "--fullscreen" then
+            if startupFullscreenMode ~= "seamless" then
+                startupFullscreenMode = "normal"
+            end
+        elseif value ~= "" then
+            initialUrls[#initialUrls + 1] = value
+        end
+    end
+    return initialUrls, startupFullscreenMode
+end
+
 function run(...)
-    local initialUrls = { ... }
-    bootstrap(initialUrls)
+    local rawArgs = { ... }
+    local initialUrls, startupFullscreenMode = parseStartupArgs(rawArgs)
+    bootstrap(initialUrls, startupFullscreenMode)
     while state.running do
         processNextBrowserEvent()
     end

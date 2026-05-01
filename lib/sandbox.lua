@@ -73,7 +73,112 @@ return function(deps)
         return candidate:sub(1, #rootPrefix) == rootPrefix
     end
 
-    local function createVirtualFs(_sourceUrl, sessionId)
+    local function normalizeSourceUrlForIndex(sourceUrl)
+        local raw = trim(tostring(sourceUrl or ""))
+        if raw == "" then
+            return ""
+        end
+        return raw:gsub("[?#].*$", "")
+    end
+
+    local function computeFolderHash(text)
+        local hash = 2166136261
+        for i = 1, #text do
+            hash = (hash + string.byte(text, i)) % 4294967296
+            hash = (hash * 16777619) % 4294967296
+        end
+        return hash
+    end
+
+    local function sanitizeFolderName(text)
+        local base = tostring(text or "")
+        base = base:gsub("^https?://", "")
+        base = base:gsub("[^%w%._%-]", "_")
+        base = base:gsub("_+", "_")
+        base = base:gsub("^_+", ""):gsub("_+$", "")
+        if base == "" then
+            base = "url"
+        end
+        if #base > 48 then
+            base = base:sub(1, 48)
+        end
+        return base
+    end
+
+    local function indexPathForRoot(root)
+        return fs.combine(root, "index.tbl")
+    end
+
+    local function readVfsIndex(root)
+        local path = indexPathForRoot(root)
+        if not fs.exists(path) or fs.isDir(path) then
+            return {}
+        end
+        local handle = fs.open(path, "r")
+        if not handle then
+            return {}
+        end
+        local payload = handle.readAll() or ""
+        handle.close()
+        if textutils and type(textutils.unserialize) == "function" then
+            local parsed = textutils.unserialize(payload)
+            if type(parsed) == "table" then
+                return parsed
+            end
+        end
+        return {}
+    end
+
+    local function writeVfsIndex(root, indexTable)
+        local path = indexPathForRoot(root)
+        local encoded = "{}"
+        if textutils and type(textutils.serialize) == "function" then
+            encoded = textutils.serialize(indexTable or {})
+        end
+        local handle = fs.open(path, "w")
+        if not handle then
+            return false
+        end
+        handle.write(encoded)
+        handle.close()
+        return true
+    end
+
+    local function resolveMappedSessionRoot(sharedRoot, sourceUrl, fallbackSessionId)
+        local normalizedUrl = normalizeSourceUrlForIndex(sourceUrl)
+        if normalizedUrl == "" then
+            return fs.combine(sharedRoot, tostring(fallbackSessionId or nextSessionId()))
+        end
+
+        local indexTable = readVfsIndex(sharedRoot)
+        local mappedFolder = tostring(indexTable[normalizedUrl] or "")
+        if mappedFolder == "" or mappedFolder:find("[^%w%._%-]") then
+            local hash = computeFolderHash(normalizedUrl)
+            local base = sanitizeFolderName(normalizedUrl)
+            mappedFolder = ("%s_%08x"):format(base, hash)
+
+            if indexTable[normalizedUrl] ~= mappedFolder then
+                local existing = {}
+                for _, value in pairs(indexTable) do
+                    existing[tostring(value or "")] = true
+                end
+                if existing[mappedFolder] then
+                    local suffix = 2
+                    local candidate = mappedFolder .. "_" .. tostring(suffix)
+                    while existing[candidate] do
+                        suffix = suffix + 1
+                        candidate = mappedFolder .. "_" .. tostring(suffix)
+                    end
+                    mappedFolder = candidate
+                end
+                indexTable[normalizedUrl] = mappedFolder
+                writeVfsIndex(sharedRoot, indexTable)
+            end
+        end
+        return fs.combine(sharedRoot, mappedFolder)
+    end
+
+    local function createVirtualFs(sourceUrl, sessionId)
         local sharedRoot = activeVfsRoot()
         if not ensureDir(sharedRoot) then
             return nil, "Could not prepare applet storage root"
@@ -85,7 +190,7 @@ return function(deps)
             safeSessionId = nextSessionId()
         end
 
-        local sessionRoot = fs.combine(sharedRoot, safeSessionId)
+        local sessionRoot = resolveMappedSessionRoot(sharedRoot, sourceUrl, safeSessionId)
         if not ensureDir(sessionRoot) then
             return nil, "Could not prepare applet session storage"
         end
@@ -374,6 +479,54 @@ return function(deps)
         return env, nil
     end
 
+    local function buildSystemEnv(contentWindow)
+        local env = {}
+        setmetatable(env, { __index = _G })
+
+        env.print = function(...)
+            printToContentWindow(contentWindow, ...)
+        end
+        env.write = function(text)
+            writeToContentWindow(contentWindow, text)
+        end
+
+        env.term = {}
+        for k, v in pairs(contentWindow) do
+            if type(v) == "function" then
+                env.term[k] = v
+            end
+        end
+        env.term.native = function() return contentWindow end
+        env.term.current = function() return contentWindow end
+        env.term.redirect = function(_target)
+            return contentWindow
+        end
+
+        if window then
+            env.window = {
+                create = function(_parent, x, y, w, h, visible)
+                    return window.create(contentWindow, x, y, w, h, visible)
+                end,
+            }
+        end
+
+        env.os = {}
+        if os then
+            for k, v in pairs(os) do
+                env.os[k] = v
+            end
+        end
+        return env, nil
+    end
+
+    local function normalizeExecutionMode(mode)
+        local normalized = trim(tostring(mode or "")):lower()
+        if normalized == "system" or normalized == "run_on_system" or normalized == "unsandboxed" then
+            return "system"
+        end
+        return "sandboxed"
+    end
+
     local function installEventBridge(env)
         env.os = env.os or {}
 
@@ -419,9 +572,15 @@ return function(deps)
         env.os.sleep = env.sleep
     end
 
-    local function createAppletSession(luaSource, sourceUrl, _mode, contentWindow)
+    local function createAppletSession(luaSource, sourceUrl, mode, contentWindow)
+        local executionMode = normalizeExecutionMode(mode)
         local sessionId = nextSessionId()
-        local env, envErr = buildSandboxEnv(contentWindow, sourceUrl, sessionId)
+        local env, envErr
+        if executionMode == "system" then
+            env, envErr = buildSystemEnv(contentWindow)
+        else
+            env, envErr = buildSandboxEnv(contentWindow, sourceUrl, sessionId)
+        end
         if not env then
             return nil, tostring(envErr or "Could not create sandbox environment")
         end
@@ -440,7 +599,7 @@ return function(deps)
             waitingFilter = nil,
             waitingRaw = false,
             started = false,
-            mode = "sandboxed",
+            mode = executionMode,
             sessionId = sessionId,
         }
 
