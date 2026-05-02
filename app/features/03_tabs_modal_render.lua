@@ -14,6 +14,10 @@ function pauseInactiveAppletsEnabled()
     return settingEnabledRaw("pause_inactive_applets", true)
 end
 
+function oskEnabled()
+    return settingEnabledRaw("osk_enabled", false)
+end
+
 function seamlessFullscreenSettingEnabled()
     return normalizeFullscreenMode(browserSettings.fullscreen_mode) == "seamless"
 end
@@ -185,6 +189,12 @@ state = {
         spec = nil,
         layout = nil,
     },
+    osk = {
+        open = false,
+        page = 1,
+        shift = false,
+        ctrl = false,
+    },
     ui = {
         tabs = {},
         tabClose = {},
@@ -195,6 +205,8 @@ state = {
         reload = { x1 = 9, x2 = 11, y = 2 },
         url = { x1 = 13, x2 = 13, y = 2 },
         menuButton = { x1 = 1, x2 = 1, y = 2 },
+        oskButton = nil,
+        oskLayout = nil,
         menu = nil,
     },
     monitorControls = {
@@ -226,6 +238,12 @@ local tabState = createTabState({
         return flushPausedAppletQueue
     end,
     PAUSED_APPLET_EVENT_MAX = PAUSED_APPLET_EVENT_MAX,
+    getOskRows = function()
+        if settingEnabledRaw("osk_enabled", false) and state.osk and state.osk.open then
+            return 4
+        end
+        return 0
+    end,
 })
 
 activeTab = tabState.activeTab
@@ -324,12 +342,15 @@ local ui = createUi({
     getUrlSelection = getUrlSelection,
     normalizedPageSelection = normalizedPageSelection,
     pageSelectionContains = pageSelectionContains,
+    oskEnabled = function() return settingEnabledRaw("osk_enabled", false) end,
+    getOskState = function() return state.osk end,
 })
 
 local layoutUi = ui.layoutUi
 local tabIndexAt = ui.tabIndexAt
 local tabCloseIndexAt = ui.tabCloseIndexAt
 local drawBase = ui.draw
+local drawOsk = ui.drawOsk
 local navigate
 local scheduleAboutUpdateTimer
 
@@ -950,6 +971,7 @@ end
 
 draw = function()
     drawBase()
+    drawOsk()
     drawActiveAppletOverlay()
     drawModal()
     drawSnackbar()

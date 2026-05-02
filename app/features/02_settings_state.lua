@@ -28,6 +28,7 @@ local MUTABLE_SETTING_KEYS = {
     history_enabled = true,
     usage_guard_enabled = true,
     pause_inactive_applets = true,
+    osk_enabled = true,
     fullscreen_mode = true,
     default_monitor = true,
     browser_engine_level = true,
@@ -292,6 +293,9 @@ function setBrowserSetting(key, value)
         end
         log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
         return true, nil
+    end
+    if normalized == "osk_enabled" then
+        return setBooleanBrowserSetting(normalized, value)
     end
     if normalized == "fullscreen_mode" then
         local lowered = core.trim(tostring(value or "")):lower()

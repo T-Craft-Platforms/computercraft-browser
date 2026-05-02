@@ -1,3 +1,62 @@
+-- Handle a key press originating from the on-screen keyboard.
+function handleOskKeyPress(key)
+    local osk = state.osk
+    if not osk then return end
+    local action = key.action
+
+    if action == "char" then
+        local c = tostring(key.value or key.label or "")
+        if osk.ctrl then
+            -- Simulate Ctrl+<letter> key down
+            local keyCode = keys and keys[c:lower()]
+            if keyCode then
+                state.ctrlDown = true
+                handleKeyDown(keyCode)
+                state.ctrlDown = false
+            end
+            osk.ctrl = false
+        else
+            handleChar(c)
+            if osk.shift then
+                osk.shift = false  -- one-shot shift
+            end
+        end
+    elseif action == "space" then
+        handleChar(" ")
+    elseif action == "backspace" then
+        handleKeyDown(keys.backspace)
+    elseif action == "enter" then
+        handleKeyDown(keys.enter)
+    elseif action == "shift" then
+        osk.shift = not osk.shift
+        osk.ctrl = false
+    elseif action == "ctrl" then
+        osk.ctrl = not osk.ctrl
+        osk.shift = false
+    elseif action == "page1" then
+        osk.page = 1
+        osk.ctrl = false
+    elseif action == "page2" then
+        osk.page = 2
+        osk.ctrl = false
+    end
+end
+
+-- Hit-test an OSK key at (x, y) and fire it.
+function handleOskClick(button, x, y)
+    if button ~= 1 then return end
+    local layout = state.ui.oskLayout
+    if not layout then return end
+    for _, row in ipairs(layout) do
+        for _, key in ipairs(row) do
+            if y == key.y and x >= key.x1 and x <= key.x2 then
+                handleOskKeyPress(key)
+                return
+            end
+        end
+    end
+end
+
 function handleTabClick(button, x)
     if hitRegion(x, 1, state.ui.closeBrowser) then
         state.running = false
@@ -79,6 +138,16 @@ end
 
 function handleToolbarClick(x)
     local tab = activeTab()
+    -- OSK toggle button ("K")
+    if state.ui.oskButton and hitRegion(x, 2, state.ui.oskButton) then
+        if state.osk then
+            state.osk.open = not state.osk.open
+        end
+        state.menuOpen = false
+        state.tabDrag = nil
+        state.scrollbarDrag = nil
+        return
+    end
     if hitRegion(x, 2, state.ui.menuButton) then
         state.menuOpen = not state.menuOpen
         if state.menuOpen then
@@ -238,6 +307,16 @@ function handleMouseClick(button, x, y)
         end
     end
 
+    -- Route clicks in the OSK area BEFORE clearing focus, so the active
+    -- input field / URL bar keeps focus and receives the injected characters.
+    if oskEnabled() and state.osk and state.osk.open and not state.fullscreen then
+        local _, h = term.getSize()
+        if y > h - 4 then
+            handleOskClick(button, x, y)
+            return
+        end
+    end
+
     local tab = activeTab()
     tab.urlFocus = false
     clearUrlSelection(tab)
@@ -334,6 +413,11 @@ end
 function handleMouseScroll(direction, _, y)
     if y <= effectiveTopBarRows() then
         return
+    end
+    -- Prevent scroll when touching the OSK area
+    if oskEnabled() and state.osk and state.osk.open and not state.fullscreen then
+        local _, h = term.getSize()
+        if y > h - 4 then return end
     end
     local tab = activeTab()
     setScroll(tab.scroll + direction, tab)

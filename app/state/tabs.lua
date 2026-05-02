@@ -18,6 +18,7 @@ return function(deps)
         return nil
     end
     local PAUSED_APPLET_EVENT_MAX = deps.PAUSED_APPLET_EVENT_MAX or 512
+    local getOskRows = deps.getOskRows or function() return 0 end
 
     local api = {}
 
@@ -220,7 +221,7 @@ return function(deps)
 
     function api.pageHeight()
         local _, h = term.getSize()
-        return math.max(1, h - effectiveTopBarRows())
+        return math.max(1, h - effectiveTopBarRows() - getOskRows())
     end
 
     function api.pageContentWidth(tab)

@@ -16,6 +16,116 @@ return function(deps)
     local getUrlSelection = deps.getUrlSelection
     local normalizedPageSelection = deps.normalizedPageSelection
     local pageSelectionContains = deps.pageSelectionContains
+    local oskEnabled = deps.oskEnabled or function() return false end
+    local getOskState = deps.getOskState or function() return { open = false, page = 1, shift = false, ctrl = false } end
+
+    local OSK_ROWS = 4
+
+    -- Compute proportional key positions for a single OSK row.
+    local function computeKeyRow(totalWidth, y, keyDefs)
+        local totalWeight = 0
+        for _, k in ipairs(keyDefs) do
+            totalWeight = totalWeight + (k.weight or 1)
+        end
+        if totalWeight <= 0 then totalWeight = 1 end
+        local result = {}
+        local x = 1
+        for i, k in ipairs(keyDefs) do
+            local kw
+            if i == #keyDefs then
+                kw = math.max(1, totalWidth - x + 1)
+            else
+                local keysLeft = #keyDefs - i
+                local remaining = totalWidth - x + 1
+                kw = math.max(1, math.min(
+                    math.floor(totalWidth * (k.weight or 1) / totalWeight + 0.5),
+                    remaining - keysLeft
+                ))
+            end
+            result[i] = {
+                x1 = x, x2 = x + kw - 1, y = y,
+                label = k.label, action = k.action or "none", value = k.value,
+            }
+            x = x + kw
+        end
+        return result
+    end
+
+    -- Build all 4 OSK rows for the given page/modifier state.
+    local function buildOskRows(w, h, osk)
+        local page = osk.page or 1
+        local shift = osk.shift or false
+        local ctrl = osk.ctrl or false
+        local y1 = h - OSK_ROWS + 1
+        local rows = {}
+
+        if page == 1 then
+            -- Row 1: q-p
+            local r1 = {}
+            for _, c in ipairs({"q","w","e","r","t","y","u","i","o","p"}) do
+                local v = shift and c:upper() or c
+                r1[#r1+1] = {label=v, action="char", value=v, weight=1}
+            end
+            rows[1] = computeKeyRow(w, y1, r1)
+
+            -- Row 2: a-l (9 keys)
+            local r2 = {}
+            for _, c in ipairs({"a","s","d","f","g","h","j","k","l"}) do
+                local v = shift and c:upper() or c
+                r2[#r2+1] = {label=v, action="char", value=v, weight=1}
+            end
+            rows[2] = computeKeyRow(w, y1 + 1, r2)
+
+            -- Row 3: SHIFT + z-m + DEL
+            local r3 = {}
+            r3[1] = {label=shift and "SH!" or " ^ ", action="shift", weight=1.5}
+            for _, c in ipairs({"z","x","c","v","b","n","m"}) do
+                local v = shift and c:upper() or c
+                r3[#r3+1] = {label=v, action="char", value=v, weight=1}
+            end
+            r3[#r3+1] = {label="<--", action="backspace", weight=1.5}
+            rows[3] = computeKeyRow(w, y1 + 2, r3)
+
+            -- Row 4: 123 / SPACE / ENT
+            rows[4] = computeKeyRow(w, y1 + 3, {
+                {label="123", action="page2", weight=3},
+                {label="SPACE", action="space", weight=9},
+                {label="ENT", action="enter", weight=3},
+            })
+        else
+            -- Row 1: 1-0
+            local r1 = {}
+            for _, c in ipairs({"1","2","3","4","5","6","7","8","9","0"}) do
+                r1[#r1+1] = {label=c, action="char", value=c, weight=1}
+            end
+            rows[1] = computeKeyRow(w, y1, r1)
+
+            -- Row 2: punctuation
+            local r2 = {}
+            for _, c in ipairs({"-","/",":",";","(",")","@","#",".",","}) do
+                r2[#r2+1] = {label=c, action="char", value=c, weight=1}
+            end
+            rows[2] = computeKeyRow(w, y1 + 1, r2)
+
+            -- Row 3: CTRL + symbols + DEL
+            local r3 = {}
+            r3[1] = {label=ctrl and "CTR!" or "CTR", action="ctrl", weight=1.5}
+            for _, c in ipairs({"?","!","=","+","_","~","%","&"}) do
+                r3[#r3+1] = {label=c, action="char", value=c, weight=1}
+            end
+            r3[#r3+1] = {label="<--", action="backspace", weight=1.5}
+            rows[3] = computeKeyRow(w, y1 + 2, r3)
+
+            -- Row 4: abc / SPACE / ENT
+            rows[4] = computeKeyRow(w, y1 + 3, {
+                {label="abc", action="page1", weight=3},
+                {label="SPACE", action="space", weight=9},
+                {label="ENT", action="enter", weight=3},
+            })
+        end
+
+        return rows
+    end
 
     local function layoutUi()
         local w, _ = term.getSize()
@@ -33,6 +143,7 @@ return function(deps)
             state.ui.url = offscreen
             state.ui.tabs = {}
             state.ui.tabClose = {}
+            state.ui.oskButton = nil
             if state.seamlessAppletFullscreen then
                 state.ui.menuButton = offscreen
             else
@@ -48,7 +159,23 @@ return function(deps)
         state.ui.reload = { x1 = 9, x2 = 11, y = 2 }
         state.ui.newTab = { x1 = math.max(1, w - 2), x2 = w, y = 1 }
         state.ui.menuButton = { x1 = state.ui.newTab.x1, x2 = state.ui.newTab.x2, y = 2 }
-        state.ui.url = { x1 = 13, x2 = state.ui.menuButton.x1 - 1, y = 2 }
+        -- OSK button sits immediately left of the menu button when OSK is enabled
+        local urlEndX
+        if oskEnabled() then
+            local oskBtnX2 = state.ui.menuButton.x1 - 1
+            local oskBtnX1 = oskBtnX2 - 2
+            if oskBtnX1 >= 14 then
+                state.ui.oskButton = { x1 = oskBtnX1, x2 = oskBtnX2, y = 2 }
+                urlEndX = oskBtnX1 - 2
+            else
+                state.ui.oskButton = nil
+                urlEndX = state.ui.menuButton.x1 - 1
+            end
+        else
+            state.ui.oskButton = nil
+            urlEndX = state.ui.menuButton.x1 - 1
+        end
+        state.ui.url = { x1 = 13, x2 = urlEndX, y = 2 }
         state.ui.tabs = {}
         state.ui.tabClose = {}
 
@@ -63,6 +190,7 @@ return function(deps)
             state.ui.newTab = { x1 = w + 1, x2 = w, y = 1 }
             state.ui.menuButton = { x1 = state.ui.newTab.x1, x2 = state.ui.newTab.x2, y = 2 }
             state.ui.url = { x1 = 13, x2 = state.ui.menuButton.x1 - 1, y = 2 }
+            state.ui.oskButton = nil
             local tabsEnd = w
             if tabsEnd >= tabsStart then
                 state.ui.tabs[1] = { x1 = tabsStart, x2 = tabsEnd, y = 1, index = expandedIndex }
@@ -345,6 +473,19 @@ return function(deps)
             writeClipped(state.ui.menuButton.x1, 2, string.rep(" ", menuWidth), menuFg, menuBg)
             local menuX = state.ui.menuButton.x1 + math.floor((menuWidth - 1) / 2)
             writeClipped(menuX, 2, "=", menuFg, menuBg)
+        end
+
+        -- OSK toggle button ("K"), always visible left of "=" when OSK setting is enabled
+        local oskBtn = state.ui.oskButton
+        if oskBtn and oskBtn.x1 <= oskBtn.x2 then
+            local osk = getOskState()
+            local isOpen = osk and osk.open
+            local btnBg = isOpen and colors.white or colors.gray
+            local btnFg = isOpen and colors.black or colors.lightGray
+            local btnW = oskBtn.x2 - oskBtn.x1 + 1
+            writeClipped(oskBtn.x1, 2, string.rep(" ", btnW), btnFg, btnBg)
+            local labelX = oskBtn.x1 + math.floor((btnW - 1) / 2)
+            writeClipped(labelX, 2, "K", btnFg, btnBg)
         end
 
         local function drawButton(region, label, enabled, active)
@@ -659,6 +800,63 @@ return function(deps)
         term.setCursorBlink(false)
     end
 
+    -- Draw the on-screen keyboard panel at the bottom of the screen.
+    local function drawOsk()
+        if not oskEnabled() then return end
+        local osk = getOskState()
+        if not osk or not osk.open then return end
+
+        local w, h = term.getSize()
+        local y1 = h - OSK_ROWS + 1
+
+        -- Fill OSK background (gap color between keys)
+        for y = y1, h do
+            term.setCursorPos(1, y)
+            term.setBackgroundColor(colors.gray)
+            term.setTextColor(colors.lightGray)
+            term.write(string.rep(" ", w))
+        end
+
+        local oskRows = buildOskRows(w, h, osk)
+
+        for _, row in ipairs(oskRows) do
+            for _, key in ipairs(row) do
+                local kw = key.x2 - key.x1 + 1
+                if kw >= 1 then
+                    local isActive = (key.action == "shift" and (osk.shift or false))
+                        or (key.action == "ctrl" and (osk.ctrl or false))
+                    local bg = isActive and colors.blue or colors.lightGray
+                    local fg = isActive and colors.white or colors.black
+
+                    -- Inner key surface (1 px gap on each side when possible)
+                    local innerX1 = key.x1 + 1
+                    local innerX2 = key.x2 - 1
+                    if innerX1 > innerX2 then
+                        innerX1 = key.x1
+                        innerX2 = key.x2
+                    end
+                    local innerW = innerX2 - innerX1 + 1
+
+                    term.setCursorPos(innerX1, key.y)
+                    term.setBackgroundColor(bg)
+                    term.setTextColor(fg)
+                    term.write(string.rep(" ", innerW))
+
+                    local lbl = tostring(key.label or "")
+                    if #lbl > innerW then lbl = lbl:sub(1, innerW) end
+                    if #lbl > 0 then
+                        local labelX = innerX1 + math.floor((innerW - #lbl) / 2)
+                        term.setCursorPos(labelX, key.y)
+                        term.write(lbl)
+                    end
+                end
+            end
+        end
+
+        -- Store layout for click handling
+        state.ui.oskLayout = oskRows
+    end
+
     return {
         layoutUi = layoutUi,
         tabIndexAt = tabIndexAt,
@@ -666,5 +864,6 @@ return function(deps)
         drawTopBar = drawTopBar,
         drawPage = drawPage,
         draw = draw,
+        drawOsk = drawOsk,
     }
 end

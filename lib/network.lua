@@ -612,6 +612,13 @@ return function(core, options)
                 elseif choice == "disabled" then
                     value = "false"
                 end
+            elseif key == "osk_enabled" then
+                local choice = trim(tostring(params.osk_choice or "")):lower()
+                if choice == "enabled" then
+                    value = "true"
+                elseif choice == "disabled" then
+                    value = "false"
+                end
             elseif key == "fullscreen_mode" then
                 local choice = trim(tostring(params.fullscreen_mode_choice or "")):lower()
                 if choice == "seamless" or choice == "seemless" then
@@ -688,6 +695,7 @@ return function(core, options)
         local historyEnabled = isEnabled(settings.history_enabled, true)
         local usageGuardEnabled = isEnabled(settings.usage_guard_enabled, true)
         local pauseAppletsEnabled = isEnabled(settings.pause_inactive_applets, true)
+        local oskEnabledSetting = isEnabled(settings.osk_enabled, false)
 
         local fullscreenModeChoice = trim(tostring(settings.fullscreen_mode or "normal")):lower()
         if fullscreenModeChoice ~= "seamless" and fullscreenModeChoice ~= "seemless" then
@@ -793,6 +801,8 @@ return function(core, options)
             USAGE_GUARD_RADIO_DISABLED_CHECKED = usageGuardEnabled and "" or "checked",
             PAUSE_APPLETS_RADIO_ENABLED_CHECKED = pauseAppletsEnabled and "checked" or "",
             PAUSE_APPLETS_RADIO_DISABLED_CHECKED = pauseAppletsEnabled and "" or "checked",
+            OSK_RADIO_ENABLED_CHECKED = oskEnabledSetting and "checked" or "",
+            OSK_RADIO_DISABLED_CHECKED = oskEnabledSetting and "" or "checked",
             FULLSCREEN_MODE_RADIO_NORMAL_CHECKED = fullscreenModeChoice == "normal" and "checked" or "",
             FULLSCREEN_MODE_RADIO_SEAMLESS_CHECKED = fullscreenModeChoice == "seamless" and "checked" or "",
             DEFAULT_MONITOR_OPTIONS = table.concat(monitorOptionsMarkup),
