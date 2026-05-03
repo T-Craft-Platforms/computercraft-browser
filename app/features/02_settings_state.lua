@@ -745,6 +745,56 @@ function applyDecodedHistory(historyTable)
     end
 end
 
+local function serializerCandidates()
+    local candidates = {}
+    if not textutils then
+        return candidates
+    end
+    if type(textutils.serialize) == "function" then
+        candidates[#candidates + 1] = textutils.serialize
+    end
+    if type(textutils.serialise) == "function" and textutils.serialise ~= textutils.serialize then
+        candidates[#candidates + 1] = textutils.serialise
+    end
+    return candidates
+end
+
+local function deserializerCandidates()
+    local candidates = {}
+    if not textutils then
+        return candidates
+    end
+    if type(textutils.unserialize) == "function" then
+        candidates[#candidates + 1] = textutils.unserialize
+    end
+    if type(textutils.unserialise) == "function" and textutils.unserialise ~= textutils.unserialize then
+        candidates[#candidates + 1] = textutils.unserialise
+    end
+    return candidates
+end
+
+local function encodeStorageTable(tableValue)
+    local candidates = serializerCandidates()
+    for i = 1, #candidates do
+        local okEncode, encoded = pcall(candidates[i], tableValue)
+        if okEncode and type(encoded) == "string" and encoded ~= "" then
+            return encoded, nil
+        end
+    end
+    return nil, "Serializer unavailable"
+end
+
+local function decodeStorageTable(payload)
+    local candidates = deserializerCandidates()
+    for i = 1, #candidates do
+        local okParse, decoded = pcall(candidates[i], payload)
+        if okParse and type(decoded) == "table" then
+            return decoded, nil
+        end
+    end
+    return nil, "Saved data is invalid"
+end
+
 function readSerializedTable(path)
     if not fs.exists(path) then
         return nil, "File not found"
@@ -757,18 +807,14 @@ function readSerializedTable(path)
         return nil, "Saved data is empty"
     end
 
-    local okParse, decoded = pcall(textutils.unserialize, payload)
-    if not okParse or type(decoded) ~= "table" then
-        return nil, "Saved data is invalid"
-    end
-    return decoded, nil
+    return decodeStorageTable(payload)
 end
 
 function loadBrowserState()
     if not (fs and fs.exists and fs.open) then
         return false, "Filesystem unavailable"
     end
-    if not (textutils and type(textutils.unserialize) == "function") then
+    if #deserializerCandidates() <= 0 then
         return false, "Serializer unavailable"
     end
 
@@ -810,7 +856,7 @@ persistBrowserState = function(_forceWrite)
     if not (fs and fs.open) then
         return false, "Filesystem unavailable"
     end
-    if not (textutils and type(textutils.serialize) == "function") then
+    if #serializerCandidates() <= 0 then
         return false, "Serializer unavailable"
     end
     local okStorage, storageErr = ensureStoragePaths()
@@ -828,10 +874,13 @@ persistBrowserState = function(_forceWrite)
         version = 2,
         entries = persistedBrowserHistoryEntries(),
     }
-    local configEncoded = textutils.serialize(configSnapshot)
-    local historyEncoded = textutils.serialize(historySnapshot)
-    if not configEncoded or not historyEncoded then
-        return false, "Failed to encode state"
+    local configEncoded, configEncodeErr = encodeStorageTable(configSnapshot)
+    if not configEncoded then
+        return false, tostring(configEncodeErr or "Failed to encode state")
+    end
+    local historyEncoded, historyEncodeErr = encodeStorageTable(historySnapshot)
+    if not historyEncoded then
+        return false, tostring(historyEncodeErr or "Failed to encode history state")
     end
 
     local okConfigWrite, configWriteErr = writeTextFile(browserConfigPath(), configEncoded)
@@ -855,8 +904,8 @@ end
 
 local initialStorageReady = ensureStoragePaths()
 if initialStorageReady then
-    loadBrowserState()
-    if not fs.exists(browserConfigPath()) or not fs.exists(browserHistoryPath()) then
+    local loadedStateOk = loadBrowserState()
+    if not loadedStateOk or not fs.exists(browserConfigPath()) or not fs.exists(browserHistoryPath()) then
         persistBrowserState(true)
         log("initialized browser state store", LogLevel.info)
     end
