@@ -56,6 +56,9 @@ return function(core, options)
         if not fs.exists(path) then
             return nil, "File not found: " .. path
         end
+        if fs.isDir(path) then
+            return nil, "Path is a directory: " .. path
+        end
         local handle = fs.open(path, "r")
         if not handle then
             return nil, "Could not open file: " .. path
@@ -63,6 +66,138 @@ return function(core, options)
         local content = handle.readAll() or ""
         handle.close()
         return content
+    end
+
+    local function normalizeFileSystemPath(path)
+        local raw = tostring(path or "")
+        if raw == "" then
+            return "/"
+        end
+
+        local normalized = fs.combine(raw, "")
+        if raw:sub(1, 1) == "/" and normalized:sub(1, 1) ~= "/" then
+            normalized = "/" .. normalized
+        end
+        if normalized == "" then
+            return "/"
+        end
+        if normalized ~= "/" and normalized:sub(-1) == "/" then
+            normalized = normalized:sub(1, -2)
+        end
+        return normalized
+    end
+
+    local function resolveFileUrlPath(parsed)
+        local path = parsed.path or ""
+        if parsed.authority ~= nil and parsed.authority ~= "" then
+            if parsed.path == nil or parsed.path == "" or parsed.path == "/" then
+                path = parsed.authority
+            else
+                path = parsed.authority .. parsed.path
+            end
+        end
+        path = decodeUrlPath(path)
+        if path == "" then
+            path = "/"
+        end
+        return normalizeFileSystemPath(path)
+    end
+
+    local function encodeFileUrlPath(path)
+        local source = tostring(path or "/")
+        if source == "" then
+            source = "/"
+        end
+
+        local hasLeadingSlash = source:sub(1, 1) == "/"
+        local encodedParts = {}
+        for segment in source:gmatch("[^/]+") do
+            encodedParts[#encodedParts + 1] = segment:gsub("([^%w%-_%.~])", function(ch)
+                return ("%%%02X"):format(string.byte(ch))
+            end)
+        end
+
+        local encoded = table.concat(encodedParts, "/")
+        if hasLeadingSlash then
+            encoded = "/" .. encoded
+        end
+        if encoded == "" then
+            encoded = "/"
+        end
+        return encoded
+    end
+
+    local function buildFileUrl(path, forceTrailingSlash)
+        local normalized = normalizeFileSystemPath(path)
+        local encodedPath = encodeFileUrlPath(normalized)
+        if forceTrailingSlash and encodedPath ~= "/" then
+            encodedPath = encodedPath .. "/"
+        end
+        return "file://" .. encodedPath
+    end
+
+    local function buildDirectoryListing(path)
+        if not fs.exists(path) then
+            return nil, "File not found: " .. tostring(path)
+        end
+        if not fs.isDir(path) then
+            return nil, "Path is not a directory: " .. tostring(path)
+        end
+
+        local normalized = normalizeFileSystemPath(path)
+        local rows = {}
+        rows[#rows + 1] = "<html><body>"
+        rows[#rows + 1] = "<h2>Index of " .. escapeHtml(buildFileUrl(normalized, true)) .. "</h2>"
+        rows[#rows + 1] = "<ul>"
+
+        if normalized ~= "/" then
+            local parentPath = fs.getDir(normalized)
+            if parentPath == "" then
+                parentPath = "/"
+            end
+            rows[#rows + 1] = ("<li><a href=\"%s\">[..]</a></li>"):format(
+                escapeHtml(buildFileUrl(parentPath, true))
+            )
+        end
+
+        local entries = {}
+        for _, name in ipairs(fs.list(normalized) or {}) do
+            local childPath = normalizeFileSystemPath(fs.combine(normalized, name))
+            local isDir = fs.isDir(childPath)
+            entries[#entries + 1] = {
+                name = tostring(name),
+                path = childPath,
+                isDir = isDir,
+            }
+        end
+
+        table.sort(entries, function(a, b)
+            if a.isDir ~= b.isDir then
+                return a.isDir and not b.isDir
+            end
+            local aName = a.name:lower()
+            local bName = b.name:lower()
+            if aName ~= bName then
+                return aName < bName
+            end
+            return a.name < b.name
+        end)
+
+        for _, entry in ipairs(entries) do
+            local link = buildFileUrl(entry.path, entry.isDir)
+            local label = entry.name
+            if entry.isDir then
+                label = label .. "/"
+            end
+            rows[#rows + 1] = ("<li><a href=\"%s\">%s</a></li>"):format(
+                escapeHtml(link),
+                escapeHtml(label)
+            )
+        end
+
+        rows[#rows + 1] = "</ul>"
+        rows[#rows + 1] = "</body></html>"
+        return table.concat(rows, "\n"), nil
     end
 
     local function fetchRemote(url, requestOptions)
@@ -863,23 +998,19 @@ return function(core, options)
         end
 
         if parsed and parsed.scheme == "file" then
-            local path = parsed.path or ""
-            if parsed.authority ~= nil and parsed.authority ~= "" then
-                if parsed.path == nil or parsed.path == "" or parsed.path == "/" then
-                    path = parsed.authority
-                else
-                    path = parsed.authority .. parsed.path
+            local path = resolveFileUrlPath(parsed)
+            if fs.exists(path) and fs.isDir(path) then
+                local body, err = buildDirectoryListing(path)
+                if not body then
+                    return nil, url, nil, err
                 end
-            end
-            path = decodeUrlPath(path)
-            if path == "" then
-                path = "/"
+                return body, buildFileUrl(path, true), { ["Content-Type"] = "text/html" }, nil
             end
             local body, err = readLocalFile(path)
             if not body then
                 return nil, url, nil, err
             end
-            return body, url, { ["Content-Type"] = "text/plain" }, nil
+            return body, buildFileUrl(path, false), { ["Content-Type"] = "text/plain" }, nil
         end
 
         if parsed and (parsed.scheme == "http" or parsed.scheme == "https") then
@@ -899,11 +1030,18 @@ return function(core, options)
         end
 
         if fs.exists(url) then
+            if fs.isDir(url) then
+                local body, err = buildDirectoryListing(url)
+                if not body then
+                    return nil, url, nil, err
+                end
+                return body, buildFileUrl(url, true), { ["Content-Type"] = "text/html" }, nil
+            end
             local body, err = readLocalFile(url)
             if not body then
                 return nil, url, nil, err
             end
-            return body, "file://" .. url, { ["Content-Type"] = "text/plain" }, nil
+            return body, buildFileUrl(url, false), { ["Content-Type"] = "text/plain" }, nil
         end
 
         return nil, url, nil, "Unsupported URL scheme"
