@@ -133,6 +133,7 @@ function createTab(initialUrl)
         settingsStickyStatus = nil,
         pendingApplet = nil,
         applet = nil,
+        midi = nil,
     }
 end
 
@@ -166,6 +167,10 @@ state = {
         timer = nil,
         tabIndex = nil,
         intervalMs = nil,
+    },
+    midiPlayback = {
+        timer = nil,
+        intervalSeconds = 0.05,
     },
     running = true,
     initialTermBackground = nil,
@@ -224,6 +229,9 @@ local tabState = createTabState({
     end,
     getFlushPausedAppletQueue = function()
         return flushPausedAppletQueue
+    end,
+    getStopMidiForTab = function()
+        return stopMidiForTab
     end,
     PAUSED_APPLET_EVENT_MAX = PAUSED_APPLET_EVENT_MAX,
 })
@@ -1081,6 +1089,9 @@ function handleModalEvent(event)
     local spec = state.modal.spec or {}
     local name = event[1]
     if name == "timer" then
+        if handleMidiTimer and handleMidiTimer(event[2]) then
+            return true
+        end
         if state.animationTimer and event[2] == state.animationTimer then
             state.animationTimer = nil
             scheduleAnimationTick()

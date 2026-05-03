@@ -201,6 +201,11 @@ function handlePageContentClick(button, x, y, tab, topRows)
             state.menuOpen = false
             return handleAppletActionNavigation(href, tab)
         end
+        local midiAction = select(1, parseMidiActionUrl(href))
+        if midiAction ~= nil and tab.midi then
+            state.menuOpen = false
+            return handleMidiActionNavigation(href, tab)
+        end
         state.menuOpen = false
         navigate(href, true, false, tab)
         return true
@@ -829,6 +834,10 @@ scheduleAnimationTick = function()
 end
 
 function handleTimer(timerId)
+    if handleMidiTimer and handleMidiTimer(timerId) then
+        return
+    end
+
     if state.animationTimer and timerId == state.animationTimer then
         state.animationTimer = nil
         scheduleAnimationTick()

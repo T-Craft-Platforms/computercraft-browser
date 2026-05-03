@@ -17,6 +17,9 @@ return function(deps)
     local getFlushPausedAppletQueue = deps.getFlushPausedAppletQueue or function()
         return nil
     end
+    local getStopMidiForTab = deps.getStopMidiForTab or function()
+        return nil
+    end
     local PAUSED_APPLET_EVENT_MAX = deps.PAUSED_APPLET_EVENT_MAX or 512
 
     local api = {}
@@ -350,6 +353,10 @@ return function(deps)
             if stopAppletForTab then
                 stopAppletForTab(tab, true)
             end
+            local stopMidiForTab = getStopMidiForTab()
+            if stopMidiForTab then
+                stopMidiForTab(tab, true)
+            end
             tab.currentUrl = "about:blank"
             tab.urlInput = "about:blank"
             tab.urlCursor = #tab.urlInput + 1
@@ -381,6 +388,7 @@ return function(deps)
             tab.settingsStickyStatus = nil
             tab.pendingApplet = nil
             tab.applet = nil
+            tab.midi = nil
             state.tabDrag = nil
             state.scrollbarDrag = nil
             state.menuOpen = false
@@ -392,6 +400,10 @@ return function(deps)
         local stopAppletForTab = getStopAppletForTab()
         if removedTab and stopAppletForTab then
             stopAppletForTab(removedTab, true)
+        end
+        local stopMidiForTab = getStopMidiForTab()
+        if removedTab and stopMidiForTab then
+            stopMidiForTab(removedTab, true)
         end
         table.remove(state.tabs, targetIndex)
         if targetIndex < state.activeTab then
