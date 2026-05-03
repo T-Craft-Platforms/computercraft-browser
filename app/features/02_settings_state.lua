@@ -29,6 +29,7 @@ local MUTABLE_SETTING_KEYS = {
     usage_guard_enabled = true,
     pause_inactive_applets = true,
     osk_enabled = true,
+    osk_layout = true,
     fullscreen_mode = true,
     default_monitor = true,
     browser_engine_level = true,
@@ -296,6 +297,19 @@ function setBrowserSetting(key, value)
     end
     if normalized == "osk_enabled" then
         return setBooleanBrowserSetting(normalized, value)
+    end
+    if normalized == "osk_layout" then
+        local lowered = core.trim(tostring(value or "")):lower()
+        if lowered ~= "qwerty" and lowered ~= "qwertz" and lowered ~= "azerty" then
+            return false, "Invalid osk_layout value (expected qwerty/qwertz/azerty)"
+        end
+        local layout = normalizeOskLayout(lowered)
+        browserSettings[normalized] = layout
+        if persistBrowserState then
+            persistBrowserState()
+        end
+        log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
+        return true, nil
     end
     if normalized == "fullscreen_mode" then
         local lowered = core.trim(tostring(value or "")):lower()
@@ -654,6 +668,8 @@ function applyDecodedConfig(decoded)
                     browserSettings[normalized] = normalizeSettingColorName(rawValue, "black")
                 elseif normalized == "default_fg_color" then
                     browserSettings[normalized] = normalizeSettingColorName(rawValue, "white")
+                elseif normalized == "osk_layout" then
+                    browserSettings[normalized] = normalizeOskLayout(rawValue)
                 elseif normalized == "home_page" then
                     local homePage = core.trim(tostring(rawValue or ""))
                     if homePage ~= "" then
@@ -661,7 +677,8 @@ function applyDecodedConfig(decoded)
                     end
                 elseif normalized == "history_enabled"
                     or normalized == "usage_guard_enabled"
-                    or normalized == "pause_inactive_applets" then
+                    or normalized == "pause_inactive_applets"
+                    or normalized == "osk_enabled" then
                     local parsed = parseBooleanSetting(rawValue)
                     if parsed ~= nil then
                         browserSettings[normalized] = parsed and "true" or "false"
@@ -680,6 +697,7 @@ function applyDecodedConfig(decoded)
     browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
     browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
     browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
+    browserSettings.osk_layout = normalizeOskLayout(browserSettings.osk_layout)
     browserPolicies = normalizedBrowserPolicies(browserPolicies)
 
     browserFavorites = {}
@@ -853,6 +871,7 @@ browserSettings.default_monitor = normalizeMonitorChoice(browserSettings.default
 browserSettings.browser_engine_level = normalizeBrowserEngineLevel(browserSettings.browser_engine_level)
 browserSettings.default_bg_color = normalizeSettingColorName(browserSettings.default_bg_color, "black")
 browserSettings.default_fg_color = normalizeSettingColorName(browserSettings.default_fg_color, "white")
+browserSettings.osk_layout = normalizeOskLayout(browserSettings.osk_layout)
 browserPolicies = normalizedBrowserPolicies(browserPolicies)
 
 local network = createNetwork(core, {

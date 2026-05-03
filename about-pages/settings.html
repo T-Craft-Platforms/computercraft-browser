@@ -254,9 +254,7 @@
         value="enabled"
         {{OSK_RADIO_ENABLED_CHECKED}}
       />
-      <label for="osk-enabled"
-        >Enabled - shows a "K" button in the toolbar</label
-      ><br />
+      <label for="osk-enabled">Enabled (default)</label><br />
 
       <input
         id="osk-disabled"
@@ -268,6 +266,54 @@
       <label for="osk-disabled">Disabled</label><br />
 
       <button id="set-osk-submit" name="submit_set_osk" type="submit" value="1">
+        Save
+      </button>
+    </form>
+
+    <form
+      id="set-osk-layout-form"
+      class="settings-form"
+      name="set_osk_layout"
+      method="get"
+      action="about:settings"
+    >
+      <input name="action" type="hidden" value="set" />
+      <input name="key" type="hidden" value="osk_layout" />
+
+      <label for="osk-layout-qwerty">OSK layout</label><br />
+      <input
+        id="osk-layout-qwerty"
+        name="osk_layout_choice"
+        type="radio"
+        value="qwerty"
+        {{OSK_LAYOUT_RADIO_QWERTY_CHECKED}}
+      />
+      <label for="osk-layout-qwerty">QWERTY</label><br />
+
+      <input
+        id="osk-layout-qwertz"
+        name="osk_layout_choice"
+        type="radio"
+        value="qwertz"
+        {{OSK_LAYOUT_RADIO_QWERTZ_CHECKED}}
+      />
+      <label for="osk-layout-qwertz">QWERTZ</label><br />
+
+      <input
+        id="osk-layout-azerty"
+        name="osk_layout_choice"
+        type="radio"
+        value="azerty"
+        {{OSK_LAYOUT_RADIO_AZERTY_CHECKED}}
+      />
+      <label for="osk-layout-azerty">AZERTY</label><br />
+
+      <button
+        id="set-osk-layout-submit"
+        name="submit_set_osk_layout"
+        type="submit"
+        value="1"
+      >
         Save
       </button>
     </form>

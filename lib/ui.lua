@@ -17,7 +17,22 @@ return function(deps)
     local normalizedPageSelection = deps.normalizedPageSelection
     local pageSelectionContains = deps.pageSelectionContains
     local oskEnabled = deps.oskEnabled or function() return false end
-    local getOskState = deps.getOskState or function() return { open = false, page = 1, shift = false, ctrl = false } end
+    local getOskState = deps.getOskState or function()
+        return {
+            open = false,
+            page = 1,
+            shift = false,
+            caps = false,
+            ctrl = false,
+            accentMenu = false,
+            pendingAccent = nil,
+            pressedKey = nil,
+            pressedUntil = 0,
+        }
+    end
+    local getOskLayout = deps.getOskLayout or function()
+        return "qwerty"
+    end
 
     local OSK_ROWS = 4
 
@@ -51,76 +66,176 @@ return function(deps)
         return result
     end
 
+    local function oskLetterRows(layoutName)
+        local rows = {
+            row1 = {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"},
+            row2 = {"a", "s", "d", "f", "g", "h", "j", "k", "l"},
+            row3 = {"z", "x", "c", "v", "b", "n", "m"},
+        }
+        if layoutName == "qwertz" then
+            rows.row1 = {"q", "w", "e", "r", "t", "z", "u", "i", "o", "p"}
+            rows.row2 = {"a", "s", "d", "f", "g", "h", "j", "k", "l"}
+            rows.row3 = {"y", "x", "c", "v", "b", "n", "m"}
+        elseif layoutName == "azerty" then
+            rows.row1 = {"a", "z", "e", "r", "t", "y", "u", "i", "o", "p"}
+            rows.row2 = {"q", "s", "d", "f", "g", "h", "j", "k", "l", "m"}
+            rows.row3 = {"w", "x", "c", "v", "b", "n"}
+        end
+        return rows
+    end
+
+    local function resolveLetterValue(letter, shift, caps)
+        local upper = (caps and not shift) or (shift and not caps)
+        return upper and letter:upper() or letter
+    end
+
+    local function resolveSymbolValue(baseValue, shiftedValue, shift, caps)
+        if shiftedValue and (shift or caps) then
+            return shiftedValue
+        end
+        return baseValue
+    end
+
+    local function makeLetterKeys(chars, shift, caps)
+        local out = {}
+        for _, c in ipairs(chars) do
+            local rendered = resolveLetterValue(c, shift, caps)
+            out[#out + 1] = {
+                label = rendered,
+                action = "char",
+                value = rendered,
+                weight = 1,
+            }
+        end
+        return out
+    end
+
+    local function makeSymbolKey(label, value, shiftedValue, shift, caps, weight)
+        local rendered = resolveSymbolValue(value, shiftedValue, shift, caps)
+        return {
+            label = label or rendered,
+            action = "char",
+            value = rendered,
+            weight = weight or 1,
+        }
+    end
+
     -- Build all 4 OSK rows for the given page/modifier state.
     local function buildOskRows(w, h, osk)
         local page = osk.page or 1
         local shift = osk.shift or false
+        local caps = osk.caps or false
         local ctrl = osk.ctrl or false
         local y1 = h - OSK_ROWS + 1
         local rows = {}
+        local layout = oskLetterRows(tostring(getOskLayout() or "qwerty"):lower())
 
         if page == 1 then
-            -- Row 1: q-p
-            local r1 = {}
-            for _, c in ipairs({"q","w","e","r","t","y","u","i","o","p"}) do
-                local v = shift and c:upper() or c
-                r1[#r1+1] = {label=v, action="char", value=v, weight=1}
-            end
-            rows[1] = computeKeyRow(w, y1, r1)
+            rows[1] = computeKeyRow(w, y1, makeLetterKeys(layout.row1, shift, caps))
 
-            -- Row 2: a-l (9 keys)
-            local r2 = {}
-            for _, c in ipairs({"a","s","d","f","g","h","j","k","l"}) do
-                local v = shift and c:upper() or c
-                r2[#r2+1] = {label=v, action="char", value=v, weight=1}
-            end
-            rows[2] = computeKeyRow(w, y1 + 1, r2)
+            local row2 = makeLetterKeys(layout.row2, shift, caps)
+            row2[#row2 + 1] = makeSymbolKey(nil, ".", ":", shift, caps)
+            rows[2] = computeKeyRow(w, y1 + 1, row2)
 
-            -- Row 3: SHIFT + z-m + DEL
-            local r3 = {}
-            r3[1] = {label=shift and "SH!" or " ^ ", action="shift", weight=1.5}
-            for _, c in ipairs({"z","x","c","v","b","n","m"}) do
-                local v = shift and c:upper() or c
-                r3[#r3+1] = {label=v, action="char", value=v, weight=1}
+            local row3 = {
+                {label = "^", action = "shift", weight = 1.8},
+            }
+            local letters = makeLetterKeys(layout.row3, shift, caps)
+            for _, key in ipairs(letters) do
+                row3[#row3 + 1] = key
             end
-            r3[#r3+1] = {label="<--", action="backspace", weight=1.5}
-            rows[3] = computeKeyRow(w, y1 + 2, r3)
+            row3[#row3 + 1] = makeSymbolKey(nil, "/", "?", shift, caps, 1)
+            row3[#row3 + 1] = makeSymbolKey(nil, "-", "_", shift, caps, 1)
+            row3[#row3 + 1] = {label = "<--", action = "backspace", weight = 2.0}
+            rows[3] = computeKeyRow(w, y1 + 2, row3)
 
-            -- Row 4: 123 / SPACE / ENT
             rows[4] = computeKeyRow(w, y1 + 3, {
-                {label="123", action="page2", weight=3},
-                {label="SPACE", action="space", weight=9},
-                {label="ENT", action="enter", weight=3},
+                {label = "CTRL", action = "ctrl", weight = 2.2},
+                {label = "123", action = "page2", weight = 1.8},
+                {label = "TAB", action = "tab", weight = 1.8},
+                {label = "SPACE", action = "space", weight = 7.2},
+                {label = "ENT", action = "enter", weight = 2.2},
+            })
+        elseif page == 2 then
+            rows[1] = computeKeyRow(w, y1, {
+                makeSymbolKey(nil, "1", nil, false, false),
+                makeSymbolKey(nil, "2", nil, false, false),
+                makeSymbolKey(nil, "3", nil, false, false),
+                makeSymbolKey(nil, "4", nil, false, false),
+                makeSymbolKey(nil, "5", nil, false, false),
+                makeSymbolKey(nil, "6", nil, false, false),
+                makeSymbolKey(nil, "7", nil, false, false),
+                makeSymbolKey(nil, "8", nil, false, false),
+                makeSymbolKey(nil, "9", nil, false, false),
+                makeSymbolKey(nil, "0", nil, false, false),
+            })
+
+            rows[2] = computeKeyRow(w, y1 + 1, {
+                makeSymbolKey(nil, ".", ":", false, false),
+                makeSymbolKey(nil, "-", "_", false, false),
+                makeSymbolKey(nil, "/", "?", false, false),
+                makeSymbolKey(nil, ";", ":", false, false),
+                makeSymbolKey(nil, "'", "\"", false, false),
+                makeSymbolKey(nil, "(", ")", false, false),
+                makeSymbolKey(nil, "[", "]", false, false),
+                makeSymbolKey(nil, "=", "+", false, false),
+            })
+
+            rows[3] = computeKeyRow(w, y1 + 2, {
+                makeSymbolKey(nil, ",", "<", false, false),
+                makeSymbolKey(nil, "!", "!", false, false),
+                makeSymbolKey(nil, "?", "?", false, false),
+                makeSymbolKey(nil, "_", "_", false, false),
+                makeSymbolKey(nil, ":", ":", false, false),
+                {label = "<--", action = "backspace", weight = 2.2},
+            })
+
+            rows[4] = computeKeyRow(w, y1 + 3, {
+                {label = "CTRL", action = "ctrl", weight = 2.2},
+                {label = "abc", action = "page1", weight = 2.0},
+                {label = "...", action = "page3", weight = 2.0},
+                {label = "SPACE", action = "space", weight = 7.2},
+                {label = "ENT", action = "enter", weight = 2.2},
             })
         else
-            -- Row 1: 1-0
-            local r1 = {}
-            for _, c in ipairs({"1","2","3","4","5","6","7","8","9","0"}) do
-                r1[#r1+1] = {label=c, action="char", value=c, weight=1}
-            end
-            rows[1] = computeKeyRow(w, y1, r1)
+            rows[1] = computeKeyRow(w, y1, {
+                makeSymbolKey(nil, "@", "@", false, false),
+                makeSymbolKey(nil, "#", "#", false, false),
+                makeSymbolKey(nil, "$", "$", false, false),
+                makeSymbolKey(nil, "%", "%", false, false),
+                makeSymbolKey(nil, "&", "&", false, false),
+                makeSymbolKey(nil, "*", "*", false, false),
+                makeSymbolKey(nil, "`", "`", false, false),
+                makeSymbolKey(nil, "~", "~", false, false),
+                makeSymbolKey(nil, "^", "^", false, false),
+            })
 
-            -- Row 2: punctuation
-            local r2 = {}
-            for _, c in ipairs({"-","/",":",";","(",")","@","#",".",","}) do
-                r2[#r2+1] = {label=c, action="char", value=c, weight=1}
-            end
-            rows[2] = computeKeyRow(w, y1 + 1, r2)
+            rows[2] = computeKeyRow(w, y1 + 1, {
+                makeSymbolKey(nil, "{", "{", false, false),
+                makeSymbolKey(nil, "}", "}", false, false),
+                makeSymbolKey(nil, "<", "<", false, false),
+                makeSymbolKey(nil, ">", ">", false, false),
+                makeSymbolKey(nil, "\\", "\\", false, false),
+                makeSymbolKey(nil, "|", "|", false, false),
+                makeSymbolKey(nil, "\"", "\"", false, false),
+                makeSymbolKey(nil, "+", "+", false, false),
+            })
 
-            -- Row 3: CTRL + symbols + DEL
-            local r3 = {}
-            r3[1] = {label=ctrl and "CTR!" or "CTR", action="ctrl", weight=1.5}
-            for _, c in ipairs({"?","!","=","+","_","~","%","&"}) do
-                r3[#r3+1] = {label=c, action="char", value=c, weight=1}
-            end
-            r3[#r3+1] = {label="<--", action="backspace", weight=1.5}
-            rows[3] = computeKeyRow(w, y1 + 2, r3)
+            rows[3] = computeKeyRow(w, y1 + 2, {
+                makeSymbolKey(nil, ")", ")", false, false),
+                makeSymbolKey(nil, "]", "]", false, false),
+                makeSymbolKey(nil, "{", "{", false, false),
+                makeSymbolKey(nil, "}", "}", false, false),
+                makeSymbolKey(nil, "|", "|", false, false),
+                {label = "<--", action = "backspace", weight = 2.2},
+            })
 
-            -- Row 4: abc / SPACE / ENT
             rows[4] = computeKeyRow(w, y1 + 3, {
-                {label="abc", action="page1", weight=3},
-                {label="SPACE", action="space", weight=9},
-                {label="ENT", action="enter", weight=3},
+                {label = "CTRL", action = "ctrl", weight = 2.2},
+                {label = "abc", action = "page1", weight = 2.0},
+                {label = "123", action = "page2", weight = 2.0},
+                {label = "SPACE", action = "space", weight = 7.2},
+                {label = "ENT", action = "enter", weight = 2.2},
             })
         end
 
@@ -802,9 +917,15 @@ return function(deps)
 
     -- Draw the on-screen keyboard panel at the bottom of the screen.
     local function drawOsk()
-        if not oskEnabled() then return end
+        if not oskEnabled() then
+            state.ui.oskLayout = nil
+            return
+        end
         local osk = getOskState()
-        if not osk or not osk.open then return end
+        if not osk or not osk.open then
+            state.ui.oskLayout = nil
+            return
+        end
 
         local w, h = term.getSize()
         local y1 = h - OSK_ROWS + 1
@@ -818,15 +939,29 @@ return function(deps)
         end
 
         local oskRows = buildOskRows(w, h, osk)
+        local flash = osk.pressedKey
+        local flashActive = flash
+            and tonumber(osk.pressedUntil) ~= nil
+            and os.clock() <= tonumber(osk.pressedUntil)
 
         for _, row in ipairs(oskRows) do
             for _, key in ipairs(row) do
                 local kw = key.x2 - key.x1 + 1
                 if kw >= 1 then
                     local isActive = (key.action == "shift" and (osk.shift or false))
+                        or (key.action == "shift" and (osk.caps or false))
                         or (key.action == "ctrl" and (osk.ctrl or false))
                     local bg = isActive and colors.blue or colors.lightGray
                     local fg = isActive and colors.white or colors.black
+                    if flashActive
+                        and flash.action == "char"
+                        and key.action == "char"
+                        and flash.y == key.y
+                        and flash.x1 == key.x1
+                        and flash.x2 == key.x2 then
+                        bg = colors.white
+                        fg = colors.black
+                    end
 
                     -- Inner key surface (1 px gap on each side when possible)
                     local innerX1 = key.x1 + 1

@@ -196,6 +196,8 @@ local browserSettings = {
     history_enabled = "true",
     usage_guard_enabled = "true",
     pause_inactive_applets = "true",
+    osk_enabled = "true",
+    osk_layout = "qwerty",
     fullscreen_mode = "normal",
     default_monitor = "internal",
     browser_engine_level = "standard",
@@ -278,6 +280,9 @@ function normalizeSettingKey(key)
     if normalized == "default_text_color" or normalized == "default_foreground_color" then
         return "default_fg_color"
     end
+    if normalized == "keyboard_layout" or normalized == "osk_keyboard_layout" then
+        return "osk_layout"
+    end
     if normalized == "config_dir" or normalized == "settings_path" or normalized == "settings_dir" then
         return "browser_data_dir"
     end
@@ -286,6 +291,14 @@ function normalizeSettingKey(key)
         return "downloads_dir"
     end
     return normalized
+end
+
+function normalizeOskLayout(value)
+    local lowered = core.trim(tostring(value or "")):lower()
+    if lowered == "qwerty" or lowered == "qwertz" or lowered == "azerty" then
+        return lowered
+    end
+    return "qwerty"
 end
 
 function normalizeFullscreenMode(value)

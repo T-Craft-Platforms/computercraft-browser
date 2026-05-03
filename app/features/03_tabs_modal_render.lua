@@ -15,7 +15,7 @@ function pauseInactiveAppletsEnabled()
 end
 
 function oskEnabled()
-    return settingEnabledRaw("osk_enabled", false)
+    return settingEnabledRaw("osk_enabled", true)
 end
 
 function seamlessFullscreenSettingEnabled()
@@ -193,7 +193,12 @@ state = {
         open = false,
         page = 1,
         shift = false,
+        caps = false,
         ctrl = false,
+        accentMenu = false,
+        pendingAccent = nil,
+        pressedKey = nil,
+        pressedUntil = 0,
     },
     ui = {
         tabs = {},
@@ -239,7 +244,7 @@ local tabState = createTabState({
     end,
     PAUSED_APPLET_EVENT_MAX = PAUSED_APPLET_EVENT_MAX,
     getOskRows = function()
-        if settingEnabledRaw("osk_enabled", false) and state.osk and state.osk.open then
+        if settingEnabledRaw("osk_enabled", true) and state.osk and state.osk.open then
             return 4
         end
         return 0
@@ -342,8 +347,11 @@ local ui = createUi({
     getUrlSelection = getUrlSelection,
     normalizedPageSelection = normalizedPageSelection,
     pageSelectionContains = pageSelectionContains,
-    oskEnabled = function() return settingEnabledRaw("osk_enabled", false) end,
+    oskEnabled = function() return settingEnabledRaw("osk_enabled", true) end,
     getOskState = function() return state.osk end,
+    getOskLayout = function()
+        return normalizeOskLayout(browserSettings.osk_layout)
+    end,
 })
 
 local layoutUi = ui.layoutUi

@@ -1,4 +1,40 @@
 -- Handle a key press originating from the on-screen keyboard.
+local ACCENT_COMPOSE = {
+    ["^"] = {
+        a = "â", e = "ê", i = "î", o = "ô", u = "û",
+        A = "Â", E = "Ê", I = "Î", O = "Ô", U = "Û",
+    },
+    ["`"] = {
+        a = "à", e = "è", i = "ì", o = "ò", u = "ù",
+        A = "À", E = "È", I = "Ì", O = "Ò", U = "Ù",
+    },
+    ["´"] = {
+        a = "á", e = "é", i = "í", o = "ó", u = "ú", y = "ý", c = "ć", n = "ń",
+        A = "Á", E = "É", I = "Í", O = "Ó", U = "Ú", Y = "Ý", C = "Ć", N = "Ń",
+    },
+    ["~"] = {
+        a = "ã", n = "ñ", o = "õ",
+        A = "Ã", N = "Ñ", O = "Õ",
+    },
+    ["¨"] = {
+        a = "ä", e = "ë", i = "ï", o = "ö", u = "ü", y = "ÿ",
+        A = "Ä", E = "Ë", I = "Ï", O = "Ö", U = "Ü", Y = "Ÿ",
+    },
+}
+
+local function composeAccentCharacter(character, accent)
+    local map = ACCENT_COMPOSE[tostring(accent or "")]
+    if not map then
+        return character
+    end
+    return map[character] or character
+end
+
+local function oskHitTopRow()
+    local _, h = term.getSize()
+    return h - 4
+end
+
 function handleOskKeyPress(key)
     local osk = state.osk
     if not osk then return end
@@ -6,6 +42,10 @@ function handleOskKeyPress(key)
 
     if action == "char" then
         local c = tostring(key.value or key.label or "")
+        if osk.pendingAccent and c ~= "" then
+            c = composeAccentCharacter(c, osk.pendingAccent)
+            osk.pendingAccent = nil
+        end
         if osk.ctrl then
             -- Simulate Ctrl+<letter> key down
             local keyCode = keys and keys[c:lower()]
@@ -13,6 +53,8 @@ function handleOskKeyPress(key)
                 state.ctrlDown = true
                 handleKeyDown(keyCode)
                 state.ctrlDown = false
+            else
+                handleChar(c)
             end
             osk.ctrl = false
         else
@@ -21,24 +63,75 @@ function handleOskKeyPress(key)
                 osk.shift = false  -- one-shot shift
             end
         end
+        osk.pressedKey = {
+            x1 = key.x1,
+            x2 = key.x2,
+            y = key.y,
+            action = "char",
+        }
+        osk.pressedUntil = os.clock() + 0.14
     elseif action == "space" then
         handleChar(" ")
+        if osk.shift then
+            osk.shift = false
+        end
     elseif action == "backspace" then
-        handleKeyDown(keys.backspace)
+        if osk.ctrl then
+            state.ctrlDown = true
+            handleKeyDown(keys.backspace)
+            state.ctrlDown = false
+            osk.ctrl = false
+        else
+            handleKeyDown(keys.backspace)
+        end
     elseif action == "enter" then
-        handleKeyDown(keys.enter)
+        if osk.ctrl then
+            state.ctrlDown = true
+            handleKeyDown(keys.enter)
+            state.ctrlDown = false
+            osk.ctrl = false
+        else
+            handleKeyDown(keys.enter)
+        end
+    elseif action == "tab" then
+        if osk.ctrl then
+            state.ctrlDown = true
+            handleKeyDown(keys.tab)
+            state.ctrlDown = false
+            osk.ctrl = false
+        else
+            handleKeyDown(keys.tab)
+        end
     elseif action == "shift" then
-        osk.shift = not osk.shift
-        osk.ctrl = false
+        local now = os.clock()
+        local lastTap = tonumber(osk.lastShiftTapAt) or 0
+        local isDoubleTap = (now - lastTap) <= 0.35
+        osk.lastShiftTapAt = now
+        if isDoubleTap then
+            osk.caps = not osk.caps
+            osk.shift = false
+        else
+            if osk.caps then
+                osk.caps = false
+                osk.shift = false
+            else
+                osk.shift = not osk.shift
+            end
+        end
     elseif action == "ctrl" then
         osk.ctrl = not osk.ctrl
-        osk.shift = false
     elseif action == "page1" then
         osk.page = 1
-        osk.ctrl = false
     elseif action == "page2" then
         osk.page = 2
-        osk.ctrl = false
+        osk.shift = false
+    elseif action == "page3" then
+        osk.page = 3
+        osk.shift = false
+    elseif action == "accent_menu" then
+        return
+    elseif action == "accent_pick" then
+        osk.pendingAccent = tostring(key.value or "")
     end
 end
 
@@ -142,6 +235,10 @@ function handleToolbarClick(x)
     if state.ui.oskButton and hitRegion(x, 2, state.ui.oskButton) then
         if state.osk then
             state.osk.open = not state.osk.open
+            if not state.osk.open then
+                state.osk.shift = false
+                state.osk.ctrl = false
+            end
         end
         state.menuOpen = false
         state.tabDrag = nil
@@ -310,8 +407,7 @@ function handleMouseClick(button, x, y)
     -- Route clicks in the OSK area BEFORE clearing focus, so the active
     -- input field / URL bar keeps focus and receives the injected characters.
     if oskEnabled() and state.osk and state.osk.open and not state.fullscreen then
-        local _, h = term.getSize()
-        if y > h - 4 then
+        if y > oskHitTopRow() then
             handleOskClick(button, x, y)
             return
         end
@@ -416,8 +512,7 @@ function handleMouseScroll(direction, _, y)
     end
     -- Prevent scroll when touching the OSK area
     if oskEnabled() and state.osk and state.osk.open and not state.fullscreen then
-        local _, h = term.getSize()
-        if y > h - 4 then return end
+        if y > oskHitTopRow() then return end
     end
     local tab = activeTab()
     setScroll(tab.scroll + direction, tab)
