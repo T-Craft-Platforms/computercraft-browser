@@ -120,5 +120,11 @@ for i = 1, #featureFiles do
     chunks[#chunks + 1] = readAll(path)
 end
 
-local compiled = loadChunk(table.concat(chunks, "\n"), "@lib/content.lua")
+local assembledSource = table.concat({
+    "return function(deps)",
+    table.concat(chunks, "\n"),
+    "end",
+}, "\n")
+
+local compiled = loadChunk(assembledSource, "@lib/content.lua")
 return compiled()

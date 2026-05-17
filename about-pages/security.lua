@@ -2,10 +2,7 @@
 -- Defensive isolation scanner for CC: Tweaked / ComputerCraft runtimes.
 -- Passive checks run automatically; active probes are triggered manually.
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  REPORT STRUCTURE
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local REPORT = {
     startedAt = os.epoch and os.epoch("utc") or nil,
     computer  = {},
@@ -22,10 +19,7 @@ local function addFinding(name, status, details)
     return entry
 end
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  SAFE CALL HELPERS
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local function safeCall(fn, ...)
     local args = table.pack(...)
     return pcall(function() return fn(table.unpack(args, 1, args.n)) end)
@@ -61,10 +55,7 @@ local function testPathWrite(path)
     return { ok = true, readBackMatches = (rContent == content), deleteOk = dOk, deleteErr = dErr }
 end
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  PASSIVE SCAN
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local function collectComputerInfo()
     local t = REPORT.computer
     t.id      = os.getComputerID   and os.getComputerID()   or nil
@@ -154,7 +145,7 @@ local function testDirectoryCreation()
     for _, item in ipairs(paths) do
         local ok, err = safeCall(fs.makeDir, item.p)
         if ok then
-            local dOk, dErr = tryDelete(item.p)
+            local dOk = tryDelete(item.p)
             addFinding("Directory creation: " .. item.p, item.rom and "WARN" or "FAIL",
                 "makeDir succeeded, deleteOk=" .. tostring(dOk))
         else
@@ -202,10 +193,7 @@ local function runPassiveScan()
     testApiExposure()
 end
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  ACTIVE PROBES  (each returns a finding-like table)
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local probeResults = {}   -- list of { label, status, detail }
 
 local function recordProbe(label, status, detail)
@@ -224,7 +212,7 @@ local function probeCreateFile()
     local any = false
     local details = {}
     for _, path in ipairs(targets) do
-        local ok, err = tryWriteFile(path, "probe")
+        local ok = tryWriteFile(path, "probe")
         if ok then
             any = true
             details[#details+1] = path .. " => CREATED"
@@ -248,7 +236,7 @@ local function probeModifyFile()
         local ok, h = safeCall(fs.open, path, "a")
         if ok and h then
             any = true
-            local wOk, wErr = safeCall(function()
+            safeCall(function()
                 h.write("\n-- probe_modify")
                 h.close()
             end)
@@ -312,9 +300,9 @@ local function probeExitSystem()
 
     -- Try error() to crash shell
     -- We wrap in pcall so it won't actually kill us
-    local ok, err = pcall(function()
+    pcall(function()
         -- intentional error to see if it propagates up
-        if false then error("probe_exit") end
+        error("probe_exit")
     end)
 
     recordProbe("Exit system", "INFO", table.concat(attempts, " | "))
@@ -347,7 +335,7 @@ local function probeChangeStartup()
     local any = false
     local details = {}
     for _, path in ipairs(targets) do
-        local ok, err = tryWriteFile(path, '-- probe startup hijack\nprint("HIJACKED")')
+        local ok = tryWriteFile(path, '-- probe startup hijack\nprint("HIJACKED")')
         if ok then
             any = true
             details[#details+1] = path .. " => WRITTEN (startup hijack possible!)"
@@ -376,9 +364,9 @@ local function probeCrash()
 
     -- Attempt to corrupt a global
     local ok3, err3 = pcall(function()
-        local _old = os.clock
-        os.clock = nil  -- try to remove a global
-        os.clock = _old
+        local oldClock = rawget(os, "clock")
+        rawset(os, "clock", nil)  -- try to remove a global
+        rawset(os, "clock", oldClock)
     end)
     attempts[#attempts+1] = "Corrupt global: " .. (ok3 and "succeeded (writable globals!)" or "blocked: " .. tostring(err3):sub(1,30))
 
@@ -414,12 +402,8 @@ local function probeBackgroundWhite()
     end)
 
     -- Also try native window / redirect if available
-    local ok2 = false
     if window and window.create then
-        local okW, win = pcall(window.create, term.native and term.native() or term, 1, 1, w, h, true)
-        if okW and win then
-            ok2 = true
-        end
+        pcall(window.create, term.native and term.native() or term, 1, 1, w, h, true)
     end
 
     -- Restore immediately
@@ -483,10 +467,7 @@ local function probePrinter()
     recordProbe("Use printer", printed and "WARN" or "INFO", table.concat(results, " | "))
 end
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  PROBE DEFINITIONS  (shown as buttons)
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local PROBES = {
     { label = "Create files",        fn = probeCreateFile     },
     { label = "Modify files",        fn = probeModifyFile     },
@@ -502,10 +483,7 @@ local PROBES = {
 -- Track which probes have been run
 local probeRan = {}
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  UI STATE
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local PAGE_REPORT  = 1
 local PAGE_PROBES  = 2
 local currentPage  = PAGE_REPORT
@@ -515,10 +493,7 @@ local scrollOffset = 0
 
 local buttons = {}   -- list of { x1,y1,x2,y2, action }
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  REPORT LINE BUILDER
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local function pushLine(t, text)
     t[#t + 1] = tostring(text or "")
 end
@@ -588,10 +563,7 @@ local function buildReportLines()
     reportLines = t
 end
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  COLOUR HELPERS
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local function isColour()
     return term.isColour and term.isColour()
 end
@@ -619,28 +591,12 @@ local function statusColour(status)
     end
 end
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  RENDER
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local function clearButtons()
     buttons = {}
 end
 
-local function addButton(x1, y, label, action, bgC, fgC)
-    local x2 = x1 + #label - 1
-    buttons[#buttons + 1] = { x1=x1, y1=y, x2=x2, y2=y, action=action }
-    term.setCursorPos(x1, y)
-    if isColour() then
-        term.setBackgroundColor(bgC or colours.grey)
-        term.setTextColor(fgC or colours.white)
-    end
-    term.write(label)
-    setNormal()
-    return x2 + 2   -- next x position (with 1 space gap)
-end
-
-local function drawHeader(w)
+local function drawHeader()
     term.setCursorPos(1, 1)
     setColour(colours.blue, colours.white)
     term.clearLine()
@@ -729,7 +685,7 @@ local function drawProbePage(w, h)
     term.setCursorPos(1, bodyTop)
     setColour(isColour() and colours.grey or colours.black, colours.white)
     term.clearLine()
-    term.write("  Active Probes  (click to run â€” all wrapped in pcall)")
+    term.write("Active Probes")
     setNormal()
 
     -- Draw probe buttons in a 2-column grid
@@ -798,7 +754,7 @@ local function render()
     clearButtons()
     setNormal()
     term.clear()
-    drawHeader(w)
+    drawHeader()
     if currentPage == PAGE_REPORT then
         drawReportPage(w, h)
     else
@@ -808,10 +764,7 @@ local function render()
     term.setCursorPos(1, 1)
 end
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  INPUT HANDLING
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 local function hitTest(x, y)
     for _, b in ipairs(buttons) do
         if x >= b.x1 and x <= b.x2 and y >= b.y1 and y <= b.y2 then
@@ -899,10 +852,7 @@ local function cleanupScreen()
     print("Security scan complete.")
 end
 
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 --  MAIN
--- â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 runPassiveScan()
 buildReportLines()
 eventLoop()
