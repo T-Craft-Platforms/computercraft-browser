@@ -3,12 +3,8 @@ name: CI/CD
 on:
   push:
 
-permissions:
-  contents: write
-
 jobs:
   lint:
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -22,34 +18,3 @@ jobs:
       - name: Print lint results
         uses: lunarmodules/luacheck@v1
         continue-on-error: true
-
-  release:
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Build release installer from placeholders
-        shell: bash
-        env:
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          mkdir -p dist
-          cp .installer/install.lua dist/install.lua
-
-          sed -i "s|%REPO_OWNER%|${REPO_OWNER}|g" dist/install.lua
-          sed -i "s|%REPO_NAME%|${REPO_NAME}|g" dist/install.lua
-          sed -i "s|%REPO_REF%|${RELEASE_TAG}|g" dist/install.lua
-
-          if grep -q "%REPO_" dist/install.lua; then
-            echo "Unresolved placeholders remain in dist/install.lua" >&2
-            exit 1
-          fi
-
-      - name: Publish release asset
-        uses: softprops/action-gh-release@v3
-        with:
-          files: dist/install.lua

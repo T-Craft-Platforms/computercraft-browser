@@ -1,6 +1,6 @@
-local DEFAULT_REPO_OWNER = "%REPO_OWNER%"
-local DEFAULT_REPO_NAME = "%REPO_NAME%"
-local DEFAULT_REF = "%REPO_REF%"
+local DEFAULT_REPO_OWNER = "T-Craft-Platforms"
+local DEFAULT_REPO_NAME = "computercraft-browser"
+local DEFAULT_REF = "main"
 local SOURCE_ROOT_CANDIDATES = {
     "",
 }
@@ -15,10 +15,6 @@ local DISALLOWED_SOURCE_ROOT_PATTERNS = {
     "^computer/%d+$",
     "^world/",
 }
-
-local function isPlaceholder(value)
-    return value == nil or value == "" or value:match("^%%.+%%$") ~= nil
-end
 
 local function ask(label, defaultValue)
     write(label)
@@ -88,7 +84,7 @@ local function isDisallowedSourceRoot(root)
 end
 
 local function shouldInstallRelativePath(relative)
-    if relative == ".gitignore" or relative == "installer.lua" then
+    if relative == ".gitignore" or relative == "install.lua" then
         return false
     end
     if relative == ".installer" or startsWith(relative, ".installer/") then
@@ -177,6 +173,43 @@ local function fetchTree(owner, repo, branch)
     return payload.tree
 end
 
+local function fetchLatestReleaseTag(owner, repo)
+    local releaseUrl = ("https://api.github.com/repos/%s/%s/releases/latest"):format(owner, repo)
+    local releaseText, releaseErr = httpGetText(releaseUrl)
+    if not releaseText then
+        return nil, releaseErr
+    end
+
+    local payload, parseErr = parseJson(releaseText)
+    if not payload then
+        return nil, "Failed to parse latest release response: " .. tostring(parseErr)
+    end
+
+    local tag = type(payload.tag_name) == "string" and payload.tag_name or nil
+    if not tag or tag == "" then
+        return nil, "Latest release response did not contain a tag"
+    end
+    return tag
+end
+
+local function resolveRef(owner, repo, value)
+    local requested = tostring(value or "")
+    if requested == "" then
+        return nil, "Empty git ref"
+    end
+
+    local lowered = requested:lower()
+    if lowered == "latest" or lowered == "latest-release" then
+        local latestTag, latestErr = fetchLatestReleaseTag(owner, repo)
+        if latestTag and latestTag ~= "" then
+            return latestTag
+        end
+        return nil, "Could not resolve latest release tag: " .. tostring(latestErr)
+    end
+
+    return requested
+end
+
 local function listFilesFromTree(tree, sourceRoot)
     local files = {}
     local prefix = sourceRoot == "" and "" or (sourceRoot .. "/")
@@ -231,25 +264,36 @@ local function main(...)
     local installDir = args[3] or DEFAULT_INSTALL_DIR
     local ref = args[4]
 
-    if not owner or owner == "" then
-        owner = isPlaceholder(DEFAULT_REPO_OWNER) and nil or DEFAULT_REPO_OWNER
-    end
-    if not repo or repo == "" then
-        repo = isPlaceholder(DEFAULT_REPO_NAME) and nil or DEFAULT_REPO_NAME
-    end
+    owner = owner or DEFAULT_REPO_OWNER
+    repo = repo or DEFAULT_REPO_NAME
     if not ref or ref == "" then
-        ref = isPlaceholder(DEFAULT_REF) and nil or DEFAULT_REF
+        local latestTag = nil
+        local latestErr = nil
+        latestTag, latestErr = fetchLatestReleaseTag(owner, repo)
+        if latestTag and latestTag ~= "" then
+            print(("Latest release tag found: %s"):format(latestTag))
+            ref = ask("Git ref (branch/tag, or 'latest')", latestTag)
+        else
+            print(("Latest release lookup failed, using '%s' as default ref."):format(DEFAULT_REF))
+            if latestErr and latestErr ~= "" then
+                print(("Reason: %s"):format(latestErr))
+            end
+            ref = ask("Git ref (branch/tag, or 'latest')", DEFAULT_REF)
+        end
     end
-
-    owner = owner or ask("GitHub owner")
-    repo = repo or ask("Repository name")
-    ref = ref or ask("Git ref (branch or tag)", "main")
     installDir = ask("Install directory", installDir)
 
     if not owner or owner == "" or not repo or repo == "" or not ref or ref == "" then
         printError("Owner, repository, and Git ref are required.")
         return
     end
+
+    local resolvedRef, resolvedErr = resolveRef(owner, repo, ref)
+    if not resolvedRef then
+        printError(resolvedErr)
+        return
+    end
+    ref = resolvedRef
 
     print(("Fetching file tree from %s/%s (%s)..."):format(owner, repo, ref))
     local fullTree, treeErr = fetchTree(owner, repo, ref)
