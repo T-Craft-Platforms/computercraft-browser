@@ -122,6 +122,18 @@ end
 local function globToLuaPattern(glob)
     local source = tostring(glob or "")
     local out = { "^" }
+    local specials = {
+        ["^"] = true,
+        ["$"] = true,
+        ["("] = true,
+        [")"] = true,
+        ["%"] = true,
+        ["."] = true,
+        ["["] = true,
+        ["]"] = true,
+        ["+"] = true,
+        ["-"] = true,
+    }
     local i = 1
     while i <= #source do
         local ch = source:sub(i, i)
@@ -137,7 +149,7 @@ local function globToLuaPattern(glob)
             out[#out + 1] = "[^/]"
             i = i + 1
         else
-            if ch:match("[%^%$%(%)%%%.%[%]%+%-%]") then
+            if specials[ch] then
                 out[#out + 1] = "%" .. ch
             else
                 out[#out + 1] = ch
