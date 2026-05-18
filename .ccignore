@@ -1,0 +1,6 @@
+.gitignore
+.luacheckrc
+install.lua
+live_test.lua
+.installer/
+.github/
