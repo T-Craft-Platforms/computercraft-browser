@@ -1,6 +1,8 @@
 function loadDocumentWithAbort(tab, normalized, allowFallback, requestOptions)
-    if not parallel or not parallel.waitForAny then
-        local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback, requestOptions)
+    local function fetchDocument()
+        local options = { previewPng = true }
+        for name, value in pairs(requestOptions or {}) do options[name] = value end
+        local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback, options)
         if not body then
             finalUrl = normalized
             body = makeErrorPage(finalUrl, err or "Unknown error")
@@ -8,50 +10,48 @@ function loadDocumentWithAbort(tab, normalized, allowFallback, requestOptions)
         end
 
         local contentType = getHeader(headers, "Content-Type") or ""
-        if not looksLikeHtml(body, contentType) then
+        local png
+        local isPng = body:sub(1, #core.pngSignature) == core.pngSignature
+        if isPng or contentType:lower():match("^image/png") then
+            if #body > core.pngPreviewLimit then
+                body = makeErrorPage(finalUrl, "PNG preview exceeds 2 MiB. Use Download to save the original.")
+            elseif isPng then
+                if displayManager.supportsImages() then png = body end
+                body = [[<html><head><title>PNG image</title></head><body>
+                    <h1>PNG image</h1>
+                    <p>Use Download in the browser menu to save the original.</p>
+                    </body></html>]]
+            else
+                body = makeErrorPage(finalUrl, "The response is not a PNG image.")
+            end
+        elseif not looksLikeHtml(body, contentType) then
             body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
         end
         local aboutUpdateIntervalMs = parseAboutUpdateIntervalMs(headers)
         local settingsStickyStatus = parseSettingsStatusMessage(headers, finalUrl or normalized)
 
+        local document = buildDocument(body, finalUrl)
+        document.browserPng = png
         return {
             finalUrl = finalUrl,
-            document = buildDocument(body, finalUrl),
+            document = document,
             aboutUpdateIntervalMs = aboutUpdateIntervalMs,
             settingsStickyStatus = settingsStickyStatus,
-        }, false
+        }
     end
+    if not parallel or not parallel.waitForAny then return fetchDocument(), false end
 
     local result = nil
     local done = false
     local aborted = false
 
     local function loadTask()
-        local ok, errMsg = pcall(function()
-            local body, finalUrl, headers, err = fetchTextResource(normalized, allowFallback, requestOptions)
-            if not body then
-                finalUrl = normalized
-                body = makeErrorPage(finalUrl, err or "Unknown error")
-                headers = { ["Content-Type"] = "text/html" }
-            end
+        local ok, documentOrError = pcall(fetchDocument)
 
-            local contentType = getHeader(headers, "Content-Type") or ""
-            if not looksLikeHtml(body, contentType) then
-                body = "<html><body><pre>" .. escapeHtml(body) .. "</pre></body></html>"
-            end
-            local aboutUpdateIntervalMs = parseAboutUpdateIntervalMs(headers)
-            local settingsStickyStatus = parseSettingsStatusMessage(headers, finalUrl or normalized)
-
-            result = {
-                finalUrl = finalUrl,
-                document = buildDocument(body, finalUrl),
-                aboutUpdateIntervalMs = aboutUpdateIntervalMs,
-                settingsStickyStatus = settingsStickyStatus,
-            }
-        end)
-
-        if not ok then
-            local safeError = tostring(errMsg)
+        if ok then
+            result = documentOrError
+        else
+            local safeError = tostring(documentOrError)
             log("document load task failed: " .. tostring(normalized) .. " (" .. safeError .. ")", LogLevel.error)
             local finalUrl = normalized
             local body = makeErrorPage(finalUrl, safeError)
@@ -66,8 +66,12 @@ function loadDocumentWithAbort(tab, normalized, allowFallback, requestOptions)
 
     local function watchTask()
         while not done do
-            local event = { os.pullEvent() }
-            local name = event[1]
+            local event = displayManager.translateEvent({ os.pullEvent() })
+            if not state.running then
+                aborted = true
+                return
+            end
+            local name = event and event[1]
             if name == "mouse_click" then
                 local x = event[3]
                 local y = event[4]
@@ -851,19 +855,22 @@ function ensureAppletWindowForTab(tab, clearContent)
     local w, h = term.getSize()
     local topRows = effectiveTopBarRows()
     local contentHeight = math.max(1, h - topRows)
+    local parent = displayManager.getSurface()
     local created = false
 
     if not applet.window then
         if window and window.create then
-            applet.window = window.create(term.current(), 1, topRows + 1, w, contentHeight, true)
+            applet.window = window.create(parent, 1, topRows + 1, w, contentHeight, true)
         else
-            applet.window = term.current()
+            applet.window = parent
         end
         created = true
-    elseif applet.window.reposition then
-        pcall(applet.window.reposition, 1, topRows + 1, w, contentHeight)
+    elseif applet.window.reposition and (applet.topRows ~= topRows or applet.width ~= w
+        or applet.height ~= contentHeight or applet.parent ~= parent) then
+        pcall(applet.window.reposition, 1, topRows + 1, w, contentHeight, parent)
     end
 
+    applet.parent = parent
     applet.topRows = topRows
     applet.width = w
     applet.height = contentHeight

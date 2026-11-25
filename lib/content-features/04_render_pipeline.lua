@@ -41,7 +41,13 @@ local function renderNode(node, parentStyle, rules, writer, context, baseUrl, re
             writer:writeText(alt, style, nil, false)
             return
         end
-        writer:writeText("[" .. alt .. "]", style, nil, false)
+        local href = context.currentHref
+        local source = node.attrs and node.attrs.src
+        if not href and context.linksEnabled ~= false and source
+            and source:gsub("[?#].*$", ""):lower():match("%.png$") then
+            href = resolveRelativeUrl(baseUrl, source)
+        end
+        writer:writeText("[" .. alt .. "]", style, href, false)
         return
     end
 

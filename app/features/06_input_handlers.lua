@@ -503,6 +503,11 @@ function selectAllText()
     return false
 end
 
+local function rememberClipboard(text)
+    state.clipboard = text
+    displayManager.updateClipboard(text)
+end
+
 function copySelectedText()
     local tab = activeTab()
     local text = ""
@@ -542,7 +547,7 @@ function copySelectedText()
     end
 
     if text ~= "" then
-        state.clipboard = text
+        rememberClipboard(text)
         state.localClipboardPendingPaste = true
         return true
     end
@@ -556,7 +561,7 @@ function cutSelectedText()
         if text == "" then
             return false
         end
-        state.clipboard = text
+        rememberClipboard(text)
         state.localClipboardPendingPaste = true
         deleteUrlSelection(tab)
         return true
@@ -569,7 +574,7 @@ function cutSelectedText()
             if text == "" then
                 return false
             end
-            state.clipboard = text
+            rememberClipboard(text)
             state.localClipboardPendingPaste = true
             stateEntry.value = ""
             stateEntry.cursor = 1
@@ -583,7 +588,7 @@ function cutSelectedText()
         if text == "" then
             return false
         end
-        state.clipboard = text
+        rememberClipboard(text)
         state.localClipboardPendingPaste = true
         return true
     end
@@ -623,6 +628,36 @@ function pasteClipboardText()
     state.localClipboardPendingPaste = false
     state.skipNextPaste = true
     return true
+end
+
+local function useHostClipboard(operation)
+    local tab = activeTab()
+    local urlFocus, control = tab.urlFocus, tab.focusedFormControl
+    local text
+    if operation == "write" then
+        if not copySelectedText() then return end
+        text = state.clipboard
+        if #text > 4096 then
+            showSnackbar("Selection is too long for the host clipboard")
+            return
+        end
+    elseif not urlFocus and not control then
+        focusUrlBar()
+        urlFocus = tab.urlFocus
+    end
+    local document = tab.document
+    local requested = displayManager.requestHostClipboard(operation, text, function(status, content)
+        if status ~= "ok" then
+            showSnackbar("Host clipboard request declined or unavailable")
+        elseif operation == "write" then
+            showSnackbar("Copied to the host clipboard")
+        elseif content and activeTab() == tab and document == tab.document and tab.urlFocus == urlFocus
+            and tab.focusedFormControl == control and not state.modal.open and not activeAppletRunning() then
+            state.localClipboardPendingPaste, state.skipNextPaste = false, false
+            handlePaste(urlFocus and content:match("[^\r\n]*") or content)
+        end
+    end)
+    if not requested then showSnackbar("Host clipboard unavailable on this display") end
 end
 
 function handleKeyDown(key, appletContext)
@@ -676,7 +711,7 @@ function handleKeyDown(key, appletContext)
             return
         end
         if key == keys.c then
-            copySelectedText()
+            if state.shiftDown and not appletContext then useHostClipboard("write") else copySelectedText() end
             return
         end
         if key == keys.x then
@@ -684,7 +719,7 @@ function handleKeyDown(key, appletContext)
             return
         end
         if key == keys.v then
-            pasteClipboardText()
+            if state.shiftDown and not appletContext then useHostClipboard("read") else pasteClipboardText() end
             return
         end
         if key == keys.t then
@@ -909,14 +944,14 @@ function handlePaste(text)
     if tab.urlFocus then
         if pasteText and pasteText ~= "" then
             insertUrlText(pasteText)
-            state.clipboard = pasteText
+            rememberClipboard(pasteText)
         end
         return
     end
     if handleFocusedFormControlPaste(tab, pasteText) then
         bumpRenderRevision(tab)
         if pasteText and pasteText ~= "" then
-            state.clipboard = pasteText
+            rememberClipboard(pasteText)
         end
         return
     end
@@ -927,7 +962,7 @@ function handlePaste(text)
         tab.urlCursor = #tab.urlInput + 1
         clearUrlSelection(tab)
         insertUrlText(pasteText)
-        state.clipboard = pasteText
+        rememberClipboard(pasteText)
     end
 end
 

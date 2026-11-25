@@ -961,6 +961,7 @@ draw = function()
     drawActiveAppletOverlay()
     drawModal()
     drawSnackbar()
+    displayManager.drawGraphics(state, activeTab())
     drawNativeMonitorControls()
 end
 

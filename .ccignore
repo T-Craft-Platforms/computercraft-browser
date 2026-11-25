@@ -4,3 +4,5 @@ install.lua
 live_test.lua
 .installer/
 .github/
+
+tests/

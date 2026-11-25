@@ -532,5 +532,7 @@ M.resolveRelativeUrl = resolveRelativeUrl
 M.decodeUrlPath = decodeUrlPath
 M.normalizeInputUrl = normalizeInputUrl
 M.getHeader = getHeader
+M.pngSignature = "\137PNG\r\n\26\n"
+M.pngPreviewLimit = 2 * 1024 * 1024
 
 return M

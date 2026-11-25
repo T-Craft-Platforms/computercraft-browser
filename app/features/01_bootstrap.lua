@@ -461,6 +461,11 @@ local displayManager = createDisplayManager({
     internalMonitorId = INTERNAL_MONITOR_ID,
     internalMonitorLabel = INTERNAL_MONITOR_LABEL,
     nativeTerm = NATIVE_TERM,
+    graphics = loadModule("app/display/graphics.lua")(
+        display, loadModule("app/display/chrome.lua"),
+        loadModule("app/display/start_page.lua"), window and window.create, NATIVE_TERM
+    ),
+    displayApi = display,
     browserSettings = browserSettings,
     currentDefaultBackgroundColorValue = currentDefaultBackgroundColorValue,
     currentDefaultForegroundColorValue = currentDefaultForegroundColorValue,

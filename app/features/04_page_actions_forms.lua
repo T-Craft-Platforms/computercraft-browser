@@ -261,6 +261,8 @@ function suggestedDownloadPath(url, body, headers)
     local sourceUrl = trim(tostring(url or ""))
     local name = sourceUrl:gsub("[?#].*$", ""):match("([^/\\]+)$") or ""
     local contentType = trim(tostring(getHeader(headers, "Content-Type") or "")):lower()
+    local isPng = contentType:find("image/png", 1, true)
+        or (body or ""):sub(1, #core.pngSignature) == core.pngSignature
     local function sanitizeFileName(rawName)
         local cleaned = trim(tostring(rawName or ""))
         cleaned = cleaned:gsub("[^%w%._%-]", "_")
@@ -274,7 +276,9 @@ function suggestedDownloadPath(url, body, headers)
     end
 
     if name == "" then
-        if contentType:find("html", 1, true) or looksLikeHtml(body or "", contentType) then
+        if isPng then
+            name = "download.png"
+        elseif contentType:find("html", 1, true) or looksLikeHtml(body or "", contentType) then
             name = "index.html"
         elseif contentType:find("lua", 1, true) then
             name = "download.lua"
@@ -282,7 +286,9 @@ function suggestedDownloadPath(url, body, headers)
             name = "download.txt"
         end
     elseif not name:match("%.[%w]+$") then
-        if contentType:find("html", 1, true) or looksLikeHtml(body or "", contentType) then
+        if isPng then
+            name = name .. ".png"
+        elseif contentType:find("html", 1, true) or looksLikeHtml(body or "", contentType) then
             name = name .. ".html"
         elseif contentType:find("lua", 1, true) then
             name = name .. ".lua"

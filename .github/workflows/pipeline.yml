@@ -18,3 +18,11 @@ jobs:
       - name: Print lint results
         uses: lunarmodules/luacheck@v1
         continue-on-error: true
+
+      - name: Test display selection, rendering, and input
+        run: |
+          if ! command -v lua5.4 >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y lua5.4
+          fi
+          lua5.4 tests/display.lua

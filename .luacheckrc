@@ -20,6 +20,7 @@ globals = {
    "colours",
    "commands",
    "disk",
+   "display",
    "fs",
    "gps",
    "help",

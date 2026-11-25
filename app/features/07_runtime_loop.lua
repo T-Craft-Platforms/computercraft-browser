@@ -41,6 +41,7 @@ function bootstrap(initialUrls, startupFullscreenMode, startupMonitorChoice)
     end
 
     for i, url in ipairs(initialUrls) do
+        if not state.running then return end
         local tab = nil
         if i == 1 then
             tab = activeTab()
@@ -77,7 +78,15 @@ function appletMouseHandledByBrowser(eventName, x, y)
 end
 
 function handleEventWithoutApplet(event)
-    if event[1] == "mouse_click" then
+    if event[1] == "browser_start_action" then
+        if event[2] == "address" then
+            activeTab().focusedFormControl = nil
+            focusUrlBar()
+            selectAllText()
+        else
+            navigate(event[2], true, false, activeTab())
+        end
+    elseif event[1] == "mouse_click" then
         handleMouseClick(event[2], event[3], event[4])
     elseif event[1] == "mouse_drag" then
         handleMouseDrag(event[2], event[3], event[4])
@@ -309,13 +318,13 @@ function processNextBrowserEvent()
     if scheduleAnimationTick then
         scheduleAnimationTick()
     end
-    state.lastPulledEvent = { os.pullEvent() }
-    if state.lastPulledEvent[1] == "monitor_touch" then
-        local monitorPeripheral = displayManager.getRuntimeDisplayMonitorPeripheral()
-        if monitorPeripheral and state.lastPulledEvent[2] == monitorPeripheral then
-            state.lastPulledEvent = { "mouse_click", 1, state.lastPulledEvent[3], state.lastPulledEvent[4], "monitor_touch" }
-        end
-    elseif state.lastPulledEvent[1] == "peripheral_detach" or state.lastPulledEvent[1] == "peripheral" then
+    local raw = { os.pullEvent() }
+    state.lastPulledEvent = displayManager.translateEvent(raw)
+    if not state.lastPulledEvent then
+        if state.running and raw[1] == "display_clipboard" then draw() end
+        return
+    end
+    if state.lastPulledEvent[1] == "peripheral_detach" or state.lastPulledEvent[1] == "peripheral" then
         local monitorPeripheral = displayManager.getRuntimeDisplayMonitorPeripheral()
         if monitorPeripheral and state.lastPulledEvent[2] == monitorPeripheral then
             refreshDisplayTarget()
@@ -337,6 +346,9 @@ function processNextBrowserEvent()
     end
 
     processBrowserEvent(state.lastPulledEvent, os.clock())
+    if state.running and state.lastPulledEvent[5] == "monitor_touch" and not activeAppletRunning() then
+        handleMouseUp(state.lastPulledEvent[2], state.lastPulledEvent[3], state.lastPulledEvent[4])
+    end
     state.lastPulledEvent = nil
     if scheduleAboutUpdateTimer then
         scheduleAboutUpdateTimer()
@@ -358,6 +370,7 @@ function parseStartupArgs(args)
     local initialUrls = {}
     local startupFullscreenMode = nil
     local startupMonitorChoice = nil
+    local textOnly = false
     for i = 1, #(args or {}) do
         local value = tostring(args[i] or "")
         local lowered = value:lower()
@@ -369,23 +382,27 @@ function parseStartupArgs(args)
             end
         elseif lowered:sub(1, #"--monitor=") == "--monitor=" then
             startupMonitorChoice = value:sub(#"--monitor=" + 1)
+        elseif lowered == "--text" then
+            textOnly = true
         elseif value ~= "" then
             initialUrls[#initialUrls + 1] = value
         end
     end
-    return initialUrls, startupFullscreenMode, startupMonitorChoice
+    return initialUrls, startupFullscreenMode, startupMonitorChoice, textOnly
 end
 
 function run(...)
     local rawArgs = { ... }
-    local initialUrls, startupFullscreenMode, startupMonitorChoice = parseStartupArgs(rawArgs)
+    local initialUrls, startupFullscreenMode, startupMonitorChoice, textOnly = parseStartupArgs(rawArgs)
     log("browser start", LogLevel.info)
-    bootstrap(initialUrls, startupFullscreenMode, startupMonitorChoice)
-    while state.running do
-        processNextBrowserEvent()
-    end
+    displayManager.setTextOnly(textOnly)
+    local ok, failure = pcall(function()
+        bootstrap(initialUrls, startupFullscreenMode, startupMonitorChoice)
+        while state.running do processNextBrowserEvent() end
+    end)
     log("browser shutdown", LogLevel.info)
     shutdownBrowserUi()
+    if not ok and failure ~= "Terminated" then error(failure, 0) end
 end
 
 return run

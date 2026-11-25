@@ -7,6 +7,7 @@ return function(deps)
     local INTERNAL_MONITOR_ID = tostring(deps.internalMonitorId or "internal")
     local INTERNAL_MONITOR_LABEL = tostring(deps.internalMonitorLabel or "Internal Monitor")
     local NATIVE_TERM = deps.nativeTerm
+    local graphics, displayApi = deps.graphics, deps.displayApi
     local browserSettings = deps.browserSettings or {}
     local currentDefaultBackgroundColorValue = deps.currentDefaultBackgroundColorValue
     local currentDefaultForegroundColorValue = deps.currentDefaultForegroundColorValue
@@ -19,6 +20,10 @@ return function(deps)
     local runtimeDisplayMonitorPeripheral = nil
     local startupMonitorOverride = nil
     local sessionMonitorOverride = nil
+    local textOnly = false
+    local blockedGraphicsTarget
+    local activeSurface = NATIVE_TERM
+    local clipboardRequest
 
     local function trim(value)
         return core.trim(tostring(value or ""))
@@ -127,35 +132,40 @@ return function(deps)
 
     local function applyDisplayTarget(choice)
         local normalized = normalizeMonitorChoice(choice)
+        if normalized ~= INTERNAL_MONITOR_ID and not monitorExists(normalized) then
+            return false, "Monitor not found: " .. tostring(normalized)
+        end
+        local wrapped = monitorSurface(normalized)
+        if not wrapped then return false, "Monitor not found: " .. tostring(normalized) end
         local previousTarget = normalizeMonitorChoice(runtimeDisplayTarget or INTERNAL_MONITOR_ID)
         local bg = currentDefaultBackgroundColorValue()
         local fg = currentDefaultForegroundColorValue(bg)
         if previousTarget ~= normalized then
+            graphics.close()
+            blockedGraphicsTarget = nil
+            clipboardRequest = nil
             clearSurface(previousTarget, bg, fg)
         end
 
-        if normalized == INTERNAL_MONITOR_ID then
-            if term and type(term.redirect) == "function" and NATIVE_TERM then
-                term.redirect(NATIVE_TERM)
+        local surface
+        if not textOnly and normalized ~= blockedGraphicsTarget then
+            local target = normalized == INTERNAL_MONITOR_ID and "native" or normalized
+            local ok, result, failure = pcall(graphics.open, target)
+            if ok then
+                surface = result
+                if failure and failure.message then logWarn(failure.message) end
+            else
+                graphics.close()
+                logWarn(result)
             end
-            runtimeDisplayTarget = INTERNAL_MONITOR_ID
-            runtimeDisplayMonitorPeripheral = nil
-            return true, nil
         end
-
-        if not monitorExists(normalized) then
-            return false, "Monitor not found: " .. tostring(normalized)
-        end
-        local wrapped = peripheral and type(peripheral.wrap) == "function" and peripheral.wrap(normalized) or nil
-        if not wrapped then
-            return false, "Could not access monitor: " .. tostring(normalized)
-        end
+        activeSurface = surface or wrapped
 
         if term and type(term.redirect) == "function" then
-            term.redirect(wrapped)
+            term.redirect(activeSurface)
         end
         runtimeDisplayTarget = normalized
-        runtimeDisplayMonitorPeripheral = normalized
+        runtimeDisplayMonitorPeripheral = normalized ~= INTERNAL_MONITOR_ID and normalized or nil
         return true, nil
     end
 
@@ -318,6 +328,8 @@ return function(deps)
     end
 
     local function shutdownDisplay(background, foreground)
+        graphics.close()
+        clipboardRequest = nil
         local bg = background or colors.black
         local fg = foreground or colors.white
         clearSurface(runtimeDisplayTarget or INTERNAL_MONITOR_ID, bg, fg)
@@ -325,6 +337,55 @@ return function(deps)
         if term and type(term.redirect) == "function" and NATIVE_TERM then
             term.redirect(NATIVE_TERM)
         end
+    end
+
+    local function translateEvent(event)
+        local name, target = event[1], graphics.target()
+        if name == "display_resize" and target and event[2] == target and graphics.isOpen() then
+            if not graphics.resize() then
+                graphics.close()
+                blockedGraphicsTarget = runtimeDisplayTarget
+                applyDisplayTarget(runtimeDisplayTarget)
+            end
+            return { "term_resize" }
+        end
+        if name == "display_closed" and target and event[2] == target and not graphics.isOpen() then
+            graphics.close()
+            clipboardRequest = nil
+            local state = getState()
+            if target == "native" and event[3] == "force_exit" then
+                if state then state.running = false end
+                return nil
+            end
+            blockedGraphicsTarget = runtimeDisplayTarget
+            refreshDisplayTarget()
+            return { "term_resize" }
+        end
+        if name == "display_clipboard" and clipboardRequest and event[2] == "native" and event[3] == clipboardRequest.id then
+            local response = clipboardRequest.callback
+            clipboardRequest = nil
+            response(event[4], event[5])
+            return nil
+        end
+        if name:sub(1, 8) == "display_" then
+            return graphics.translate(event)
+        end
+        if name == "monitor_touch" then
+            if event[2] == runtimeDisplayMonitorPeripheral then
+                if event[2] == target then return nil end
+                return { "mouse_click", 1, event[3], event[4], "monitor_touch" }
+            end
+        end
+        if target == "native" and name:sub(1, 6) == "mouse_" then return nil end
+        return event
+    end
+
+    local function requestHostClipboard(operation, text, callback)
+        if clipboardRequest then return false end
+        local id = graphics.requestClipboard(operation, text)
+        if not id then return false end
+        clipboardRequest = { id = id, callback = callback }
+        return true
     end
 
     return {
@@ -344,5 +405,16 @@ return function(deps)
         getRuntimeDisplayTarget = getRuntimeDisplayTarget,
         getRuntimeDisplayMonitorPeripheral = getRuntimeDisplayMonitorPeripheral,
         shutdownDisplay = shutdownDisplay,
+        setTextOnly = function(value) textOnly = value end,
+        getSurface = function() return activeSurface end,
+        drawGraphics = graphics.draw,
+        supportsImages = function() return not textOnly and graphics.supportsImages() end,
+        translateEvent = translateEvent,
+        requestHostClipboard = requestHostClipboard,
+        updateClipboard = function(text)
+            if displayApi and displayApi.setClipboard and #text <= 4096 then
+                displayApi.setClipboard(text)
+            end
+        end,
     }
 end

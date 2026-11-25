@@ -49,7 +49,16 @@ return function(core, options)
         return ([[<html><body><h1>Load Error</h1><p><b>URL:</b> %s</p><pre>%s</pre></body></html>]]):format(safeUrl, safeError)
     end
 
-    local function readLocalFile(path)
+    local function readResource(handle, previewPng)
+        if not previewPng then return handle.readAll() or "" end
+        local prefix = handle.read(#core.pngSignature) or ""
+        if prefix == core.pngSignature then
+            return prefix .. (handle.read(core.pngPreviewLimit - #prefix + 1) or "")
+        end
+        return prefix .. (handle.readAll() or "")
+    end
+
+    local function readLocalFile(path, previewPng)
         if path == nil or path == "" then
             return nil, "Empty file path"
         end
@@ -59,11 +68,11 @@ return function(core, options)
         if fs.isDir(path) then
             return nil, "Path is a directory: " .. path
         end
-        local handle = fs.open(path, "r")
+        local handle = fs.open(path, previewPng and "rb" or "r")
         if not handle then
             return nil, "Could not open file: " .. path
         end
-        local content = handle.readAll() or ""
+        local content = readResource(handle, previewPng)
         handle.close()
         return content
     end
@@ -225,7 +234,7 @@ return function(core, options)
             return nil, nil, err or "Request failed"
         end
 
-        local body = response.readAll() or ""
+        local body = readResource(response, requestOptions and requestOptions.previewPng)
         local headers = {}
         if response.getResponseHeaders then
             local headersOk, foundHeaders = pcall(response.getResponseHeaders)
@@ -1006,7 +1015,7 @@ return function(core, options)
                 end
                 return body, buildFileUrl(path, true), { ["Content-Type"] = "text/html" }, nil
             end
-            local body, err = readLocalFile(path)
+            local body, err = readLocalFile(path, request.previewPng)
             if not body then
                 return nil, url, nil, err
             end

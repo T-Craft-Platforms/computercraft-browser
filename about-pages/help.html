@@ -50,15 +50,13 @@
       <li>F7 indicator in the URL status area when active</li>
       <li>Vertical scrollbar with track/thumb on scrollable pages</li>
       <li>Home page at <code>about:home</code></li>
-      <li>Settings page at <code>about:settings</code> (open from the <code>=</code> menu)</li>
-      <li>Favorites page at <code>about:favorites</code> (open from the <code>=</code> menu)</li>
-      <li>History page at <code>about:history</code> (open from the <code>=</code> menu)</li>
+      <li>Settings, favorites, and history from the browser menu</li>
       <li>Mouse wheel and keyboard scrolling</li>
       <li>Clickable links</li>
     </ul>
 
     <h2>Supported HTML</h2>
-    <p>headings, paragraphs, div/span, lists, links, br, hr, pre/code, img alt placeholders, and forms (<code>form</code>, <code>input</code> major types, <code>select</code>/<code>option</code>, <code>textarea</code>, <code>button</code>).</p>
+    <p>Headings, paragraphs, div/span, lists, links, br, hr, pre/code, image labels, and forms. Selecting a PNG image label opens the image. The graphical browser previews PNG files up to 2 MiB.</p>
     <p>About page templates support dynamic tokens with refresh intervals, e.g. <code>{{MINECRAFT_TIME@500}}</code>.</p>
 
     <h2>Supported CSS (subset)</h2>
@@ -74,6 +72,7 @@
       <li>F7: toggle caret mode</li>
       <li>In caret mode, arrows/home/end/page keys move text selection</li>
       <li>Ctrl+A/C/X/V: select all / copy / cut / paste</li>
+      <li>Ctrl+Shift+C/V: request a host clipboard copy or paste on a graphical computer</li>
       <li>Inside forms: Enter submits, Space toggles checkbox/radio/buttons, Tab/Shift+Tab moves focus</li>
       <li>Form submit uses background fetch and does not navigate away</li>
       <li>Ctrl+T: new tab</li>
