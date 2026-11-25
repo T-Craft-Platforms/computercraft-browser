@@ -47,11 +47,11 @@ local function parseJson(text)
     return nil, "JSON parser is not available in this CC version"
 end
 
-local function httpGetText(url)
+local function httpGetText(url, binary)
     local response, err, errResponse = http.get(url, {
         ["User-Agent"] = "ccbrowser-installer",
         ["Accept"] = "application/vnd.github+json",
-    })
+    }, binary == true)
     if not response then
         if errResponse then
             local code, message = errResponse.getResponseCode()
@@ -590,7 +590,7 @@ local function writeFile(path, content)
     if dir and dir ~= "" and not fs.exists(dir) then
         fs.makeDir(dir)
     end
-    local handle, err = fs.open(path, "w")
+    local handle, err = fs.open(path, "wb")
     if not handle then
         return nil, err
     end
@@ -1436,7 +1436,7 @@ local function runInstallInFancyUi(owner, repo, ref, installDir)
                         addLog(step, colors.lightGray)
                         render()
 
-                        local content, downloadErr = httpGetText(rawUrl)
+                        local content, downloadErr = httpGetText(rawUrl, true)
                         if not content then
                             fail("Download failed: " .. tostring(downloadErr))
                             break

@@ -25,6 +25,11 @@ return function(deps)
     local activeSurface = NATIVE_TERM
     local clipboardRequest
 
+    local function graphicsSupported()
+        local target = runtimeDisplayTarget == INTERNAL_MONITOR_ID and "native" or runtimeDisplayTarget
+        return not textOnly and graphics.isSupported(target)
+    end
+
     local function trim(value)
         return core.trim(tostring(value or ""))
     end
@@ -148,9 +153,9 @@ return function(deps)
         end
 
         local surface
-        if not textOnly and normalized ~= blockedGraphicsTarget then
+        if not textOnly and browserSettings.display_mode ~= "terminal" and normalized ~= blockedGraphicsTarget then
             local target = normalized == INTERNAL_MONITOR_ID and "native" or normalized
-            local ok, result, failure = pcall(graphics.open, target)
+            local ok, result, failure = pcall(graphics.open, target, wrapped, tonumber(browserSettings.window_scale) or 100)
             if ok then
                 surface = result
                 if failure and failure.message then logWarn(failure.message) end
@@ -158,6 +163,9 @@ return function(deps)
                 graphics.close()
                 logWarn(result)
             end
+        else
+            graphics.close()
+            clipboardRequest = nil
         end
         activeSurface = surface or wrapped
 
@@ -341,14 +349,19 @@ return function(deps)
 
     local function translateEvent(event)
         local name, target = event[1], graphics.target()
-        if name == "display_resize" and target and event[2] == target and graphics.isOpen() then
-            if not graphics.resize() then
+        local resized = (name == "display_resize" and event[2] == target)
+            or (name == "monitor_resize" and event[2] == runtimeDisplayMonitorPeripheral)
+            or (name == "term_resize" and target == "native")
+        if resized and target and graphics.isOpen() then
+            local ok, usable = pcall(graphics.resize)
+            if not ok or not usable then
                 graphics.close()
                 blockedGraphicsTarget = runtimeDisplayTarget
-                applyDisplayTarget(runtimeDisplayTarget)
+                refreshDisplayTarget()
             end
             return { "term_resize" }
         end
+        if name == "monitor_resize" and event[2] == runtimeDisplayMonitorPeripheral then return { "term_resize" } end
         if name == "display_closed" and target and event[2] == target and not graphics.isOpen() then
             graphics.close()
             clipboardRequest = nil
@@ -406,8 +419,14 @@ return function(deps)
         getRuntimeDisplayMonitorPeripheral = getRuntimeDisplayMonitorPeripheral,
         shutdownDisplay = shutdownDisplay,
         setTextOnly = function(value) textOnly = value end,
+        graphicsSupported = graphicsSupported,
+        displayMode = function() return graphics.isOpen() and "graphics" or "terminal" end,
         getSurface = function() return activeSurface end,
-        drawGraphics = graphics.draw,
+        drawGraphics = function(state, tab) graphics.draw(state, tab, browserSettings.browser_engine_level) end,
+        awesomeInput = graphics.awesomeInput,
+        awesomeKey = graphics.awesomeKey,
+        awesomeSelectAll = graphics.awesomeSelectAll,
+        awesomeText = graphics.awesomeText,
         supportsImages = function() return not textOnly and graphics.supportsImages() end,
         translateEvent = translateEvent,
         requestHostClipboard = requestHostClipboard,

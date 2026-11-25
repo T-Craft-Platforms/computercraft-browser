@@ -367,6 +367,48 @@ return function(deps)
         end
     end
 
+    local function bindAppletTerminal(env, contentWindow)
+        local current = contentWindow
+        local redirects = { [contentWindow] = true }
+        local terminal = {}
+        for name, fn in pairs(contentWindow) do
+            if type(fn) == "function" then
+                terminal[name] = function(...) return current[name](...) end
+            end
+        end
+        terminal.current = function() return current end
+        terminal.native = function() return contentWindow end
+        terminal.redirect = function(target)
+            if not redirects[target] then error("Expected an applet terminal or window", 2) end
+            local previous = current
+            current = target
+            return previous
+        end
+        env.term = terminal
+        env.print = function(...) printToContentWindow(current, ...) end
+        env.write = function(value) writeToContentWindow(current, value) end
+        if window then
+            env.window = {
+                create = function(parent, x, y, width, height, visible)
+                    if parent == terminal then parent = current end
+                    if not redirects[parent] then error("Expected an applet terminal or window", 2) end
+                    local child = window.create(parent, x, y, width, height, visible)
+                    redirects[child] = true
+                    return child
+                end,
+            }
+        end
+        -- CraftOS's drawing helpers close over term and fs when the API is loaded.
+        local paint = setmetatable({ dofile = dofile }, { __index = env })
+        local chunk = loadfile("rom/apis/paintutils.lua", "t", paint)
+        if chunk then
+            chunk()
+            paint.dofile = nil
+            env.paintutils = {}
+            for name, fn in pairs(paint) do env.paintutils[name] = fn end
+        end
+    end
+
     local function buildSandboxEnv(contentWindow, sourceUrl, sessionId)
         local vfs, vfsErr = createVirtualFs(sourceUrl, sessionId)
         if not vfs then
@@ -428,38 +470,8 @@ return function(deps)
         if parallel then
             env.parallel = parallel
         end
-        if paintutils then
-            env.paintutils = paintutils
-        end
-
-        env.print = function(...)
-            printToContentWindow(contentWindow, ...)
-        end
-        env.write = function(text)
-            writeToContentWindow(contentWindow, text)
-        end
-
-        env.term = {}
-        for k, v in pairs(contentWindow) do
-            if type(v) == "function" then
-                env.term[k] = v
-            end
-        end
-        env.term.native = function() return contentWindow end
-        env.term.current = function() return contentWindow end
-        env.term.redirect = function(_target)
-            return contentWindow
-        end
-
-        if window then
-            env.window = {
-                create = function(_parent, x, y, w, h, visible)
-                    return window.create(contentWindow, x, y, w, h, visible)
-                end,
-            }
-        end
-
         env.fs = vfs
+        bindAppletTerminal(env, contentWindow)
         env.http = nil
         env.shell = nil
         env.peripheral = nil
@@ -483,32 +495,7 @@ return function(deps)
         local env = {}
         setmetatable(env, { __index = _G })
 
-        env.print = function(...)
-            printToContentWindow(contentWindow, ...)
-        end
-        env.write = function(text)
-            writeToContentWindow(contentWindow, text)
-        end
-
-        env.term = {}
-        for k, v in pairs(contentWindow) do
-            if type(v) == "function" then
-                env.term[k] = v
-            end
-        end
-        env.term.native = function() return contentWindow end
-        env.term.current = function() return contentWindow end
-        env.term.redirect = function(_target)
-            return contentWindow
-        end
-
-        if window then
-            env.window = {
-                create = function(_parent, x, y, w, h, visible)
-                    return window.create(contentWindow, x, y, w, h, visible)
-                end,
-            }
-        end
+        bindAppletTerminal(env, contentWindow)
 
         env.os = {}
         if os then

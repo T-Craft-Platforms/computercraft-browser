@@ -198,7 +198,9 @@ local browserSettings = {
     pause_inactive_applets = "true",
     fullscreen_mode = "normal",
     default_monitor = "internal",
-    browser_engine_level = "standard",
+    browser_engine_level = "awesome",
+    display_mode = "auto",
+    window_scale = "100",
     default_bg_color = "black",
     default_fg_color = "white",
 }
@@ -305,14 +307,26 @@ function parseBrowserEngineLevel(value)
     if lowered == "lite" then
         lowered = "standard"
     end
-    if lowered == "text_only" or lowered == "standard" or lowered == "advanced" then
+    if lowered == "text_only" or lowered == "standard" or lowered == "advanced" or lowered == "awesome" then
         return lowered
     end
     return nil
 end
 
 function normalizeBrowserEngineLevel(value)
-    return parseBrowserEngineLevel(value) or "standard"
+    return parseBrowserEngineLevel(value) or "awesome"
+end
+
+function parseDisplayMode(value)
+    local mode = core.trim(tostring(value or "")):lower()
+    if mode == "auto" or mode == "terminal" or mode == "graphics" then return mode end
+end
+
+function parseWindowScale(value)
+    local scale = tonumber(value)
+    if scale == 100 or scale == 125 or scale == 150 or scale == 175 or scale == 200 then
+        return ("%d"):format(scale)
+    end
 end
 
 local SUPPORTED_SETTING_COLOR_VALUES = {
@@ -452,6 +466,10 @@ local NATIVE_TERM = (term and type(term.native) == "function" and term.native())
 local rerenderAllTabs
 local draw
 
+local awesomeLayout = loadModule("lib/awesome/layout.lua")(loadModule("lib/awesome/css.lua"), core)
+local awesomeView = loadModule("lib/awesome/view.lua")
+local typefaces = loadModule("assets/fonts/metrics.lua")
+
 local displayManager = createDisplayManager({
     core = core,
     term = term,
@@ -463,7 +481,10 @@ local displayManager = createDisplayManager({
     nativeTerm = NATIVE_TERM,
     graphics = loadModule("app/display/graphics.lua")(
         display, loadModule("app/display/chrome.lua"),
-        loadModule("app/display/start_page.lua"), window and window.create, NATIVE_TERM
+        loadModule("app/display/start_page.lua"), window and window.create, NATIVE_TERM,
+        function(screen, generatePalette)
+            return awesomeView(typefaces, fs.combine(SCRIPT_DIR, "assets/fonts"), awesomeLayout, screen, generatePalette)
+        end
     ),
     displayApi = display,
     browserSettings = browserSettings,

@@ -49,16 +49,17 @@ return function(core, options)
         return ([[<html><body><h1>Load Error</h1><p><b>URL:</b> %s</p><pre>%s</pre></body></html>]]):format(safeUrl, safeError)
     end
 
-    local function readResource(handle, previewPng)
-        if not previewPng then return handle.readAll() or "" end
+    local function readResource(handle, previewPng, inlineLimit)
+        if not previewPng and not inlineLimit then return handle.readAll() or "" end
         local prefix = handle.read(#core.pngSignature) or ""
         if prefix == core.pngSignature then
-            return prefix .. (handle.read(core.pngPreviewLimit - #prefix + 1) or "")
+            return prefix .. (handle.read((inlineLimit or core.pngPreviewLimit) - #prefix + 1) or "")
         end
+        if inlineLimit then return prefix end
         return prefix .. (handle.readAll() or "")
     end
 
-    local function readLocalFile(path, previewPng)
+    local function readLocalFile(path, previewPng, inlineLimit)
         if path == nil or path == "" then
             return nil, "Empty file path"
         end
@@ -68,11 +69,11 @@ return function(core, options)
         if fs.isDir(path) then
             return nil, "Path is a directory: " .. path
         end
-        local handle = fs.open(path, previewPng and "rb" or "r")
+        local handle = fs.open(path, (previewPng or inlineLimit) and "rb" or "r")
         if not handle then
             return nil, "Could not open file: " .. path
         end
-        local content = readResource(handle, previewPng)
+        local content = readResource(handle, previewPng, inlineLimit)
         handle.close()
         return content
     end
@@ -234,7 +235,8 @@ return function(core, options)
             return nil, nil, err or "Request failed"
         end
 
-        local body = readResource(response, requestOptions and requestOptions.previewPng)
+        local body = readResource(response, requestOptions and requestOptions.previewPng,
+            requestOptions and requestOptions.inlinePng)
         local headers = {}
         if response.getResponseHeaders then
             local headersOk, foundHeaders = pcall(response.getResponseHeaders)
@@ -770,7 +772,7 @@ return function(core, options)
                 if choice == "lite" then
                     choice = "standard"
                 end
-                if choice == "text_only" or choice == "standard" or choice == "advanced" then
+                if choice == "text_only" or choice == "standard" or choice == "advanced" or choice == "awesome" then
                     value = choice
                 end
             elseif key == "default_bg_color" then
@@ -889,14 +891,26 @@ return function(core, options)
                     :format(escapeHtml(defaultMonitorChoice))
         end
 
-        local browserEngineLevelChoice = trim(tostring(settings.browser_engine_level or "standard")):lower()
+        local browserEngineLevelChoice = trim(tostring(settings.browser_engine_level or "awesome")):lower()
         if browserEngineLevelChoice == "lite" then
             browserEngineLevelChoice = "standard"
         end
         if browserEngineLevelChoice ~= "text_only"
             and browserEngineLevelChoice ~= "standard"
-            and browserEngineLevelChoice ~= "advanced" then
-            browserEngineLevelChoice = "standard"
+            and browserEngineLevelChoice ~= "advanced" and browserEngineLevelChoice ~= "awesome" then
+            browserEngineLevelChoice = "awesome"
+        end
+        local graphicsAvailable = settings.graphics_available == "true"
+        local displayMode = settings.display_mode or "auto"
+        local modes, scales = {}, {}
+        for _, choice in ipairs({ { "auto", "Automatic" }, { "terminal", "Terminal" }, { "graphics", "Graphical" } }) do
+            modes[#modes + 1] = ('<option value="%s"%s%s>%s</option>'):format(choice[1],
+                displayMode == choice[1] and " selected" or "",
+                choice[1] == "graphics" and not graphicsAvailable and " disabled" or "", choice[2])
+        end
+        for _, scale in ipairs({ "100", "125", "150", "175", "200" }) do
+            scales[#scales + 1] = ('<option value="%s"%s>%s%%</option>'):format(scale,
+                (settings.window_scale or "100") == scale and " selected" or "", scale)
         end
 
         local defaultBgColorValue = trim(tostring(settings.default_bg_color or "black")):lower()
@@ -945,6 +959,11 @@ return function(core, options)
             BROWSER_ENGINE_LEVEL_RADIO_TEXT_ONLY_CHECKED = browserEngineLevelChoice == "text_only" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_STANDARD_CHECKED = browserEngineLevelChoice == "standard" and "checked" or "",
             BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED = browserEngineLevelChoice == "advanced" and "checked" or "",
+            BROWSER_ENGINE_LEVEL_RADIO_AWESOME_CHECKED = browserEngineLevelChoice == "awesome" and "checked" or "",
+            DISPLAY_MODE_OPTIONS = table.concat(modes),
+            WINDOW_SCALE_OPTIONS = table.concat(scales),
+            GRAPHICS_DISABLED = graphicsAvailable and "" or "disabled",
+            ACTIVE_DISPLAY_MODE = escapeHtml(settings.active_display_mode or "terminal"),
             DEFAULT_BG_COLOR_VALUE = escapeHtml(defaultBgColorValue),
             DEFAULT_FG_COLOR_VALUE = escapeHtml(defaultFgColorValue),
             BROWSER_DATA_DIR_VALUE = escapeHtml(browserDataDirValue),
@@ -1015,7 +1034,7 @@ return function(core, options)
                 end
                 return body, buildFileUrl(path, true), { ["Content-Type"] = "text/html" }, nil
             end
-            local body, err = readLocalFile(path, request.previewPng)
+            local body, err = readLocalFile(path, request.previewPng, request.inlinePng)
             if not body then
                 return nil, url, nil, err
             end

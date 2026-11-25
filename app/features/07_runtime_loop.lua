@@ -78,7 +78,13 @@ function appletMouseHandledByBrowser(eventName, x, y)
 end
 
 function handleEventWithoutApplet(event)
-    if event[1] == "browser_start_action" then
+    if event[1] == "browser_awesome_input" then
+        local link = displayManager.awesomeInput(event[2], event[3], event[4], event[5], event[6])
+        if link then
+            activeTab().urlFocus = false
+            navigate(link, true, false, activeTab())
+        end
+    elseif event[1] == "browser_start_action" then
         if event[2] == "address" then
             activeTab().focusedFormControl = nil
             focusUrlBar()

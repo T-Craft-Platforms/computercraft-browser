@@ -178,15 +178,22 @@ local function buildDocument(htmlText, baseUrl)
     local renderOptions = resolveRenderOptions(baseUrl)
     local root = parseHTML(htmlText)
     local nextNodeId = 0
+    local imageSources, hasForms = {}, false
     walkNode(root, function(node)
         if node.type == "element" then
             nextNodeId = nextNodeId + 1
             node._nodeId = nextNodeId
+            if node.tag == "form" or node.tag == "input" or node.tag == "select"
+                or node.tag == "textarea" then hasForms = true end
+            if node.tag == "img" and node.attrs and node.attrs.src and #imageSources < 24 then
+                imageSources[#imageSources + 1] = node.attrs.src
+            end
         end
     end)
     local cssBlocks, cssLinks, pageTitle = collectCssAndTitle(root)
 
     local rules = {}
+    local stylesheets = {}
     local order = 0
     local function addCss(css)
         local parsedRules
@@ -213,6 +220,7 @@ style, script, head, meta, link, title { display: none; }
 
     if renderOptions.allowDocumentCss then
         for _, css in ipairs(cssBlocks) do
+            stylesheets[#stylesheets + 1] = css:sub(1, 131072)
             addCss(css)
         end
 
@@ -230,6 +238,7 @@ style, script, head, meta, link, title { display: none; }
                     seen[cssUrl] = true
                     local cssBody, _, _, err = fetchTextResource(cssUrl, false)
                     if cssBody and not err then
+                        stylesheets[#stylesheets + 1] = cssBody:sub(1, 131072)
                         addCss(cssBody)
                         loaded = loaded + 1
                     end
@@ -259,9 +268,33 @@ style, script, head, meta, link, title { display: none; }
     local bodyStyle = bodyNode and computeStyle(bodyNode, htmlStyle, rules, renderOptions) or htmlStyle
 
     local pageBackground = bodyStyle.bg or htmlStyle.bg or renderOptions.defaultBackground
+    local inlineImages = {}
+    if renderOptions.awesome and not hasForms and #imageSources > 0 and core.parseUrl then
+        local base = core.parseUrl(baseUrl)
+        local seen, attempted = {}, 0
+        for _, source in ipairs(imageSources) do
+            if attempted >= 3 then break end
+            if source:gsub("[?#].*$", ""):lower():match("%.png$") then
+                local url = resolveRelativeUrl(baseUrl, source)
+                local parsed = core.parseUrl(url)
+                if not seen[url] and parsed and base and parsed.scheme == base.scheme
+                    and parsed.authority == base.authority
+                    and (parsed.scheme == "https" or parsed.scheme == "http" or parsed.scheme == "file") then
+                    seen[url], attempted = true, attempted + 1
+                    local limit = 256 * 1024
+                    local bytes = fetchTextResource(url, false, {inlinePng=limit})
+                    if bytes and #bytes <= limit and bytes:sub(1, #core.pngSignature) == core.pngSignature then
+                        inlineImages[url] = bytes
+                    end
+                end
+            end
+        end
+    end
     return {
         root = root,
         rules = rules,
+        stylesheets = stylesheets,
+        inlineImages = inlineImages,
         baseUrl = baseUrl,
         title = pageTitle or "",
         source = htmlText,

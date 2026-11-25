@@ -11,10 +11,14 @@ return function(screen, theme, width, height, cellWidth, rowHeight, top, address
     local usable = width - inset * 2
     local compact = cells < 43
     local contentHeight = height - top
-    local y = top + math.max(rowHeight, math.floor((contentHeight - rowHeight * 8) / 3))
+    local tight = contentHeight < rowHeight * 10
+    local gapY = tight and 5 or rowHeight
+    local y = top + (tight and math.min(9, math.max(3, math.floor(contentHeight / 12)))
+        or math.max(rowHeight, math.floor((contentHeight - rowHeight * 8) / 3)))
     local titleSize = compact and 24 or 32
+    if tight then titleSize = math.min(titleSize, math.max(10, math.floor(contentHeight * 0.22))) end
     local title = "CC Browser"
-    local addressSize = rowHeight * 2
+    local addressSize = tight and rowHeight + 6 or rowHeight * 2
     local actions = {}
 
     local function label(x, posY, text, size, color, bold)
@@ -43,27 +47,31 @@ return function(screen, theme, width, height, cellWidth, rowHeight, top, address
     screen.fillRect(0, top, width, contentHeight, theme.field)
     screen.fillRect(0, top, width, 1, theme.edge)
     local titleHeight = titleSize + 3
-    if contentHeight < rowHeight * 10 then
-        titleSize, titleHeight = rowHeight * 2, rowHeight * 2
+    if screen.measureText then
+        while titleSize > rowHeight and screen.measureText(title, {size=titleSize, bold=true}) > usable-cellWidth-2 do
+            titleSize = titleSize-1
+        end
+        titleHeight = titleSize+3
     end
     screen.fillRect(inset, y + 2, 3, titleSize - 2, theme.accent)
     label(inset + cellWidth + 2, y, title, titleSize, theme.ink, true)
 
-    y = y + titleHeight + rowHeight
+    y = y + titleHeight + gapY
     theme.round(screen, inset, y, usable, addressSize, addressFocused and theme.edge or theme.tab)
     theme.round(screen, inset + 1, y + 1, usable - 2, addressSize - 2, theme.toolbar)
-    local lensX, lensY = inset + 10, y + rowHeight - 1
+    local lensX, lensY = inset + 10, y + math.floor(addressSize / 2) - 2
     screen.circle(lensX, lensY, 3, theme.accent)
     screen.line(lensX + 2, lensY + 2, lensX + 5, lensY + 5, theme.accent)
-    label(inset + 21, y + math.floor(rowHeight / 2), compact and "Enter an address" or "Enter an address or file path",
+    local prompt = width < 205 and "Address" or compact and "Enter an address" or "Enter an address or file path"
+    label(inset + 21, y + math.floor((addressSize - rowHeight) / 2), prompt,
         rowHeight, theme.secondary)
     actions[#actions + 1] = { x = inset, y = y, w = usable, h = addressSize, target = "address" }
 
-    y = y + addressSize + rowHeight
+    y = y + addressSize + gapY
     local perRow = compact and 2 or 4
     local gap = cellWidth
     local cardWidth = math.floor((usable - gap * (perRow - 1)) / perRow)
-    local cardHeight = contentHeight < rowHeight * 10 and rowHeight or rowHeight + 6
+    local cardHeight = tight and rowHeight or rowHeight + 6
     for index, shortcut in ipairs(shortcuts) do
         local x = inset + ((index - 1) % perRow) * (cardWidth + gap)
         local cardY = y + math.floor((index - 1) / perRow) * (cardHeight + 4)
@@ -71,7 +79,7 @@ return function(screen, theme, width, height, cellWidth, rowHeight, top, address
             theme.round(screen, x, cardY, cardWidth, cardHeight, theme.tab)
             shape(shortcut.icon, x + 8, cardY + math.floor(cardHeight / 2), theme.accent)
             local labelY = cardY + math.floor((cardHeight - rowHeight) / 2)
-            local size = math.min(rowHeight, math.floor((cardWidth - 19) * 1.5 / #shortcut.label))
+            local size = math.max(1, math.min(rowHeight, math.floor((cardWidth - 19) * 1.5 / #shortcut.label)))
             screen.setClip(x + 16, cardY, cardWidth - 17, cardHeight)
             label(x + 16, labelY, shortcut.label, size, theme.ink)
             screen.resetClip()

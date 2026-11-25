@@ -158,7 +158,7 @@ local function normalizeEngineLevel(value)
     if lowered == "text" or lowered == "textonly" then
         lowered = "text_only"
     end
-    if lowered == "lite" then
+    if lowered == "lite" or lowered == "awesome" then
         lowered = "standard"
     end
     if lowered ~= "text_only" and lowered ~= "standard" and lowered ~= "advanced" then
@@ -207,7 +207,8 @@ local function isAboutPageUrl(url)
 end
 
 local function resolveRenderOptions(baseUrl)
-    local engineLevel = normalizeEngineLevel(type(getEngineLevel) == "function" and getEngineLevel() or "standard")
+    local requested = type(getEngineLevel) == "function" and getEngineLevel() or "standard"
+    local engineLevel = normalizeEngineLevel(requested)
     if isAboutPageUrl(baseUrl) then
         engineLevel = "advanced"
     end
@@ -226,6 +227,7 @@ local function resolveRenderOptions(baseUrl)
 
     return {
         engineLevel = engineLevel,
+        awesome = requested == "awesome",
         allowDocumentCss = isStandard or isAdvanced,
         allowExternalCss = isStandard or isAdvanced,
         cssColorOnly = isStandard,

@@ -33,11 +33,13 @@ local function drawRow(screen, x, y, text, foreground, background, fontSize)
     screen.richText(x, y, runs, { size = fontSize })
 end
 
-return function(api, chrome, startPage, createWindow, nativeTerm)
+return function(api, chrome, startPage, createWindow, nativeTerm, createAwesome)
     local screen, surface, target, layer, image, imageDocument
+    local hostSurface, deviceKind, zoom, resizeZoom
     local width, height, columns, rows, cellWidth, fontSize, contentWidth, chromeRowHeight
     local rowCache, chromeKey, cursor, paletteCache
     local scene, sceneKey, startActions, drawnTopRows
+    local awesome, awesomeTab, pageState
 
     local function releaseImage()
         if image then image.dispose() end
@@ -49,16 +51,19 @@ return function(api, chrome, startPage, createWindow, nativeTerm)
         releaseImage()
         if screen and screen.isOpen() then screen.close() end
         screen, surface, target, layer = nil, nil, nil, nil
+        hostSurface, deviceKind, zoom = nil, nil, nil
+        awesome, awesomeTab, pageState = nil, nil, nil
     end
 
     local function geometry()
         width, height = screen.getSize()
         if not width then return false end
-        fontSize = width >= 300 and height >= 120 and 12 or 9
-        chromeRowHeight = fontSize + 6
-        cellWidth = fontSize == 12 and 8 or 6
-        columns, rows = math.floor(width / cellWidth), math.floor((height - 12) / fontSize)
-        if columns < 24 or rows < 10 then return false end
+        local wanted = math.floor(9 * zoom / 100 + 0.5)
+        fontSize = math.min(wanted, math.floor(width / 11), math.floor((height - 8) / 7))
+        if fontSize < 7 then return false end
+        cellWidth = math.floor(fontSize * 2 / 3 + 0.5)
+        chromeRowHeight = fontSize + 4
+        columns, rows = math.floor(width / cellWidth), math.floor((height - 8) / fontSize)
         contentWidth = columns * cellWidth
         if surface then
             surface.reposition(1, 1, columns, rows)
@@ -74,33 +79,63 @@ return function(api, chrome, startPage, createWindow, nativeTerm)
         return true
     end
 
-    local function open(nextTarget)
+    local function idealSize(viewer, kind, cap)
+        local cols, lines
+        if viewer and viewer.getSize then cols, lines = viewer.getSize() end
+        local w, h = (cols or 51) * 6, (lines or 19) * 9
+        if kind == "monitor" then
+            local multiple = math.max(1, math.ceil(240 / w), math.ceil(129 / h))
+            w, h = w * multiple, h * multiple
+        end
+        local factor = math.min(1, (cap.maxWidth or w) / w, (cap.maxHeight or h) / h,
+            math.sqrt((cap.maxPixels or w * h) / (w * h)))
+        return math.max(1, math.floor(w * factor)), math.max(1, math.floor(h * factor))
+    end
+
+    local function resize(viewer, nextZoom)
+        if not screen or not screen.isOpen() then return false end
+        viewer = viewer or hostSurface
+        nextZoom = nextZoom or zoom
+        local cap = api.getCapabilities(target)
+        if not cap then return false end
+        local w, h = idealSize(viewer, deviceKind, cap)
+        local previousWidth, previousHeight = screen.getSize()
+        if (w ~= previousWidth or h ~= previousHeight) and screen.setSize then
+            screen.setSize(w, h)
+        end
+        hostSurface, zoom = viewer, nextZoom
+        local actualWidth, actualHeight = screen.getSize()
+        if width == actualWidth and height == actualHeight and nextZoom == resizeZoom then return true end
+        resizeZoom = nextZoom
+        return geometry()
+    end
+
+    local function open(nextTarget, viewer, nextZoom)
         if not (api and api.isSupported and api.open and api.getCapabilities and createWindow)
             or not api.isSupported(nextTarget) then return nil end
-        if target == nextTarget and screen.isOpen() then return surface end
+        nextZoom = nextZoom or 100
+        if target == nextTarget and screen.isOpen() then
+            if resize(viewer, nextZoom) then return surface end
+            close()
+            return nil
+        end
         local cap = api.getCapabilities(nextTarget)
         if not cap then return nil end
         local options = { presentMode = "manual", scaling = "fit" }
-        if cap.kind == "monitor" then
-            local aspect = cap.width / math.max(1, cap.height)
-            if aspect <= 0 then aspect = 1 end
-            options.width = 480
-            options.height = math.max(216, math.min(540, math.floor(options.width / aspect + 0.5)))
-            options.scaling = "stretch"
-        elseif cap.kind == "pocket" then
-            options.width, options.height = 234, 270
-        else
-            options.width, options.height = 512, 300
-        end
+        options.width, options.height = idealSize(viewer, cap.kind, cap)
+        if cap.kind == "monitor" then options.scaling = "stretch" end
         close()
         local failure
         screen, failure = api.open(nextTarget, options)
         if not screen then return nil, failure end
+        hostSurface, deviceKind, zoom = viewer, cap.kind, nextZoom
+        resizeZoom = zoom
         if not geometry() then
             close()
             return nil, { message = "The available graphics canvas is too small for the browser." }
         end
         target = nextTarget
+        if createAwesome then awesome = createAwesome(screen, api.generatePalette) end
         return surface
     end
 
@@ -144,7 +179,7 @@ return function(api, chrome, startPage, createWindow, nativeTerm)
         screen.drawImage(image, imageX, imageY, { width = fittedWidth, height = fittedHeight, dither = true })
     end
 
-    local function draw(state, tab)
+    local function draw(state, tab, engine)
         if not (screen and screen.isOpen()) then return end
         local changed = checkPalette(tab.applet and tab.applet.running)
         local topRows = state.fullscreen and 0 or 2
@@ -166,9 +201,17 @@ return function(api, chrome, startPage, createWindow, nativeTerm)
         local nextScene, nextKey
         if showScene and image then
             nextScene, nextKey = "image", topRows
-        elseif showScene and useChrome and not state.caretMode and tab.currentUrl == "about:home" and tab.document then
+        elseif showScene and useChrome and tab.currentUrl == "about:home" and tab.document then
             nextScene, nextKey = "home", tab.urlFocus
+        elseif showScene and awesome and engine == "awesome" and tab.document and not tab.document.browserPng
+            and not (tab.applet and tab.applet.running) and tab.currentUrl ~= "about:blank"
+            and awesome.prepare(tab, width, height - topPixels, zoom) then
+            local selection = state.caretMode and tab.awesomeSelection or {}
+            nextScene = "awesome"
+            nextKey = table.concat({tostring(tab.document), tab.awesomeScroll or 0, tostring(state.caretMode),
+                selection.anchor or 0, selection.index or 0}, "/")
         end
+        awesomeTab, pageState = tab, state
         local sceneChanged = scene ~= nextScene or sceneKey ~= nextKey
         if scene ~= nextScene then
             rowCache = {}
@@ -182,6 +225,9 @@ return function(api, chrome, startPage, createWindow, nativeTerm)
             changed = true
         elseif scene == "home" and sceneChanged then
             startActions = startPage(screen, chrome, width, height, cellWidth, fontSize, topPixels, tab.urlFocus)
+            changed = true
+        elseif scene == "awesome" and sceneChanged then
+            awesome.render(tab, width, height - topPixels, topPixels, state.caretMode)
             changed = true
         end
 
@@ -247,6 +293,10 @@ return function(api, chrome, startPage, createWindow, nativeTerm)
         end
         local topRows = drawnTopRows or 2
         local topPixels = topRows * chromeRowHeight
+        if scene == "awesome" and not (pageState.tabDrag or pageState.scrollbarDrag)
+            and (y >= topPixels or awesomeTab.awesomeThumb or (mapped == "mouse_up" and awesomeTab.awesomeDrag)) then
+            return { "browser_awesome_input", mapped, button, x, math.max(0, y - topPixels), name == "display_touch" }
+        end
         if scene == "home" and y >= topPixels and mapped == "mouse_click" then
             if button == 1 then
                 for _, area in ipairs(startActions or {}) do
@@ -272,10 +322,31 @@ return function(api, chrome, startPage, createWindow, nativeTerm)
         close = close,
         draw = draw,
         translate = translate,
-        resize = geometry,
+        resize = resize,
+        isSupported = function(name) return api ~= nil and api.isSupported ~= nil and api.isSupported(name) == true end,
         target = function() return target end,
         isOpen = function() return screen and screen.isOpen() end,
         supportsImages = function() return api and api.hasFeature and api.hasFeature("imageBytes") end,
+        awesomeInput = function(kind, button, x, y, touch)
+            if scene == "awesome" then
+                local pageHeight = height-(drawnTopRows or 2)*chromeRowHeight
+                local link = awesome.pointer(awesomeTab, kind, button, x, y, width, pageHeight, pageState.caretMode)
+                if touch then awesome.pointer(awesomeTab, "mouse_up", button, x, y, width, pageHeight) end
+                return link
+            end
+        end,
+        awesomeKey = function(key)
+            return scene == "awesome" and awesome.key(awesomeTab, key, height-(drawnTopRows or 2)*chromeRowHeight,
+                pageState.caretMode, pageState.shiftDown)
+        end,
+        awesomeSelectAll = function()
+            if scene ~= "awesome" then return false end
+            awesome.selectAll(awesomeTab)
+            return true
+        end,
+        awesomeText = function()
+            if scene == "awesome" then return awesome.text(awesomeTab) end
+        end,
         requestClipboard = function(operation, text)
             if target ~= "native" or not screen.requestHostClipboard then return nil end
             return screen.requestHostClipboard(operation, text)

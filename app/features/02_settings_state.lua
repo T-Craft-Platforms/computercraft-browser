@@ -12,6 +12,8 @@ function listBrowserSettings()
     copied.active_monitor = tostring(displayManager.getRuntimeDisplayTarget() or INTERNAL_MONITOR_ID)
     copied.available_monitors = table.concat(attachedMonitorNames(), ",")
     copied.monitor_override = tostring(displayManager.getStartupMonitorOverride() or "")
+    copied.active_display_mode = displayManager.displayMode()
+    copied.graphics_available = displayManager.graphicsSupported() and "true" or "false"
     copied.storage_ready = storageReady and "true" or "false"
     copied.storage_last_error = tostring(lastStorageError or "")
     local freeSpace = "unknown"
@@ -31,6 +33,8 @@ local MUTABLE_SETTING_KEYS = {
     fullscreen_mode = true,
     default_monitor = true,
     browser_engine_level = true,
+    display_mode = true,
+    window_scale = true,
     default_bg_color = true,
     default_fg_color = true,
 }
@@ -322,13 +326,30 @@ function setBrowserSetting(key, value)
     if normalized == "browser_engine_level" then
         local lowered = parseBrowserEngineLevel(value)
         if not lowered then
-            return false, "Invalid browser_engine_level value (expected text_only/standard/advanced)"
+            return false, "Invalid rendering engine"
         end
         browserSettings[normalized] = lowered
         if persistBrowserState then
             persistBrowserState()
         end
         log("setting updated: " .. tostring(normalized) .. "=" .. tostring(browserSettings[normalized]), LogLevel.info)
+        return true, nil
+    end
+    if normalized == "display_mode" or normalized == "window_scale" then
+        local parsed
+        if normalized == "display_mode" then
+            parsed = parseDisplayMode(value)
+            if parsed == "graphics" and not displayManager.graphicsSupported() then
+                return false, "Graphics are unavailable on this display"
+            end
+        else
+            parsed = parseWindowScale(value)
+        end
+        if not parsed then return false, "Invalid display setting" end
+        browserSettings[normalized] = parsed
+        if persistBrowserState then persistBrowserState() end
+        refreshDisplayTarget()
+        if rerenderAllTabs then rerenderAllTabs() end
         return true, nil
     end
     if normalized == "default_bg_color" or normalized == "default_fg_color" then
@@ -646,6 +667,10 @@ function applyDecodedConfig(decoded)
                     browserSettings[normalized] = normalizeMonitorChoice(rawValue)
                 elseif normalized == "browser_engine_level" then
                     browserSettings[normalized] = normalizeBrowserEngineLevel(rawValue)
+                elseif normalized == "display_mode" then
+                    browserSettings[normalized] = parseDisplayMode(rawValue) or "auto"
+                elseif normalized == "window_scale" then
+                    browserSettings[normalized] = parseWindowScale(rawValue) or "100"
                 elseif normalized == "default_bg_color" then
                     browserSettings[normalized] = normalizeSettingColorName(rawValue, "black")
                 elseif normalized == "default_fg_color" then

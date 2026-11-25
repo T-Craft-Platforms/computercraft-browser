@@ -43,12 +43,14 @@ return function(deps)
         end
 
         state.ui.closeBrowser = { x1 = 1, x2 = 1, y = 1 }
-        state.ui.back = { x1 = 1, x2 = 3, y = 2 }
-        state.ui.forward = { x1 = 5, x2 = 7, y = 2 }
-        state.ui.reload = { x1 = 9, x2 = 11, y = 2 }
-        state.ui.newTab = { x1 = math.max(1, w - 2), x2 = w, y = 1 }
+        local buttonWidth = w >= 31 and 3 or w >= 21 and 2 or 1
+        local stride = buttonWidth + 1
+        state.ui.back = { x1 = 1, x2 = buttonWidth, y = 2 }
+        state.ui.forward = { x1 = 1 + stride, x2 = buttonWidth + stride, y = 2 }
+        state.ui.reload = { x1 = 1 + 2 * stride, x2 = buttonWidth + 2 * stride, y = 2 }
+        state.ui.newTab = { x1 = math.max(1, w - math.max(2, buttonWidth) + 1), x2 = w, y = 1 }
         state.ui.menuButton = { x1 = state.ui.newTab.x1, x2 = state.ui.newTab.x2, y = 2 }
-        state.ui.url = { x1 = 13, x2 = state.ui.menuButton.x1 - 1, y = 2 }
+        state.ui.url = { x1 = 1 + 3 * stride, x2 = state.ui.menuButton.x1 - 1, y = 2 }
         state.ui.tabs = {}
         state.ui.tabClose = {}
 
@@ -62,7 +64,7 @@ return function(deps)
         if expandedIndex then
             state.ui.newTab = { x1 = w + 1, x2 = w, y = 1 }
             state.ui.menuButton = { x1 = state.ui.newTab.x1, x2 = state.ui.newTab.x2, y = 2 }
-            state.ui.url = { x1 = 13, x2 = state.ui.menuButton.x1 - 1, y = 2 }
+            state.ui.url.x2 = w
             local tabsEnd = w
             if tabsEnd >= tabsStart then
                 state.ui.tabs[1] = { x1 = tabsStart, x2 = tabsEnd, y = 1, index = expandedIndex }

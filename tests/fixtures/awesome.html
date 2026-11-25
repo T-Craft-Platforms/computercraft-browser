@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Trail journal</title>
+  <style>
+    :root { --ink: #173552; --accent: #1C6572; }
+    body { margin: 0; color: var(--ink); background: #ECDDCB; }
+    main { max-width: 520px; margin: auto; padding: 10px; }
+    header { background: #09233f; color: white; border-radius: 5px; padding: 10px; }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    header p { margin: 0; color: #D8EFED; font-size: 12px; }
+    .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 10px; }
+    .cards > article { background-color: #fff7ea; border: 1px solid #beab92; border-radius: 4px; padding: 7px; }
+    .cards h2 { color: var(--accent); font-size: 15px; }
+    .cards p { margin: 0; }
+    article[data-kind="night"] h2 { color: #74496a; }
+    footer { padding: 8px 0; }
+    @media (max-width: 260px) {
+      .cards { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>Trail journal</h1><p>Notes from the northern ridge.</p></header>
+    <section class="cards">
+      <article><h2>First light</h2><p>Fog settled across the valley.</p></article>
+      <article data-kind="night"><h2>After dusk</h2><p>The stars followed the river.</p></article>
+    </section>
+    <footer id="map"><a href="about:blank">Open the map</a></footer>
+  </main>
+</body>
+</html>

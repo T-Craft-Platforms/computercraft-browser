@@ -1647,6 +1647,7 @@ end
 
 function applyLoadedDocumentToTab(target, finalUrl, document, aboutUpdateIntervalMs, settingsStickyStatus)
     target.document = document
+    target.awesomeScroll, target.awesomeSelection, target.awesomeDrag, target.awesomeThumb = 0, nil, nil, nil
     target.currentUrl = finalUrl
     target.urlInput = finalUrl
     target.urlCursor = #target.urlInput + 1

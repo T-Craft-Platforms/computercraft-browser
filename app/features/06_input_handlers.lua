@@ -390,6 +390,7 @@ function handleUrlKey(key)
 end
 
 function handleNavigationKey(key)
+    if displayManager.awesomeKey(key) then return end
     local tab = activeTab()
     if state.caretMode then
         local w = pageContentWidth(tab)
@@ -496,6 +497,7 @@ function selectAllText()
     end
 
     if state.caretMode then
+        if displayManager.awesomeSelectAll() then return true end
         selectAllPageText(tab)
         return true
     end
@@ -539,7 +541,7 @@ function copySelectedText()
             end
         end
     elseif state.caretMode or tab.pageSelection then
-        text = getSelectedPageText(tab)
+        text = displayManager.awesomeText() or getSelectedPageText(tab)
     end
 
     if text == "" then
@@ -584,7 +586,7 @@ function cutSelectedText()
     end
 
     if state.caretMode or tab.pageSelection then
-        local text = getSelectedPageText(tab)
+        local text = displayManager.awesomeText() or getSelectedPageText(tab)
         if text == "" then
             return false
         end
@@ -691,6 +693,7 @@ function handleKeyDown(key, appletContext)
         if not state.caretMode then
             for _, tabItem in ipairs(state.tabs) do
                 clearPageSelection(tabItem)
+                tabItem.awesomeSelection, tabItem.awesomeDrag = nil, nil
             end
         end
         return

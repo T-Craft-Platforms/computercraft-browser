@@ -26,3 +26,4 @@ jobs:
             sudo apt-get install -y lua5.4
           fi
           lua5.4 tests/display.lua
+          lua5.4 tests/awesome.lua

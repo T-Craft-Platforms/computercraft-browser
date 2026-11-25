@@ -123,6 +123,21 @@
     </form>
 
     <h2>Display</h2>
+    <p>Current display: {{ACTIVE_DISPLAY_MODE}}</p>
+    <form class="settings-form" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="display_mode">
+      <label for="display-mode">Display mode</label>
+      <select id="display-mode" name="value">{{DISPLAY_MODE_OPTIONS}}</select>
+      <button type="submit">Save</button>
+    </form>
+    <form class="settings-form" method="get" action="about:settings">
+      <input name="action" type="hidden" value="set">
+      <input name="key" type="hidden" value="window_scale">
+      <label for="window-scale">Window scale</label>
+      <select id="window-scale" name="value" {{GRAPHICS_DISABLED}}>{{WINDOW_SCALE_OPTIONS}}</select>
+      <button type="submit" {{GRAPHICS_DISABLED}}>Save</button>
+    </form>
     <form id="set-fullscreen-mode-form" class="settings-form" name="set_fullscreen_mode" method="get" action="about:settings">
       <input name="action" type="hidden" value="set">
       <input name="key" type="hidden" value="fullscreen_mode">
@@ -155,10 +170,13 @@
       <label for="browser-engine-level-text-only">Text only (plain text only, no components, single text color)</label><br>
 
       <input id="browser-engine-level-standard" name="browser_engine_level_choice" type="radio" value="standard" {{BROWSER_ENGINE_LEVEL_RADIO_STANDARD_CHECKED}}>
-      <label for="browser-engine-level-standard">Standard (default: components + CSS colors, no CSS layout)</label><br>
+      <label for="browser-engine-level-standard">Standard</label><br>
 
       <input id="browser-engine-level-advanced" name="browser_engine_level_choice" type="radio" value="advanced" {{BROWSER_ENGINE_LEVEL_RADIO_ADVANCED_CHECKED}}>
-      <label for="browser-engine-level-advanced">Advanced (uncapped)</label><br>
+      <label for="browser-engine-level-advanced">Advanced (legacy text layout)</label><br>
+
+      <input id="browser-engine-level-awesome" name="browser_engine_level_choice" type="radio" value="awesome" {{BROWSER_ENGINE_LEVEL_RADIO_AWESOME_CHECKED}}>
+      <label for="browser-engine-level-awesome">Awesome (graphical HTML and CSS)</label><br>
 
       <button id="set-browser-engine-level-submit" name="submit_set_browser_engine_level" type="submit" value="1">Save</button>
     </form>
